@@ -155,11 +155,11 @@ export const OwnerLayout: React.FC = () => {
       >
         <div className="p-4 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2.5 overflow-hidden">
-            <span className="text-2xl">🍕</span>
+            <img src="/logo.svg" alt="Olive Pizza Owner" className="w-8 h-8 rounded-xl shadow-md border border-amber-500/20 shrink-0" />
             {!isSidebarCollapsed && (
               <div>
                 <h1 className="text-sm font-extrabold text-white leading-tight">OLIVE PIZZA</h1>
-                <span className="text-[10px] font-bold text-orange-400 uppercase tracking-wider">Owner Panel</span>
+                <span className="text-[10px] font-black text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30 uppercase tracking-wider">OWNER APP</span>
               </div>
             )}
           </div>

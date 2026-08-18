@@ -1,0 +1,23 @@
+{
+  "name": "Olive Pizza Owner",
+  "short_name": "Olive Owner",
+  "description": "Olive Pizza Standalone Restaurant Owner Management System",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0B0F17",
+  "theme_color": "#FF5722",
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
