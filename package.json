@@ -1,0 +1,11 @@
+{
+  "name": "olive-pizza-owner-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "test": "node verify_owner_app.cjs",
+    "install:all": "npm --prefix frontend install && npm --prefix backend install"
+  }
+}
