@@ -11,7 +11,8 @@ export const MAX_DELIVERY_RADIUS_KM = 15;
 export const OPENING_HOUR = 12; // 12 PM (noon)
 export const CLOSING_HOUR = 24; // 12 AM (midnight)
 
-export const PRODUCTION_BACKEND_URL = "https://olive-pizza.onrender.com";
+export const PRODUCTION_BACKEND_URL = "https://olive-pizza-owner.onrender.com";
+export const MAIN_SITE_BACKEND_URL = "https://olive-pizza.onrender.com";
 
 /**
  * Resilient API URL resolver:
