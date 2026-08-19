@@ -1,0 +1,186 @@
+name: Build Olive Pizza Owner APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Olive Pizza Owner APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # 1. Checkout repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Setup Node.js 22
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package.json'
+
+      # 3. Install frontend dependencies and build production web bundle
+      - name: Build Web Application
+        run: |
+          cd frontend
+          npm install
+          npm run build
+          cd ..
+
+      # 4. Setup Java 21 (required by Android Gradle Plugin)
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      # 5. Setup Android SDK
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 6. Sync Capacitor Web Directory with Android native project
+      - name: Sync Capacitor
+        run: |
+          mkdir -p dist
+          cp -r frontend/dist/* dist/ || true
+          npx --yes cap sync android
+
+      # 7. Cache Gradle files for faster builds
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # 8. Grant execute permission to Gradle wrapper
+      - name: Grant Gradle execute permissions
+        run: chmod +x android/gradlew
+
+      # 9. Automatic Versioning
+      - name: Inject Version into Gradle
+        run: |
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/g" android/app/build.gradle
+          sed -i "s/versionName \"1.0\"/versionName \"1.0.${{ github.run_number }}\"/g" android/app/build.gradle
+
+      # 10. Prepare Signing Keystore
+      - name: Prepare Keystore
+        env:
+          KEYSTORE_BASE64: '${{ secrets.KEYSTORE_BASE64 }}'
+        run: |
+          KEYSTORE_PATH="android/app/release.keystore"
+          VALID_KEYSTORE=false
+
+          # 1. Try decoding KEYSTORE_BASE64 secret if available
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > "$KEYSTORE_PATH.tmp" 2>/dev/null || true
+            if [ -s "$KEYSTORE_PATH.tmp" ]; then
+              if keytool -list -keystore "$KEYSTORE_PATH.tmp" -storepass olivepizza -alias olivepizza >/dev/null 2>&1; then
+                mv "$KEYSTORE_PATH.tmp" "$KEYSTORE_PATH"
+                VALID_KEYSTORE=true
+                echo "✅ Successfully decoded and verified keystore from KEYSTORE_BASE64 secret."
+              fi
+            fi
+            rm -f "$KEYSTORE_PATH.tmp"
+          fi
+
+          # 2. Check if committed keystore in repository is valid
+          if [ "$VALID_KEYSTORE" = false ] && [ -f "$KEYSTORE_PATH" ]; then
+            if keytool -list -keystore "$KEYSTORE_PATH" -storepass olivepizza -alias olivepizza >/dev/null 2>&1; then
+              VALID_KEYSTORE=true
+              echo "✅ Verified existing release.keystore from repository."
+            fi
+          fi
+
+          # 3. Fallback: Auto-generate valid release keystore on the fly
+          if [ "$VALID_KEYSTORE" = false ]; then
+            echo "⚠️ Generating a fresh release.keystore..."
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" \
+              -alias olivepizza \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass olivepizza \
+              -keypass olivepizza \
+              -dname "CN=OlivePizzaOwner, OU=OwnerApp, O=OlivePizza, L=Rajnandgaon, ST=Chhattisgarh, C=IN"
+            echo "✅ Auto-generated fresh release.keystore for APK signing."
+          fi
+
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass olivepizza -alias olivepizza \
+            && echo "✅ Keystore ready and verified — alias 'olivepizza' found."
+
+      # 11. Build Signed Release APK
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --no-daemon
+        working-directory: android
+
+      # 12. Verify the APK is properly signed
+      - name: Verify APK Signature
+        run: |
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK" ]; then
+            echo "❌ app-release.apk not found. Checking directory:"
+            ls android/app/build/outputs/apk/release/ || true
+            exit 1
+          fi
+          SIZE=$(du -sh "$APK" | cut -f1)
+          echo "✅ APK found ($SIZE)"
+          BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
+          $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner verify --verbose "$APK" \
+            && echo "✅ APK is properly signed." \
+            || { echo "❌ APK signature verification FAILED — APK is unsigned or corrupted."; exit 1; }
+
+      # 13. Rename APK for easy identification
+      - name: Rename APK
+        run: |
+          mkdir -p artifact
+          cp android/app/build/outputs/apk/release/app-release.apk artifact/OlivePizza-Owner-v1.0.apk
+
+      # 14. Upload APK as GitHub Actions artifact
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OlivePizza-Owner-Android-APK
+          path: artifact/OlivePizza-Owner-v1.0.apk
+          retention-days: 90
+
+      # 15. Publish as a GitHub Release
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: "Olive Pizza Owner Android App — Latest Build"
+          body: |
+            Latest automatic build of the **Olive Pizza Owner** Android APK.
+            Version Code: ${{ github.run_number }}
+
+            🍕 **Olive Pizza Owner Android App** — Native management APK built from source.
+
+            **Features included:**
+            - Real-time Order Audio Alarms & Emergency Overlays
+            - Menu, Products, Combos & Specials Management
+            - Cloudinary Media Library with AI Photo Generator
+            - Live Financial & Sales Reports with Google Sheets Sync
+            - Push Notification & SMS Diagnostic Center
+            - SDUI Visual Page Manager
+
+            **How to install:**
+            1. Download `OlivePizza-Owner-v1.0.apk` below.
+            2. On your Android device: **Settings → Security → Install unknown apps** → allow your browser/file manager.
+            3. Open the downloaded APK and tap **Install**.
+          files: artifact/OlivePizza-Owner-v1.0.apk
+          draft: false
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
