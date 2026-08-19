@@ -47,7 +47,7 @@ public class MainActivity extends BridgeActivity {
     public static final String CHANNEL_MARKETING          = "olive_marketing";
     public static final String CHANNEL_SYSTEM             = "olive_system";
 
-    private static final String BACKEND_URL = "https://olive-pizza-owner.onrender.com";
+    private static final String BACKEND_URL = "https://olivepizza-owner.onrender.com";
 
     private static final ExecutorService NETWORK_EXECUTOR = Executors.newSingleThreadExecutor();
     private static volatile boolean batteryPromptShown = false;

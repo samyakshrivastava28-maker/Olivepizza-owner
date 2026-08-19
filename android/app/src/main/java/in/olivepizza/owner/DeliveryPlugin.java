@@ -15,7 +15,7 @@ public class DeliveryPlugin extends Plugin {
     public void startTracking(PluginCall call) {
         String orderId = call.getString("orderId");
         String token = call.getString("token");
-        String apiUrl = call.getString("apiUrl", "https://olive-pizza-owner.onrender.com/api/delivery/location");
+        String apiUrl = call.getString("apiUrl", "https://olivepizza-owner.onrender.com/api/delivery/location");
 
         if (orderId == null || token == null) {
             call.reject("Must provide orderId and token");
