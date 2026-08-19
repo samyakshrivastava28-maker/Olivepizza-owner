@@ -3,7 +3,7 @@ let schedulerActive = false;
 export function initKeepAlive() {
   if (schedulerActive) return;
 
-  const url = process.env.RENDER_PUBLIC_URL || process.env.BACKEND_URL || process.env.OWNER_BACKEND_URL || 'https://olive-pizza-backend.onrender.com';
+  const url = process.env.RENDER_PUBLIC_URL || process.env.BACKEND_URL || process.env.OWNER_BACKEND_URL || 'https://olive-pizza.onrender.com';
   const pingUrl = url.endsWith('/keep-alive') ? url : `${url.replace(/\/$/, '')}/keep-alive`;
 
   console.log('⏰ Keep-Alive Scheduler Started');

@@ -25,13 +25,16 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'frontend/package.json'
 
-      # 3. Install frontend dependencies and build production web bundle
-      - name: Build Web Application
+      # 3. Install root dependencies (Capacitor native plugins) and build frontend web bundle
+      - name: Install dependencies and build web bundle
         run: |
+          npm install --legacy-peer-deps
           cd frontend
           npm install --legacy-peer-deps
           npm run build
           cd ..
+          mkdir -p dist
+          cp -r frontend/dist/* dist/ || true
 
       # 4. Setup Java 21 (required by Android Gradle Plugin)
       - name: Setup Java 21

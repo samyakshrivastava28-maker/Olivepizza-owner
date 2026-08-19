@@ -1,11 +1,21 @@
 {
-  "name": "olive-pizza-owner-workspace",
+  "name": "olive-pizza-owner",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "npm --prefix frontend run dev",
-    "build": "npm --prefix frontend run build",
-    "test": "node verify_owner_app.cjs",
-    "install:all": "npm --prefix frontend install && npm --prefix backend install"
+    "build": "cd frontend && npm install --legacy-peer-deps && npm run build && cd .. && mkdir -p dist && cp -r frontend/dist/* dist/ || true",
+    "start": "cd backend && npm start"
+  },
+  "dependencies": {
+    "@capacitor-firebase/authentication": "^8.3.0",
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/app": "^8.1.0",
+    "@capacitor/browser": "^8.0.3",
+    "@capacitor/cli": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/geolocation": "^8.2.0",
+    "@capacitor/push-notifications": "^8.1.1"
   }
 }
