@@ -1,0 +1,14 @@
+{
+  "appId": "in.olivepizza.owner",
+  "appName": "Olive Pizza Owner",
+  "webDir": "frontend/dist",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "plugins": {
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    }
+  }
+}

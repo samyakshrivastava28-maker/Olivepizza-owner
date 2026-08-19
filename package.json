@@ -17,5 +17,8 @@
     "@capacitor/core": "^8.4.1",
     "@capacitor/geolocation": "^8.2.0",
     "@capacitor/push-notifications": "^8.1.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
   }
 }
