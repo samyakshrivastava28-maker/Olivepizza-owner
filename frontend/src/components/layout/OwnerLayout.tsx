@@ -3,7 +3,8 @@ import { Outlet, NavLink, useLocation, useNavigate } from 'react-router';
 import { Header } from './Header';
 import { MobileNav } from './MobileNav';
 import { PizzaLoader } from '../ui/PizzaLoader';
-import { EmergencyOrderModal } from '../orders/EmergencyOrderModal';
+import OwnerAlertManager from '../owner/OwnerAlertManager';
+import NewOrderEmergencyOverlay from '../owner/NewOrderEmergencyOverlay';
 import { db } from '../../lib/firebase';
 import { collection, query, orderBy, limit, onSnapshot, doc, updateDoc } from 'firebase/firestore';
 import { Order } from '../../types/models';
@@ -259,6 +260,17 @@ export const OwnerLayout: React.FC = () => {
         </main>
         <MobileNav onOpenDrawer={() => setIsMobileDrawerOpen(true)} />
       </div>
+
+      {/* Persistent Order Alert Alarm & Interaction Manager */}
+      <OwnerAlertManager />
+
+      {/* Emergency Full-Screen Audio Overlay for New Pending Orders */}
+      {emergencyOrder && (
+        <NewOrderEmergencyOverlay
+          order={emergencyOrder}
+          onClose={() => setEmergencyOrder(null)}
+        />
+      )}
     </div>
   );
 };
