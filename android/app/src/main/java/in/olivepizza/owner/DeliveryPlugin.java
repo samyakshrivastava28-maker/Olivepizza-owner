@@ -1,4 +1,4 @@
-package com.olivepizza.app;
+package in.olivepizza.owner;
 
 import android.content.Context;
 import android.content.Intent;
@@ -15,7 +15,7 @@ public class DeliveryPlugin extends Plugin {
     public void startTracking(PluginCall call) {
         String orderId = call.getString("orderId");
         String token = call.getString("token");
-        String apiUrl = call.getString("apiUrl", "https://olive-pizza-backend.onrender.com/api/delivery/location");
+        String apiUrl = call.getString("apiUrl", "https://olive-pizza-owner.onrender.com/api/delivery/location");
 
         if (orderId == null || token == null) {
             call.reject("Must provide orderId and token");

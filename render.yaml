@@ -5,7 +5,7 @@ services:
     plan: free
     rootDir: backend
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: npx tsx server.ts
     healthCheckPath: /api/heartbeat
     envVars:
       - key: PORT

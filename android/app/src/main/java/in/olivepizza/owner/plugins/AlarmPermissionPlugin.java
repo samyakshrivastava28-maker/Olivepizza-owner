@@ -1,4 +1,4 @@
-package com.olivepizza.app.plugins;
+package in.olivepizza.owner.plugins;
 
 import android.content.Context;
 import android.os.Build;
@@ -9,7 +9,7 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
-import com.olivepizza.app.MainActivity;
+import in.olivepizza.owner.MainActivity;
 
 @CapacitorPlugin(name = "AlarmPermission")
 public class AlarmPermissionPlugin extends Plugin {

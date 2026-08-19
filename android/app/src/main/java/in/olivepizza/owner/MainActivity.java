@@ -1,4 +1,4 @@
-package com.olivepizza.app;
+package in.olivepizza.owner;
 
 import android.app.Activity;
 import android.app.NotificationChannel;
@@ -22,7 +22,8 @@ import com.google.android.gms.tasks.Task;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.auth.GetTokenResult;
-import com.olivepizza.app.plugins.TruecallerPlugin;
+import in.olivepizza.owner.plugins.TruecallerPlugin;
+import in.olivepizza.owner.plugins.AlarmPermissionPlugin;
 
 import org.json.JSONObject;
 
@@ -33,26 +34,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Olive Pizza — Main Activity
- *
- * CRITICAL STARTUP DUTIES (run in onCreate, BEFORE super.onCreate so channels exist
- * before any FCM message could arrive):
- *   1. Create ALL notification channels at startup (never lazily).
- *   2. Register the FCM token natively with the backend (so killed-app delivery has
- *      a valid token even when the web JS bridge isn't running).
- *   3. Prompt owner/delivery users to disable battery optimization (Doze mode defers
- *      high-priority FCM on most OEM Android devices).
- *
- * The channel IDs created here MUST match:
- *   - AndroidManifest meta-data "com.google.firebase.messaging.default_notification_channel_id"
- *   - The channelId sent in the backend payload (NotificationTemplates.ts)
- *   - The channelId used in OliveMessagingService.showNativeNotification()
+ * Olive Pizza Owner — Main Activity
  */
 public class MainActivity extends BridgeActivity {
     private static final String TAG = "OliveMainActivity";
 
-    // ── Canonical channel IDs (NO suffix variants) ─────────────────────────────
-    // These match NotificationTemplates.ANDROID_CHANNELS and the manifest default.
     public static final String CHANNEL_ORDER_NEW           = "olive_order_new";
     public static final String CHANNEL_ORDER_STATUS       = "olive_order_status";
     public static final String CHANNEL_ORDER_COMPLETED    = "olive_order_completed";
@@ -61,8 +47,7 @@ public class MainActivity extends BridgeActivity {
     public static final String CHANNEL_MARKETING          = "olive_marketing";
     public static final String CHANNEL_SYSTEM             = "olive_system";
 
-    // Backend URL — must match vercel.json rewrite target + .env RENDER_PUBLIC_URL
-    private static final String BACKEND_URL = "https://olive-pizza-backend.onrender.com";
+    private static final String BACKEND_URL = "https://olive-pizza-owner.onrender.com";
 
     private static final ExecutorService NETWORK_EXECUTOR = Executors.newSingleThreadExecutor();
     private static volatile boolean batteryPromptShown = false;
@@ -72,15 +57,13 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        // 1. Create STANDARD notification channels (customer-safe) at startup
         createStandardNotificationChannels();
 
         registerPlugin(TruecallerPlugin.class);
         registerPlugin(DeliveryPlugin.class);
-        registerPlugin(com.olivepizza.app.plugins.AlarmPermissionPlugin.class);
+        registerPlugin(AlarmPermissionPlugin.class);
         super.onCreate(savedInstanceState);
 
-        // 2. Register FCM token natively.
         registerFcmTokenNatively();
     }
 
@@ -104,12 +87,6 @@ public class MainActivity extends BridgeActivity {
         return true;
     }
 
-    /**
-     * Role-Gated Alarm Permission Initialization
-     * ONLY invoked when the logged-in user's verified role is owner or delivery_partner.
-     * Customers will NEVER receive full-screen alarm prompts or staff channels.
-     * Tracks prompt status to avoid repeated intrusive popups.
-     */
     public static void setupAlarmPermissionsForStaffRole(Activity activity, String role, boolean forcePrompt) {
         if (activity == null) return;
         if (!isStaffRole(role)) {
@@ -117,19 +94,16 @@ public class MainActivity extends BridgeActivity {
             return;
         }
 
-        // 1. Create Alarm-grade channels (MAX importance, USAGE_ALARM, bypassDnd)
         createStaffAlarmChannels(activity);
 
         android.content.SharedPreferences prefs = activity.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
 
-        // 2. Prompt for battery-optimization exemption (once per staff role, unless forced)
         String batteryKey = KEY_BATTERY_PROMPT_PREFIX + (role != null ? role.toLowerCase() : "staff");
         if ((forcePrompt || !prefs.getBoolean(batteryKey, false)) && !isIgnoringBatteryOptimizations(activity)) {
             promptBatteryOptimizationExemption(activity);
             prefs.edit().putBoolean(batteryKey, true).apply();
         }
 
-        // 3. Android 14+ Full-Screen Intent Permission Prompt (once per staff role, unless forced)
         String fsKey = KEY_FULLSCREEN_PROMPT_PREFIX + (role != null ? role.toLowerCase() : "staff");
         if ((forcePrompt || !prefs.getBoolean(fsKey, false)) && !canUseFullScreenIntent(activity)) {
             requestFullScreenIntentPermission(activity);
@@ -138,7 +112,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     public static void requestFullScreenIntentPermission(Activity activity) {
-        if (Build.VERSION.SDK_INT >= 34 && activity != null) { // Android 14+ (API 34)
+        if (Build.VERSION.SDK_INT >= 34 && activity != null) {
             if (!canUseFullScreenIntent(activity)) {
                 Log.w(TAG, "Launching ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT for staff role");
                 try {
@@ -153,24 +127,19 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // NOTIFICATION CHANNELS — Role-Gated Separation
-    // ═══════════════════════════════════════════════════════════════════════════
-
     private void createStandardNotificationChannels() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
 
         NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
 
-        // Customer-safe standard channels
         createChannel(nm, CHANNEL_ORDER_STATUS,     "Olive Order Updates",      NotificationManager.IMPORTANCE_HIGH,    "soft_pop",        false, AudioAttributes.USAGE_NOTIFICATION);
         createChannel(nm, CHANNEL_ORDER_COMPLETED,  "Olive Order Complete",     NotificationManager.IMPORTANCE_HIGH,    "success_ding",    false, AudioAttributes.USAGE_NOTIFICATION);
         createChannel(nm, CHANNEL_DELIVERY_UPDATES, "Olive Delivery Updates",   NotificationManager.IMPORTANCE_HIGH,    "default",         false, AudioAttributes.USAGE_NOTIFICATION);
         createChannel(nm, CHANNEL_MARKETING,        "Olive Promotions",         NotificationManager.IMPORTANCE_DEFAULT, "soft_pop",        false, AudioAttributes.USAGE_NOTIFICATION);
         createChannel(nm, CHANNEL_SYSTEM,          "Olive System Alerts",       NotificationManager.IMPORTANCE_HIGH,    "system_alert",    false, AudioAttributes.USAGE_NOTIFICATION);
 
-        Log.i(TAG, "✅ Standard customer notification channels created.");
+        Log.i(TAG, "Standard notification channels created.");
     }
 
     public static void createStaffAlarmChannels(Context context) {
@@ -179,11 +148,10 @@ public class MainActivity extends BridgeActivity {
         NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
 
-        // Alarm channels for owner & delivery partner ONLY
         createChannelStatic(context, nm, CHANNEL_ORDER_NEW, "Olive New Orders", NotificationManager.IMPORTANCE_MAX, "order_alert", true, AudioAttributes.USAGE_ALARM);
         createChannelStatic(context, nm, CHANNEL_DELIVERY_ASSIGN, "Olive Delivery Assign", NotificationManager.IMPORTANCE_MAX, "delivery_chime", true, AudioAttributes.USAGE_ALARM);
 
-        Log.i(TAG, "✅ Staff alarm notification channels created.");
+        Log.i(TAG, "Staff alarm notification channels created.");
     }
 
     private static void createChannelStatic(Context context, NotificationManager nm, String id, String name,
@@ -221,12 +189,11 @@ public class MainActivity extends BridgeActivity {
     private void createChannel(NotificationManager nm, String id, String name,
                                 int importance, String soundRawName,
                                 boolean bypassDnd, int audioUsage) {
-        if (nm.getNotificationChannel(id) != null) return; // already exists
+        if (nm.getNotificationChannel(id) != null) return;
 
         NotificationChannel channel = new NotificationChannel(id, name, importance);
         channel.enableVibration(true);
 
-        // Sound
         Uri soundUri = null;
         if (soundRawName != null && !"default".equals(soundRawName)) {
             int resId = getResources().getIdentifier(soundRawName, "raw", getPackageName());
@@ -252,23 +219,12 @@ public class MainActivity extends BridgeActivity {
             }
         }
 
-        // Show badge for new orders + delivery assignments
         channel.setShowBadge(importance >= NotificationManager.IMPORTANCE_HIGH);
 
         nm.createNotificationChannel(channel);
         Log.d(TAG, "Created channel: " + id + " (importance=" + importance + ")");
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // NATIVE FCM TOKEN REGISTRATION
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Fetches the FCM token natively and POSTs it to the backend.
-     * Requires a signed-in Firebase user (for the ID token auth header).
-     * If no user is signed in yet, the web JS bridge will handle registration
-     * once the user logs in.
-     */
     private void registerFcmTokenNatively() {
         FirebaseMessaging.getInstance().getToken()
                 .addOnCompleteListener(new OnCompleteListener<String>() {
@@ -285,20 +241,10 @@ public class MainActivity extends BridgeActivity {
                 });
     }
 
-    /**
-     * Static helper — POSTs the FCM token to /api/notifications/token using the
-     * current Firebase user's ID token. Called from:
-     *   - MainActivity.registerFcmTokenNatively() (app startup)
-     *   - OliveMessagingService.onNewToken() (token refresh while app is dead)
-     *
-     * @param context  any context (used for device identification)
-     * @param token    the FCM registration token
-     * @param oldToken previous token if refreshing (null on first registration)
-     */
     public static void registerTokenNatively(Context context, String token, String oldToken) {
         FirebaseUser user = FirebaseAuth.getInstance().getCurrentUser();
         if (user == null) {
-            Log.d(TAG, "No signed-in Firebase user — skipping native token registration (web bridge will handle it).");
+            Log.d(TAG, "No signed-in Firebase user — skipping native token registration.");
             return;
         }
         final String uid = user.getUid();
@@ -341,7 +287,7 @@ public class MainActivity extends BridgeActivity {
 
             int code = conn.getResponseCode();
             if (code >= 200 && code < 300) {
-                Log.i(TAG, "✅ Native FCM token registered with backend (uid=" + uid + ", code=" + code + ")");
+                Log.i(TAG, "Native FCM token registered with backend (uid=" + uid + ", code=" + code + ")");
             } else {
                 Log.w(TAG, "Native token registration HTTP " + code + " for uid=" + uid);
             }
@@ -352,19 +298,6 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // BATTERY OPTIMIZATION EXEMPTION
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Prompts the user to disable battery optimization for the app.
-     * This is critical for killed-app delivery: Doze mode defers high-priority FCM
-     * data messages on most OEM Android devices (Xiaomi, Oppo, Vivo, Samsung).
-     *
-     * The prompt is shown once per install. The web JS layer sets a SharedPreferences
-     * flag "battery_prompt_role_set" once the user's role is known (owner/delivery),
-     * so we only prompt for roles that need emergency alarms.
-     */
     private static void promptBatteryOptimizationExemption(Activity activity) {
         if (batteryPromptShown || activity == null) return;
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
@@ -372,7 +305,6 @@ public class MainActivity extends BridgeActivity {
         PowerManager pm = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
         if (pm == null) return;
 
-        // Already exempted — nothing to do
         if (pm.isIgnoringBatteryOptimizations(activity.getPackageName())) {
             Log.d(TAG, "App already exempted from battery optimization.");
             return;
@@ -384,7 +316,7 @@ public class MainActivity extends BridgeActivity {
             intent.setData(Uri.parse("package:" + activity.getPackageName()));
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             activity.startActivity(intent);
-            Toast.makeText(activity, "Please allow Olive Pizza to run in background for order alarms", Toast.LENGTH_LONG).show();
+            Toast.makeText(activity, "Please allow Olive Pizza Owner to run in background for order alarms", Toast.LENGTH_LONG).show();
             Log.i(TAG, "Battery optimization exemption prompt shown for staff role.");
         } catch (Exception e) {
             Log.w(TAG, "Could not show battery optimization prompt: " + e.getMessage());

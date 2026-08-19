@@ -1,4 +1,4 @@
-package com.olivepizza.app;
+package in.olivepizza.owner;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -41,21 +41,17 @@ public class DeliveryLocationService extends Service {
     private String orderId;
     private String token;
     private String apiUrl;
-    
-    // For local queue
-    private String lastLocationCache = null;
 
     @Override
     public void onCreate() {
         super.onCreate();
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
         createNotificationChannel();
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "STOP_SERVICE".equals(intent.getAction())) {
-            stopLocationUpdates();
             stopForeground(true);
             stopSelf();
             return START_NOT_STICKY;
@@ -65,12 +61,10 @@ public class DeliveryLocationService extends Service {
             orderId = intent.getStringExtra("orderId");
             token = intent.getStringExtra("token");
             apiUrl = intent.getStringExtra("apiUrl");
-            if (apiUrl == null) {
-                apiUrl = "https://olive-pizza-backend.onrender.com/api/delivery/location";
-            }
         }
 
-        Notification notification = createNotification();
+        Notification notification = buildNotification();
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION);
         } else {
@@ -78,13 +72,14 @@ public class DeliveryLocationService extends Service {
         }
 
         startLocationUpdates();
+
         return START_STICKY;
     }
 
     private void startLocationUpdates() {
-        LocationRequest locationRequest = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 3000)
-                .setMinUpdateIntervalMillis(1500)
-                .setMinUpdateDistanceMeters(0) // Exact real-time tracking
+        LocationRequest locationRequest = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000)
+                .setMinUpdateIntervalMillis(3000)
+                .setMinUpdateDistanceMeters(5)
                 .build();
 
         locationCallback = new LocationCallback() {
@@ -92,8 +87,9 @@ public class DeliveryLocationService extends Service {
             public void onLocationResult(LocationResult locationResult) {
                 if (locationResult == null) return;
                 for (Location location : locationResult.getLocations()) {
-                    Log.d(TAG, "Location updated: " + location.getLatitude() + ", " + location.getLongitude());
-                    sendLocationToBackend(location);
+                    if (location != null) {
+                        sendLocationToBackend(location);
+                    }
                 }
             }
         };
@@ -101,93 +97,94 @@ public class DeliveryLocationService extends Service {
         try {
             fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper());
         } catch (SecurityException e) {
-            Log.e(TAG, "Location permission not granted", e);
-        }
-    }
-
-    private void stopLocationUpdates() {
-        if (fusedLocationClient != null && locationCallback != null) {
-            fusedLocationClient.removeLocationUpdates(locationCallback);
+            Log.e(TAG, "Location permission missing for updates", e);
         }
     }
 
     private void sendLocationToBackend(Location location) {
-        if (token == null) return;
+        if (apiUrl == null || token == null || orderId == null) return;
 
         new Thread(() -> {
-            HttpURLConnection conn = null;
             try {
-                URL url = new URL(apiUrl); 
-                
-                conn = (HttpURLConnection) url.openConnection();
+                URL url = new URL(apiUrl);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
-                conn.setRequestProperty("Content-Type", "application/json; utf-8");
-                conn.setRequestProperty("Accept", "application/json");
+                conn.setRequestProperty("Content-Type", "application/json");
                 conn.setRequestProperty("Authorization", "Bearer " + token);
                 conn.setDoOutput(true);
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
 
-                JSONObject jsonParam = new JSONObject();
-                if (orderId != null) {
-                    jsonParam.put("orderId", orderId);
-                }
-                jsonParam.put("lat", location.getLatitude());
-                jsonParam.put("lng", location.getLongitude());
-                jsonParam.put("accuracy", location.getAccuracy());
-                jsonParam.put("speed", location.getSpeed());
-                jsonParam.put("heading", location.getBearing());
-                jsonParam.put("timestamp", System.currentTimeMillis());
+                JSONObject payload = new JSONObject();
+                payload.put("orderId", orderId);
+                payload.put("lat", location.getLatitude());
+                payload.put("lng", location.getLongitude());
+                payload.put("accuracy", location.getAccuracy());
+                payload.put("bearing", location.getBearing());
+                payload.put("speed", location.getSpeed());
+                payload.put("timestamp", System.currentTimeMillis());
 
-                String payload = jsonParam.toString();
+                byte[] out = payload.toString().getBytes(StandardCharsets.UTF_8);
                 try (OutputStream os = conn.getOutputStream()) {
-                    byte[] input = payload.getBytes(StandardCharsets.UTF_8);
-                    os.write(input, 0, input.length);
+                    os.write(out);
                 }
 
-                int code = conn.getResponseCode();
-                Log.d(TAG, "Location update response code: " + code);
-                
-                // Note: Offline queueing could be implemented here by catching exceptions and storing `payload`.
-
+                int responseCode = conn.getResponseCode();
+                if (responseCode == 200) {
+                    Log.d(TAG, "Location pushed successfully: " + location.getLatitude() + ", " + location.getLongitude());
+                } else {
+                    Log.w(TAG, "Location push failed with code: " + responseCode);
+                }
+                conn.disconnect();
             } catch (Exception e) {
-                Log.e(TAG, "Error sending location", e);
-            } finally {
-                if (conn != null) {
-                    conn.disconnect();
-                }
+                Log.e(TAG, "Error pushing location to backend", e);
             }
         }).start();
     }
 
-    private Notification createNotification() {
-        Intent intent = new Intent(this, MainActivity.class);
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    private Notification buildNotification() {
+        Intent notificationIntent = new Intent(this, MainActivity.class);
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+                this, 0, notificationIntent,
+                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+        );
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle("Olive Pizza Delivery")
-                .setContentText("Tracking delivery location in background...")
-                .setSmallIcon(getResources().getIdentifier("ic_stat_icon_config_sample", "drawable", getPackageName()))
+                .setContentText("Sharing real-time delivery location...")
+                .setSmallIcon(android.R.drawable.ic_menu_mylocation)
                 .setContentIntent(pendingIntent)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .build();
     }
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel serviceChannel = new NotificationChannel(
+            NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Delivery Tracking Channel",
+                    "Live Delivery Tracking",
                     NotificationManager.IMPORTANCE_LOW
             );
+            channel.setDescription("Shows active location tracking status for deliveries");
             NotificationManager manager = getSystemService(NotificationManager.class);
             if (manager != null) {
-                manager.createNotificationChannel(serviceChannel);
+                manager.createNotificationChannel(channel);
             }
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        if (fusedLocationClient != null && locationCallback != null) {
+            fusedLocationClient.removeLocationUpdates(locationCallback);
         }
     }
 
     @Nullable
     @Override
     public IBinder onBind(Intent intent) {
-        return null; // We don't provide binding, so return null
+        return null;
     }
 }

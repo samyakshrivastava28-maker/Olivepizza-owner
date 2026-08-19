@@ -1,4 +1,4 @@
-package com.olivepizza.app.plugins;
+package in.olivepizza.owner.plugins;
 
 import android.content.Intent;
 import android.graphics.Color;
@@ -64,7 +64,6 @@ public class TruecallerPlugin extends Plugin {
         @Override
         public void onVerificationRequired(@Nullable TrueError trueError) {
             if (savedCall != null) {
-                // If the user does not have the app installed or requires SMS verification
                 savedCall.reject("VerificationRequired", "404");
                 savedCall = null;
             }
