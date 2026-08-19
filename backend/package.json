@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch server.ts",
     "build": "tsc",
-    "start": "tsx server.ts"
+    "start": "npx tsx server.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1104.0",
@@ -28,6 +28,8 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^9.0.5",
     "pg": "^8.16.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -37,8 +39,6 @@
     "@types/node-cron": "^3.0.11",
     "@types/nodemailer": "^6.4.17",
     "@types/pg": "^8.11.11",
-    "@types/ws": "^8.5.14",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "@types/ws": "^8.5.14"
   }
 }

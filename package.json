@@ -4,9 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "npm --prefix frontend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "dev:backend": "npm --prefix backend run dev",
+    "build:frontend": "cd frontend && npm install --legacy-peer-deps && npm run build",
+    "build:backend": "cd backend && npm install",
     "build": "cd frontend && npm install --legacy-peer-deps && npm run build && cd .. && mkdir -p dist && cp -r frontend/dist/* dist/ || true",
-    "start": "cd backend && npm start"
+    "start": "cd backend && npm install && npx tsx server.ts"
   },
   "dependencies": {
     "@capacitor-firebase/authentication": "^8.3.0",
@@ -16,9 +19,8 @@
     "@capacitor/cli": "^8.4.1",
     "@capacitor/core": "^8.4.1",
     "@capacitor/geolocation": "^8.2.0",
-    "@capacitor/push-notifications": "^8.1.1"
-  },
-  "devDependencies": {
+    "@capacitor/push-notifications": "^8.1.1",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
 }
