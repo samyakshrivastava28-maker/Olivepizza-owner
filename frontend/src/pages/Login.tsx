@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router';
 import { auth, googleProvider } from '../lib/firebase';
-import { signInWithEmailAndPassword, signInWithPopup } from 'firebase/auth';
+import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, GoogleAuthProvider } from 'firebase/auth';
 import { useAuthStore, isAuthorizedOwnerEmail } from '../lib/store';
 import { Lock, Mail, AlertCircle, ArrowRight } from 'lucide-react';
+import { Capacitor } from '@capacitor/core';
 import toast from 'react-hot-toast';
 
 export default function Login() {
@@ -48,7 +49,12 @@ export default function Login() {
       const res = await signInWithEmailAndPassword(auth, email.trim(), password);
       validateAndAuthenticate(res.user);
     } catch (err: any) {
-      const msg = err.code === 'auth/invalid-credential' ? 'Invalid email or password.' : err.message;
+      let msg = err.message;
+      if (err.code === 'auth/invalid-credential') {
+        msg = 'Invalid email or password.';
+      } else if (err.code === 'auth/network-request-failed') {
+        msg = 'Network connection failed. Please check your internet or retry.';
+      }
       setError(msg);
       toast.error(msg);
     } finally {
@@ -60,12 +66,28 @@ export default function Login() {
     setError(null);
     setLoading(true);
     try {
-      const res = await signInWithPopup(auth, googleProvider);
-      validateAndAuthenticate(res.user);
+      if (Capacitor.isNativePlatform()) {
+        const { FirebaseAuthentication } = await import('@capacitor-firebase/authentication');
+        const nativeResult = await FirebaseAuthentication.signInWithGoogle();
+        if (nativeResult.credential?.idToken) {
+          const credential = GoogleAuthProvider.credential(nativeResult.credential.idToken);
+          const res = await signInWithCredential(auth, credential);
+          validateAndAuthenticate(res.user);
+        } else {
+          throw new Error('Google Sign-In failed on device.');
+        }
+      } else {
+        const res = await signInWithPopup(auth, googleProvider);
+        validateAndAuthenticate(res.user);
+      }
     } catch (err: any) {
       if (err.code !== 'auth/popup-closed-by-user') {
-        setError(err.message);
-        toast.error(err.message);
+        let msg = err.message || 'Authentication error';
+        if (err.code === 'auth/network-request-failed') {
+          msg = 'Network connection failed. Please check internet connection.';
+        }
+        setError(msg);
+        toast.error(msg);
       }
     } finally {
       setLoading(false);
