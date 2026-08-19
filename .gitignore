@@ -16,6 +16,9 @@ dist-ssr/
 credentials/
 serviceAccountKey.json
 
+# Keystores (Committed to allow seamless GitHub Actions builds)
+!*.keystore
+
 # Logs
 logs/
 *.log
@@ -34,6 +37,10 @@ pnpm-debug.log*
 *.sln
 *.sw?
 
-# Mobile build artifacts
-android/
-ios/
+# Android build outputs
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+*.apk
+*.aab

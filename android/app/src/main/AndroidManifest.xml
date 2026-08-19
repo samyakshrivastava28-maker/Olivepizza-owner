@@ -1,0 +1,140 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".AlarmActivity"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:screenOrientation="portrait"
+            android:exported="true"
+            android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+
+            <!--
+                Intent-filter for the FCM `clickAction: 'olive_alarm'`.
+                When the app is KILLED and FCM auto-displays a notification via the
+                system tray (using the notification block we now include for continuous
+                alarms), tapping that notification launches AlarmActivity directly —
+                triggering the full-screen continuous ringtone alarm without requiring
+                the app process to be alive first.
+            -->
+            <intent-filter>
+                <action android:name="olive_alarm" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+
+        <!--
+            FCM Default Channel — customer-safe high-importance channel.
+            Staff channels (olive_order_new) are selected explicitly in staff payloads.
+        -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="olive_order_status" />
+
+        <!-- Truecaller SDK -->
+        <meta-data android:name="com.truecaller.android.sdk.ClientId" android:value="um2vaxqdcr3nroydqvyg_hahzikmqrla8w_yxiptsry" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Remove Capacitor Default Messaging Service to prevent conflict -->
+        <service
+            android:name="com.capacitorjs.plugins.pushnotifications.MessagingService"
+            tools:node="remove" />
+
+        <!-- Custom FirebaseMessagingService for Background Alarm -->
+        <service
+            android:name=".OliveMessagingService"
+            android:directBootAware="true"
+            android:exported="true">
+            <intent-filter android:priority="999">
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Custom Foreground Service for Delivery Partner Location Tracking -->
+        <service
+            android:name=".DeliveryLocationService"
+            android:foregroundServiceType="location"
+            android:exported="false" />
+
+        <!-- Receiver for Notification Action Buttons -->
+        <receiver
+            android:name=".NotificationActionReceiver"
+            android:directBootAware="true"
+            android:exported="false" />
+
+    </application>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         PERMISSIONS — Production Grade
+         ═══════════════════════════════════════════════════════════════ -->
+
+    <!-- Network -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Push Notifications (Android 13 / API 33+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Wake device for critical alerts (new orders ringing) -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- Full-screen intent: notification appears over the lock screen -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
+
+    <!-- Foreground Service for sustained work (GPS, audio) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+    <!-- Re-send notifications after device reboot -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Location — Foreground precise (required for background location below) -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!-- Location — Background (delivery partner tracking when app closed)
+         Android 10+ (API 29+). Must be requested separately, after foreground is granted. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!-- Battery Optimization — allow directing user to disable battery restriction -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Camera (profile photos, order images) -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Phone State (Truecaller) -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+</manifest>
