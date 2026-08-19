@@ -23,6 +23,7 @@ import ComboBuilder from '../components/owner/ComboBuilder';
 import InlineAIImageGenerator from '../components/owner/InlineAIImageGenerator';
 import UnifiedImageSelectorHub from '../components/owner/UnifiedImageSelectorHub';
 import AIDeepSeekAssistantChatbox from '../components/owner/AIDeepSeekAssistantChatbox';
+import { fetchApi } from '../lib/api';
 import toast from 'react-hot-toast';
 
 export default function OwnerProducts() {
@@ -112,7 +113,7 @@ export default function OwnerProducts() {
     setIsChatLoading(true);
 
     try {
-      const res = await fetch("/api/ai/product-description", {
+      const res = await fetchApi("/api/ai/product-description", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: newMessages }),
@@ -193,7 +194,7 @@ export default function OwnerProducts() {
     setIsEnhancingPrompt(true);
     const toastId = toast.loading("Enhancing prompt with AI...");
     try {
-      const res = await fetch("/api/ai/enhance-prompt", {
+      const res = await fetchApi("/api/ai/enhance-prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: basePrompt, type: "product" }),
@@ -220,7 +221,7 @@ export default function OwnerProducts() {
     setIsGeneratingImage(true);
     const toastId = toast.loading("Generating AI product image...");
     try {
-      const res = await fetch("/api/ai/generate-product-image", {
+      const res = await fetchApi("/api/ai/generate-product-image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -265,7 +266,7 @@ export default function OwnerProducts() {
       } else if (aiGeneratedImageUrl) {
         if (aiGeneratedImageUrl.startsWith("data:") || aiGeneratedImageUrl.startsWith("blob:")) {
           const token = await getCurrentAuthToken().catch(() => "");
-          const res = await fetch("/api/ai/image/approve", {
+          const res = await fetchApi("/api/ai/image/approve", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -386,7 +387,7 @@ export default function OwnerProducts() {
       } else if (aiGeneratedImageUrl && aiGeneratedImageUrl !== (editingItem.imageUrl || editingItem.image)) {
         if (aiGeneratedImageUrl.startsWith("data:") || aiGeneratedImageUrl.startsWith("blob:")) {
           const token = await getCurrentAuthToken().catch(() => "");
-          const res = await fetch("/api/ai/image/approve", {
+          const res = await fetchApi("/api/ai/image/approve", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -860,7 +861,7 @@ export default function OwnerProducts() {
                     setIsGeneratingImage(true);
                     const toastId = toast.loading("Generating description with DeepSeek V4 Flash...");
                     try {
-                      const res = await fetch("/api/ai/product-description", {
+                      const res = await fetchApi("/api/ai/product-description", {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({

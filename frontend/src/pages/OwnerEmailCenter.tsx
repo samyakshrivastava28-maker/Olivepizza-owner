@@ -18,6 +18,7 @@ import {
   Clipboard,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { fetchApi } from '../lib/api';
 import toast from 'react-hot-toast';
 import { db } from '../lib/firebase';
 import { collection, getDocs } from 'firebase/firestore';
@@ -170,7 +171,7 @@ export default function OwnerEmailCenter() {
     setIsGeneratingAI(true);
     toast.loading("AI is crafting your email...", { id: "ai-gen" });
     try {
-      const res = await fetch("/api/ai/generate-email", {
+      const res = await fetchApi("/api/ai/generate-email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -198,7 +199,7 @@ export default function OwnerEmailCenter() {
     setIsEnhancingPrompt(true);
     toast.loading("Enhancing prompt with DeepSeek R1...", { id: "ai-enhance" });
     try {
-      const res = await fetch("/api/ai/enhance-prompt", {
+      const res = await fetchApi("/api/ai/enhance-prompt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt: imagePrompt, type: "banner" }),
@@ -231,7 +232,7 @@ export default function OwnerEmailCenter() {
         aiModel === "qwen-image-edit" && imageLibrary.length > 0
           ? imageLibrary[0].url
           : null;
-      const res = await fetch("/api/ai/generate-image", {
+      const res = await fetchApi("/api/ai/generate-image", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt, modelName: aiModel, baseImageUrl }),
@@ -283,7 +284,7 @@ export default function OwnerEmailCenter() {
 
   const handlePreview = async () => {
     try {
-      const res = await fetch("/api/email/preview", {
+      const res = await fetchApi("/api/email/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ htmlContent }),
@@ -308,7 +309,7 @@ export default function OwnerEmailCenter() {
     setIsSendingTest(true);
     toast.loading("Sending test email...", { id: "test-email" });
     try {
-      const res = await fetch("/api/email/test", {
+      const res = await fetchApi("/api/email/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -357,7 +358,7 @@ export default function OwnerEmailCenter() {
   const fetchAnalytics = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch("/api/email/analytics");
+      const res = await fetchApi("/api/email/analytics");
       
       const contentType = res.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
@@ -386,7 +387,7 @@ export default function OwnerEmailCenter() {
     setIsSending(true);
     toast.loading("Sending campaign...", { id: "campaign" });
     try {
-      const res = await fetch("/api/email/send-campaign", {
+      const res = await fetchApi("/api/email/send-campaign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
