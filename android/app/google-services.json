@@ -9,7 +9,7 @@
       "client_info": {
         "mobilesdk_app_id": "1:1017239455106:android:15f8592c9b749498007b9b",
         "android_client_info": {
-          "package_name": "in.olivepizza.owner"
+          "package_name": "com.olivepizza.app"
         }
       },
       "oauth_client": [
@@ -17,7 +17,7 @@
           "client_id": "1017239455106-e4og98pcurg4olfqq472p9o0uvtfpg6r.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
-            "package_name": "in.olivepizza.owner",
+            "package_name": "com.olivepizza.app",
             "certificate_hash": "4c6b4a1e7d43966d7482175f08d887e53bc4b57e"
           }
         },
@@ -44,17 +44,17 @@
     },
     {
       "client_info": {
-        "mobilesdk_app_id": "1:1017239455106:android:15f8592c9b749498007b9b",
+        "mobilesdk_app_id": "1:1017239455106:android:cb7c6aa78761614b007b9b",
         "android_client_info": {
-          "package_name": "com.olivepizza.app"
+          "package_name": "in.olivepizza.owner"
         }
       },
       "oauth_client": [
         {
-          "client_id": "1017239455106-e4og98pcurg4olfqq472p9o0uvtfpg6r.apps.googleusercontent.com",
+          "client_id": "1017239455106-eha6419vvm0qulqrf1jjh6ou5q4uresr.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
-            "package_name": "com.olivepizza.app",
+            "package_name": "in.olivepizza.owner",
             "certificate_hash": "4c6b4a1e7d43966d7482175f08d887e53bc4b57e"
           }
         },
