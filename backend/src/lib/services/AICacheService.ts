@@ -15,7 +15,7 @@ class AICacheService {
   private cache: NodeCache;
 
   constructor() {
-    this.cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+    this.cache = new NodeCache({ stdTTL: 180, checkperiod: 30, maxKeys: 200, useClones: false });
   }
 
   public get<T>(key: string): T | undefined {
