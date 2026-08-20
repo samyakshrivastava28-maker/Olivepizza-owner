@@ -12,6 +12,7 @@ import { useAuthStore } from '../../lib/store';
 import {
   BarChart3,
   Clock,
+  Bike,
   FileText,
   Bell,
   Mail,
@@ -63,10 +64,11 @@ export const OwnerLayout: React.FC = () => {
     return () => unsubscribe();
   }, [user]);
 
-  // Streamlined 8 Core Primary Navigation Items
+  // Streamlined 9 Core Canonical Navigation Items
   const navItems = [
     { label: 'Analytics', path: '/analytics', icon: BarChart3 },
     { label: 'Orders', path: '/orders', icon: Clock },
+    { label: 'Delivery Fleet', path: '/delivery', icon: Bike },
     { label: 'Restaurant Reports', path: '/reports', icon: FileText },
     { label: 'Notifications', path: '/notifications', icon: Bell },
     { label: 'Email', path: '/email', icon: Mail },

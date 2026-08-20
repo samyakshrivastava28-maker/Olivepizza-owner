@@ -7,10 +7,11 @@ import { OwnerLayout } from './components/layout/OwnerLayout';
 import { PizzaLoader } from './components/ui/PizzaLoader';
 import AuthProvider from './components/auth/AuthProvider';
 
-// 8 Core Canonical Modules + Public Login
+// Canonical Modules + Public Login
 const Login = lazy(() => import('./pages/Login'));
 const Analytics = lazy(() => import('./pages/Analytics'));
 const OrderManagement = lazy(() => import('./pages/OrderManagement'));
+const DeliveryManagement = lazy(() => import('./pages/DeliveryManagement'));
 const RestaurantReports = lazy(() => import('./pages/RestaurantReports'));
 const NotificationsCenter = lazy(() => import('./pages/NotificationsCenter'));
 const EmailCenter = lazy(() => import('./pages/EmailCenter'));
@@ -52,27 +53,33 @@ export default function App() {
                 <Route path="/live-orders" element={<Navigate to="/orders" replace />} />
                 <Route path="/order-history" element={<Navigate to="/orders" replace />} />
 
-                {/* 3. Restaurant Reports */}
+                {/* 3. Live Delivery Fleet Management */}
+                <Route path="/delivery" element={<DeliveryManagement />} />
+                <Route path="/delivery-management" element={<Navigate to="/delivery" replace />} />
+                <Route path="/riders" element={<Navigate to="/delivery" replace />} />
+                <Route path="/tracking" element={<Navigate to="/delivery" replace />} />
+
+                {/* 4. Restaurant Reports */}
                 <Route path="/reports" element={<RestaurantReports />} />
 
-                {/* 4. Notification Center */}
+                {/* 5. Notification Center */}
                 <Route path="/notifications" element={<NotificationsCenter />} />
                 <Route path="/notification-diagnostics" element={<Navigate to="/notifications" replace />} />
 
-                {/* 5. Email Marketing Center */}
+                {/* 6. Email Marketing Center */}
                 <Route path="/email" element={<EmailCenter />} />
 
-                {/* 6. Cloudinary Media Library */}
+                {/* 7. Cloudinary Media Library */}
                 <Route path="/media" element={<MediaLibrary />} />
 
-                {/* 7. Product & Menu Manager */}
+                {/* 8. Product & Menu Manager */}
                 <Route path="/products" element={<ProductMenuManager />} />
                 <Route path="/menu" element={<Navigate to="/products" replace />} />
                 <Route path="/special-categories" element={<Navigate to="/products" replace />} />
                 <Route path="/coupons" element={<Navigate to="/products" replace />} />
                 <Route path="/ads" element={<Navigate to="/products" replace />} />
 
-                {/* 8. Restaurant Management */}
+                {/* 9. Restaurant Management */}
                 <Route path="/restaurant" element={<RestaurantManagement />} />
                 <Route path="/settings" element={<Navigate to="/restaurant" replace />} />
               </Route>
