@@ -142,12 +142,6 @@ export const OwnerLayout: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#0B0F17] flex font-sans text-slate-100 antialiased selection:bg-orange-500 selection:text-white">
-      <EmergencyOrderModal
-        order={emergencyOrder}
-        onAccept={handleAcceptOrder}
-        onDismiss={() => setEmergencyOrder(null)}
-      />
-
       {/* Desktop Sidebar */}
       <aside
         className={`hidden md:flex flex-col border-r border-slate-800 bg-[#0E1524] h-screen sticky top-0 transition-all duration-200 z-40 ${
