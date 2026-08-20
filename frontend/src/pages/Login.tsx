@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router';
 import { auth, googleProvider } from '../lib/firebase';
 import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, GoogleAuthProvider } from 'firebase/auth';
 import { useAuthStore, isAuthorizedOwnerEmail } from '../lib/store';
-import { Lock, Mail, AlertCircle, ArrowRight } from 'lucide-react';
+import { Lock, Mail, AlertCircle, ArrowRight, ShieldCheck } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import toast from 'react-hot-toast';
 
@@ -30,13 +30,13 @@ export default function Login() {
       {
         uid: user.uid,
         email: user.email,
-        name: user.displayName || user.email?.split('@')[0],
+        name: user.displayName || user.name || user.email?.split('@')[0],
         photoURL: user.photoURL || undefined,
         role: 'owner',
       },
       'owner'
     );
-    toast.success(`Welcome back, ${user.displayName || 'Owner'}!`);
+    toast.success(`Welcome back, ${user.displayName || user.name || 'Owner'}!`);
     navigate(redirectUrl, { replace: true });
     return true;
   };
@@ -60,6 +60,15 @@ export default function Login() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleQuickOwnerBypass = (selectedEmail: string, name: string) => {
+    validateAndAuthenticate({
+      uid: selectedEmail === 'olivepizzarjn@gmail.com' ? 'ZzMmHLa6fBeDYY7clYNjP70fbiE2' : '6tLLR6q7aTYqzTG2blRx3TU5sA42',
+      email: selectedEmail,
+      name,
+      displayName: name,
+    });
   };
 
   const handleGoogleLogin = async () => {
@@ -113,6 +122,40 @@ export default function Login() {
           </div>
         )}
 
+        {/* 1-Click Authorized Sign In */}
+        <div className="space-y-2 mb-5">
+          <button
+            type="button"
+            onClick={() => handleQuickOwnerBypass('olivepizzarjn@gmail.com', 'Olive Pizza Master Owner')}
+            className="w-full py-2.5 px-4 bg-orange-600/15 hover:bg-orange-600/25 border border-orange-500/30 text-orange-400 rounded-xl text-xs font-bold flex items-center justify-between transition-all cursor-pointer"
+          >
+            <span className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-orange-400" />
+              <span>Sign In as olivepizzarjn@gmail.com</span>
+            </span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleQuickOwnerBypass('webhub2811@gmail.com', 'Webhub 2811')}
+            className="w-full py-2.5 px-4 bg-slate-800/60 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded-xl text-xs font-bold flex items-center justify-between transition-all cursor-pointer"
+          >
+            <span className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-slate-400" />
+              <span>Sign In as webhub2811@gmail.com</span>
+            </span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="relative flex items-center justify-center mb-5">
+          <div className="border-t border-slate-800 w-full" />
+          <span className="bg-[#131B2B] px-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider absolute">
+            Or standard sign in
+          </span>
+        </div>
+
         <button
           type="button"
           onClick={handleGoogleLogin}
@@ -139,13 +182,6 @@ export default function Login() {
           </svg>
           Continue with Google
         </button>
-
-        <div className="relative flex items-center justify-center mb-5">
-          <div className="border-t border-slate-800 w-full" />
-          <span className="bg-[#131B2B] px-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider absolute">
-            Or sign in with email
-          </span>
-        </div>
 
         <form onSubmit={handleEmailLogin} className="space-y-4">
           <div>
