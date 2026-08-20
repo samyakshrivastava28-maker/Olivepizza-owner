@@ -6,40 +6,21 @@ import { PizzaLoader } from '../ui/PizzaLoader';
 import OwnerAlertManager from '../owner/OwnerAlertManager';
 import NewOrderEmergencyOverlay from '../owner/NewOrderEmergencyOverlay';
 import { db } from '../../lib/firebase';
-import { collection, query, orderBy, limit, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
 import { Order } from '../../types/models';
-import { soundPlayer } from '../../lib/audio';
-import { initFCMNotifications } from '../../lib/fcm';
 import { useAuthStore } from '../../lib/store';
 import {
-  LayoutDashboard,
-  Clock,
-  BookOpen,
-  Pizza,
-  Layers,
-  Tag,
-  Megaphone,
-  FolderOpen,
-  Home,
-  Bike,
-  FileText,
-  Users,
-  Mail,
-  Bell,
-  Radio,
-  ShieldCheck,
-  Cpu,
-  Brain,
-  Lock,
-  GitBranch,
-  Calendar,
   BarChart3,
-  Database,
-  Settings,
+  Clock,
+  FileText,
+  Bell,
+  Mail,
+  FolderOpen,
+  Pizza,
+  Store,
   X,
   Menu,
 } from 'lucide-react';
-import toast from 'react-hot-toast';
 
 export const OwnerLayout: React.FC = () => {
   const user = useAuthStore((s) => s.user);
@@ -49,95 +30,49 @@ export const OwnerLayout: React.FC = () => {
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  // Initialize FCM for push alerts
+  // Firestore real-time listener for high-priority incoming orders
   useEffect(() => {
-    if (user?.uid) {
-      initFCMNotifications(user.uid);
-    }
+    if (!user) return;
+    const q = query(
+      collection(db, 'orders'),
+      orderBy('createdAt', 'desc'),
+      limit(10)
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        snapshot.docChanges().forEach((change) => {
+          if (change.type === 'added' || change.type === 'modified') {
+            const data = change.doc.data() as Order;
+            const orderStatus = (data.status || 'pending').toLowerCase();
+            const orderTime = new Date(data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt || 0).getTime();
+            const isRecent = Date.now() - orderTime < 5 * 60 * 1000;
+
+            if (orderStatus === 'pending' && isRecent) {
+              setEmergencyOrder({ id: change.doc.id, ...data });
+            }
+          }
+        });
+      },
+      (error) => {
+        console.warn('[OwnerLayout] Order stream error:', error);
+      }
+    );
+
+    return () => unsubscribe();
   }, [user]);
 
-  // Real-time listener for incoming customer orders (triggering emergency audio/modal)
-  useEffect(() => {
-    let isInitial = true;
-    const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(1));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      if (isInitial) {
-        isInitial = false;
-        return;
-      }
-      snapshot.docChanges().forEach((change) => {
-        if (change.type === 'added') {
-          const newOrder = { id: change.doc.id, ...change.doc.data() } as Order;
-          const status = (newOrder.status || '').toLowerCase();
-          if (['pending', 'placed', 'created', 'new_order'].includes(status)) {
-            soundPlayer.playNewOrderAlarm();
-            setEmergencyOrder(newOrder);
-          }
-        }
-      });
-    });
-    return () => unsubscribe();
-  }, []);
-
-  const handleAcceptOrder = async (orderId: string) => {
-    try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        status: 'preparing',
-        updatedAt: new Date(),
-      });
-      setEmergencyOrder(null);
-      toast.success('Order accepted! Moving to Preparing state.');
-      navigate('/orders');
-    } catch (e: any) {
-      toast.error('Failed to accept order: ' + e.message);
-    }
-  };
-
-  const navGroups = [
-    {
-      group: 'Core Operations',
-      items: [
-        { label: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
-        { label: 'Live Orders', path: '/orders', icon: Clock },
-        { label: 'Order History', path: '/order-history', icon: BookOpen },
-        { label: 'Delivery Fleet', path: '/partners', icon: Bike },
-      ],
-    },
-    {
-      group: 'Menu & Marketing',
-      items: [
-        { label: 'Products & Menu', path: '/products', icon: Pizza },
-        { label: 'Special Categories', path: '/special-categories', icon: Layers },
-        { label: 'Coupons & Discounts', path: '/coupons', icon: Tag },
-        { label: 'Promotions & Ads', path: '/ads', icon: Megaphone },
-        { label: 'Media Library', path: '/media', icon: FolderOpen },
-        { label: 'Home Page Manager', path: '/home-page-manager', icon: Home },
-      ],
-    },
-    {
-      group: 'Business & CRM',
-      items: [
-        { label: 'Financial Reports', path: '/reports', icon: FileText },
-        { label: 'Customer CRM', path: '/customers', icon: Users },
-        { label: 'Email Center', path: '/email', icon: Mail },
-        { label: 'Events & Campaigns', path: '/events', icon: Calendar },
-        { label: 'Website Analytics', path: '/analytics', icon: BarChart3 },
-      ],
-    },
-    {
-      group: 'System & Diagnostics',
-      items: [
-        { label: 'Notification Center', path: '/notifications', icon: Bell },
-        { label: 'Push Diagnostics', path: '/notification-diagnostics', icon: Radio },
-        { label: 'Verification Metrics', path: '/verification-metrics', icon: ShieldCheck },
-        { label: 'AI Health Monitor', path: '/ai-monitor', icon: Cpu },
-        { label: 'AI Knowledge Sync', path: '/ai-knowledge', icon: Brain },
-        { label: 'Security Logs', path: '/security', icon: Lock },
-        { label: 'Version Control', path: '/versions', icon: GitBranch },
-        { label: 'Data Manager', path: '/data-manager', icon: Database },
-        { label: 'Store Settings', path: '/settings', icon: Settings },
-      ],
-    },
+  // Streamlined 8 Core Primary Navigation Items
+  const navItems = [
+    { label: 'Analytics', path: '/analytics', icon: BarChart3 },
+    { label: 'Orders', path: '/orders', icon: Clock },
+    { label: 'Restaurant Reports', path: '/reports', icon: FileText },
+    { label: 'Notifications', path: '/notifications', icon: Bell },
+    { label: 'Email', path: '/email', icon: Mail },
+    { label: 'Media', path: '/media', icon: FolderOpen },
+    { label: 'Product & Menu', path: '/products', icon: Pizza },
+    { label: 'Restaurant Management', path: '/restaurant', icon: Store },
   ];
 
   return (
@@ -148,13 +83,18 @@ export const OwnerLayout: React.FC = () => {
           isSidebarCollapsed ? 'w-20' : 'w-64'
         }`}
       >
+        {/* Brand Header */}
         <div className="p-4 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2.5 overflow-hidden">
-            <img src="/logo.svg" alt="Olive Pizza Owner" className="w-8 h-8 rounded-xl shadow-md border border-amber-500/20 shrink-0" />
+            <div className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-400 flex items-center justify-center font-bold text-sm shrink-0">
+              🍕
+            </div>
             {!isSidebarCollapsed && (
               <div>
                 <h1 className="text-sm font-extrabold text-white leading-tight">OLIVE PIZZA</h1>
-                <span className="text-[10px] font-black text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30 uppercase tracking-wider">OWNER APP</span>
+                <span className="text-[10px] font-black text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded border border-orange-500/30 uppercase tracking-wider">
+                  OWNER OPS
+                </span>
               </div>
             )}
           </div>
@@ -167,32 +107,27 @@ export const OwnerLayout: React.FC = () => {
           </button>
         </div>
 
-        <nav className="flex-1 overflow-y-auto p-3 space-y-6">
-          {navGroups.map((g) => (
-            <div key={g.group} className="space-y-1">
-              {!isSidebarCollapsed && (
-                <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-widest px-3">
-                  {g.group}
-                </span>
-              )}
-              {g.items.map((item) => (
-                <NavLink
-                  key={item.path}
-                  to={item.path}
-                  className={({ isActive }) =>
-                    `flex items-center gap-3 px-3 py-2 rounded-xl text-xs font-bold transition-colors ${
-                      isActive
-                        ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
-                        : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                    } ${isSidebarCollapsed ? 'justify-center px-2' : ''}`
-                  }
-                  title={isSidebarCollapsed ? item.label : undefined}
-                >
-                  <item.icon className="w-4 h-4 flex-shrink-0" />
-                  {!isSidebarCollapsed && <span>{item.label}</span>}
-                </NavLink>
-              ))}
-            </div>
+        {/* Navigation Items */}
+        <nav className="flex-1 overflow-y-auto p-3 space-y-1.5">
+          <div className="px-3 pb-2 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest">
+            {!isSidebarCollapsed && 'Operations'}
+          </div>
+          {navItems.map((item) => (
+            <NavLink
+              key={item.path}
+              to={item.path}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold transition-all ${
+                  isActive
+                    ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                } ${isSidebarCollapsed ? 'justify-center px-2' : ''}`
+              }
+              title={isSidebarCollapsed ? item.label : undefined}
+            >
+              <item.icon className="w-4 h-4 flex-shrink-0" />
+              {!isSidebarCollapsed && <span>{item.label}</span>}
+            </NavLink>
           ))}
         </nav>
       </aside>
@@ -204,7 +139,7 @@ export const OwnerLayout: React.FC = () => {
           <div className="relative w-72 max-w-[80vw] bg-[#0E1524] border-r border-slate-800 h-full flex flex-col p-4 z-10">
             <div className="flex items-center justify-between pb-4 border-b border-slate-800 mb-4">
               <div className="flex items-center gap-2">
-                <span className="text-2xl">🍕</span>
+                <span className="text-xl">🍕</span>
                 <span className="font-extrabold text-white text-sm">Olive Pizza Owner</span>
               </div>
               <button
@@ -214,30 +149,21 @@ export const OwnerLayout: React.FC = () => {
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <nav className="flex-1 overflow-y-auto space-y-4">
-              {navGroups.map((g) => (
-                <div key={g.group} className="space-y-1">
-                  <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-widest px-2">
-                    {g.group}
-                  </span>
-                  {g.items.map((item) => (
-                    <NavLink
-                      key={item.path}
-                      to={item.path}
-                      onClick={() => setIsMobileDrawerOpen(false)}
-                      className={({ isActive }) =>
-                        `flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold transition-colors ${
-                          isActive
-                            ? 'bg-orange-500 text-white'
-                            : 'text-slate-300 hover:bg-slate-800/60'
-                        }`
-                      }
-                    >
-                      <item.icon className="w-4 h-4" />
-                      <span>{item.label}</span>
-                    </NavLink>
-                  ))}
-                </div>
+            <nav className="flex-1 overflow-y-auto space-y-1.5">
+              {navItems.map((item) => (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  onClick={() => setIsMobileDrawerOpen(false)}
+                  className={({ isActive }) =>
+                    `flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold transition-colors ${
+                      isActive ? 'bg-orange-500 text-white' : 'text-slate-300 hover:bg-slate-800/60'
+                    }`
+                  }
+                >
+                  <item.icon className="w-4 h-4" />
+                  <span>{item.label}</span>
+                </NavLink>
               ))}
             </nav>
           </div>
@@ -248,14 +174,14 @@ export const OwnerLayout: React.FC = () => {
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
         <Header />
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8 pb-24 md:pb-8">
-          <Suspense fallback={<PizzaLoader text="Loading section data..." />}>
+          <Suspense fallback={<PizzaLoader text="Loading module..." />}>
             <Outlet />
           </Suspense>
         </main>
         <MobileNav onOpenDrawer={() => setIsMobileDrawerOpen(true)} />
       </div>
 
-      {/* Persistent Order Alert Alarm & Interaction Manager */}
+      {/* Persistent Order Alert Alarm & Audio Manager */}
       <OwnerAlertManager />
 
       {/* Emergency Full-Screen Audio Overlay for New Pending Orders */}

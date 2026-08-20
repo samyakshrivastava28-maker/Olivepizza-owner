@@ -7,32 +7,16 @@ import { OwnerLayout } from './components/layout/OwnerLayout';
 import { PizzaLoader } from './components/ui/PizzaLoader';
 import AuthProvider from './components/auth/AuthProvider';
 
-// Lazy load full-fidelity owner pages
+// 8 Core Canonical Modules + Public Login
 const Login = lazy(() => import('./pages/Login'));
-const OwnerDashboard = lazy(() => import('./pages/OwnerDashboard'));
-const OwnerOrders = lazy(() => import('./pages/OwnerOrders'));
-const OwnerOrderHistory = lazy(() => import('./pages/OwnerOrderHistory'));
-const OwnerProducts = lazy(() => import('./pages/OwnerProducts'));
-const OwnerSpecialCategories = lazy(() => import('./pages/OwnerSpecialCategories'));
-const OwnerCoupons = lazy(() => import('./pages/OwnerCoupons'));
-const OwnerAds = lazy(() => import('./pages/OwnerAds'));
-const OwnerMediaLibrary = lazy(() => import('./pages/OwnerMediaLibrary'));
-const HomePageManager = lazy(() => import('./pages/HomePageManager'));
-const DeliveryPartners = lazy(() => import('./pages/DeliveryPartners'));
-const OwnerReports = lazy(() => import('./pages/OwnerReports'));
-const OwnerCustomers = lazy(() => import('./pages/OwnerCustomers'));
-const OwnerEmailCenter = lazy(() => import('./pages/OwnerEmailCenter'));
-const OwnerNotificationCenter = lazy(() => import('./pages/OwnerNotificationCenter'));
-const OwnerNotificationDiagnostics = lazy(() => import('./pages/OwnerNotificationDiagnostics'));
-const OwnerVerificationMetrics = lazy(() => import('./pages/OwnerVerificationMetrics'));
-const AIHealthMonitor = lazy(() => import('./pages/AIHealthMonitor'));
-const OwnerAIKnowledge = lazy(() => import('./pages/OwnerAIKnowledge'));
-const OwnerSecurity = lazy(() => import('./pages/OwnerSecurity'));
-const OwnerVersionManagement = lazy(() => import('./pages/OwnerVersionManagement'));
-const OwnerEvents = lazy(() => import('./pages/OwnerEvents'));
-const OwnerAnalytics = lazy(() => import('./pages/OwnerAnalytics'));
-const DataManagerHub = lazy(() => import('./pages/DataManager/DataManagerHub'));
-const OwnerSettings = lazy(() => import('./pages/OwnerSettings'));
+const Analytics = lazy(() => import('./pages/Analytics'));
+const OrderManagement = lazy(() => import('./pages/OrderManagement'));
+const RestaurantReports = lazy(() => import('./pages/RestaurantReports'));
+const NotificationsCenter = lazy(() => import('./pages/NotificationsCenter'));
+const EmailCenter = lazy(() => import('./pages/EmailCenter'));
+const MediaLibrary = lazy(() => import('./pages/MediaLibrary'));
+const ProductMenuManager = lazy(() => import('./pages/ProductMenuManager'));
+const RestaurantManagement = lazy(() => import('./pages/RestaurantManagement'));
 
 export default function App() {
   return (
@@ -41,7 +25,7 @@ export default function App() {
         position="top-right"
         toastOptions={{
           style: {
-            background: '#131B2B',
+            background: '#0E1524',
             color: '#fff',
             border: '1px solid #334155',
             fontSize: '12px',
@@ -52,47 +36,50 @@ export default function App() {
       <AuthProvider>
         <Suspense fallback={<PizzaLoader text="Initializing Olive Pizza Owner Platform..." />}>
           <Routes>
-            {/* Public Login */}
+            {/* Public Login Route */}
             <Route path="/login" element={<Login />} />
 
-            {/* Protected Owner Routes */}
+            {/* Protected Owner Operations */}
             <Route element={<OwnerGuard />}>
               <Route element={<OwnerLayout />}>
-                <Route index element={<Navigate to="/dashboard" replace />} />
-                <Route path="/dashboard" element={<OwnerDashboard />} />
-                <Route path="/orders" element={<OwnerOrders />} />
+                {/* 1. Analytics (Default Landing Page) */}
+                <Route index element={<Navigate to="/analytics" replace />} />
+                <Route path="/dashboard" element={<Navigate to="/analytics" replace />} />
+                <Route path="/analytics" element={<Analytics />} />
+
+                {/* 2. Order Management */}
+                <Route path="/orders" element={<OrderManagement />} />
                 <Route path="/live-orders" element={<Navigate to="/orders" replace />} />
-                <Route path="/order-history" element={<OwnerOrderHistory />} />
-                <Route path="/products" element={<OwnerProducts />} />
+                <Route path="/order-history" element={<Navigate to="/orders" replace />} />
+
+                {/* 3. Restaurant Reports */}
+                <Route path="/reports" element={<RestaurantReports />} />
+
+                {/* 4. Notification Center */}
+                <Route path="/notifications" element={<NotificationsCenter />} />
+                <Route path="/notification-diagnostics" element={<Navigate to="/notifications" replace />} />
+
+                {/* 5. Email Marketing Center */}
+                <Route path="/email" element={<EmailCenter />} />
+
+                {/* 6. Cloudinary Media Library */}
+                <Route path="/media" element={<MediaLibrary />} />
+
+                {/* 7. Product & Menu Manager */}
+                <Route path="/products" element={<ProductMenuManager />} />
                 <Route path="/menu" element={<Navigate to="/products" replace />} />
-                <Route path="/special-categories" element={<OwnerSpecialCategories />} />
-                <Route path="/coupons" element={<OwnerCoupons />} />
-                <Route path="/ads" element={<OwnerAds />} />
-                <Route path="/media" element={<OwnerMediaLibrary />} />
-                <Route path="/home-page-manager" element={<HomePageManager />} />
-                <Route path="/website-manager" element={<HomePageManager />} />
-                <Route path="/website-manager/*" element={<HomePageManager />} />
-                <Route path="/partners" element={<DeliveryPartners />} />
-                <Route path="/reports" element={<OwnerReports />} />
-                <Route path="/customers" element={<OwnerCustomers />} />
-                <Route path="/email" element={<OwnerEmailCenter />} />
-                <Route path="/notifications" element={<OwnerNotificationCenter />} />
-                <Route path="/notification-diagnostics" element={<OwnerNotificationDiagnostics />} />
-                <Route path="/verification-metrics" element={<OwnerVerificationMetrics />} />
-                <Route path="/ai-monitor" element={<AIHealthMonitor />} />
-                <Route path="/ai-knowledge" element={<OwnerAIKnowledge />} />
-                <Route path="/security" element={<OwnerSecurity />} />
-                <Route path="/versions" element={<OwnerVersionManagement />} />
-                <Route path="/events" element={<OwnerEvents />} />
-                <Route path="/analytics" element={<OwnerAnalytics />} />
-                <Route path="/data-manager" element={<DataManagerHub />} />
-                <Route path="/data-manager/*" element={<DataManagerHub />} />
-                <Route path="/settings" element={<OwnerSettings />} />
+                <Route path="/special-categories" element={<Navigate to="/products" replace />} />
+                <Route path="/coupons" element={<Navigate to="/products" replace />} />
+                <Route path="/ads" element={<Navigate to="/products" replace />} />
+
+                {/* 8. Restaurant Management */}
+                <Route path="/restaurant" element={<RestaurantManagement />} />
+                <Route path="/settings" element={<Navigate to="/restaurant" replace />} />
               </Route>
             </Route>
 
-            {/* Catch-all */}
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            {/* Catch-all fallback */}
+            <Route path="*" element={<Navigate to="/analytics" replace />} />
           </Routes>
         </Suspense>
       </AuthProvider>

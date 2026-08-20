@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router';
-import { LayoutDashboard, Clock, Pizza, Bell, Menu } from 'lucide-react';
+import { BarChart3, Clock, Pizza, Bell, Menu } from 'lucide-react';
 
 interface MobileNavProps {
   onOpenDrawer: () => void;
@@ -8,7 +8,7 @@ interface MobileNavProps {
 
 export const MobileNav: React.FC<MobileNavProps> = ({ onOpenDrawer }) => {
   const items = [
-    { label: 'Dashboard', path: '/dashboard', icon: LayoutDashboard },
+    { label: 'Analytics', path: '/analytics', icon: BarChart3 },
     { label: 'Orders', path: '/orders', icon: Clock },
     { label: 'Products', path: '/products', icon: Pizza },
     { label: 'Alerts', path: '/notifications', icon: Bell },
