@@ -31,7 +31,7 @@ export default function RestaurantManagement() {
 
   // Timings
   const [openingTime, setOpeningTime] = useState('12:00');
-  const [closingTime, setClosingTime] = useState('00:00');
+  const [closingTime, setClosingTime] = useState('23:59');
   const [defaultPrepTime, setDefaultPrepTime] = useState(25);
   const [maxDeliveryRadiusKm, setMaxDeliveryRadiusKm] = useState(15);
 
@@ -40,24 +40,28 @@ export default function RestaurantManagement() {
   const [phone, setPhone] = useState('+91 91799 44445');
   const [address, setAddress] = useState('Dongargaon Rd, near Saraswati school, Gokul Nagar, Rajnandgaon, Chhattisgarh 491441');
 
-  // Load from Firestore /settings/store_config in real-time
+  // Load from Firestore /settings/global and /settings/store_config in real-time
   useEffect(() => {
     setLoading(true);
-    const storeRef = doc(db, 'settings', 'store_config');
+    const storeRef = doc(db, 'settings', 'global');
     const unsubscribe = onSnapshot(
       storeRef,
       (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
-          if (data.isStoreOpen !== undefined) setIsStoreOpen(data.isStoreOpen);
+          if (data.isRestaurantOpen !== undefined) setIsStoreOpen(data.isRestaurantOpen);
+          else if (data.isStoreOpen !== undefined) setIsStoreOpen(data.isStoreOpen);
+
           if (data.closureReason !== undefined) setClosureReason(data.closureReason);
-          if (data.deliveryEnabled !== undefined) setDeliveryEnabled(data.deliveryEnabled);
+          if (data.isDeliveryAvailable !== undefined) setDeliveryEnabled(data.isDeliveryAvailable);
+          else if (data.deliveryEnabled !== undefined) setDeliveryEnabled(data.deliveryEnabled);
+
           if (data.takeawayEnabled !== undefined) setTakeawayEnabled(data.takeawayEnabled);
           if (data.dineInEnabled !== undefined) setDineInEnabled(data.dineInEnabled);
           if (data.openingTime) setOpeningTime(data.openingTime);
           if (data.closingTime) setClosingTime(data.closingTime);
           if (data.defaultPrepTime) setDefaultPrepTime(data.defaultPrepTime);
-          if (data.maxDeliveryRadiusKm) setMaxDeliveryRadiusKm(data.maxDeliveryRadiusKm);
+          if (data.deliveryRadiusKm || data.maxDeliveryRadiusKm) setMaxDeliveryRadiusKm(data.deliveryRadiusKm || data.maxDeliveryRadiusKm);
           if (data.restaurantName) setRestaurantName(data.restaurantName);
           if (data.phone) setPhone(data.phone);
           if (data.address) setAddress(data.address);
@@ -73,22 +77,30 @@ export default function RestaurantManagement() {
     return () => unsubscribe();
   }, []);
 
-  // Save Settings to Firestore & notify backend
+  // Save Settings to Firestore both in 'global' & 'store_config'
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
-    const toastId = toast.loading('Saving operational configuration...');
+    const toastId = toast.loading('Synchronizing live store settings across all applications...');
 
     try {
+      const openHour = parseInt(openingTime.split(':')[0], 10) || 12;
+      const closeHour = parseInt(closingTime.split(':')[0], 10) || 24;
+
       const payload = {
-        isStoreOpen,
+        isRestaurantOpen: isStoreOpen,
+        isStoreOpen: isStoreOpen,
         closureReason: isStoreOpen ? '' : closureReason,
-        deliveryEnabled,
+        isDeliveryAvailable: deliveryEnabled,
+        deliveryEnabled: deliveryEnabled,
         takeawayEnabled,
         dineInEnabled,
         openingTime,
         closingTime,
+        openingHour: openHour,
+        closingHour: closeHour,
         defaultPrepTime: Number(defaultPrepTime) || 25,
+        deliveryRadiusKm: Number(maxDeliveryRadiusKm) || 15,
         maxDeliveryRadiusKm: Number(maxDeliveryRadiusKm) || 15,
         restaurantName,
         phone,
@@ -96,8 +108,11 @@ export default function RestaurantManagement() {
         updatedAt: new Date().toISOString(),
       };
 
-      // 1. Direct Firestore persistence
-      await setDoc(doc(db, 'settings', 'store_config'), payload, { merge: true });
+      // 1. Dual write to both global and store_config documents for universal real-time propagation
+      await Promise.all([
+        setDoc(doc(db, 'settings', 'global'), payload, { merge: true }),
+        setDoc(doc(db, 'settings', 'store_config'), payload, { merge: true }),
+      ]);
 
       // 2. Notify backend endpoint for server cache invalidation
       fetchApi('/api/settings', {
@@ -106,7 +121,7 @@ export default function RestaurantManagement() {
         body: JSON.stringify(payload),
       }).catch(() => {});
 
-      toast.success('Restaurant operational configuration saved!', { id: toastId });
+      toast.success('Live store availability synchronized with website & apps!', { id: toastId });
     } catch (err: any) {
       toast.error('Failed to save settings: ' + err.message, { id: toastId });
     } finally {

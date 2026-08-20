@@ -58,7 +58,14 @@ export default function ProductMenuManager() {
       q,
       (snapshot) => {
         const fetched: Product[] = [];
-        snapshot.forEach((d) => fetched.push({ id: d.id, ...d.data() } as Product));
+        snapshot.forEach((d) => {
+          const data = d.data();
+          fetched.push({
+            id: d.id,
+            ...data,
+            isAvailable: data.isAvailable ?? data.isActive ?? true,
+          } as Product);
+        });
         setProducts(fetched);
         setLoading(false);
       },
@@ -111,8 +118,10 @@ export default function ProductMenuManager() {
   const handleToggleAvailability = async (prod: Product) => {
     const nextState = !prod.isAvailable;
     try {
+      // Set both isActive & isAvailable so customer app dataStore query updates in real-time
       await updateDoc(doc(db, 'products', prod.id), {
         isAvailable: nextState,
+        isActive: nextState,
         updatedAt: new Date().toISOString(),
       });
       toast.success(`${prod.name} is now ${nextState ? 'AVAILABLE' : 'UNAVAILABLE'}`);
@@ -139,6 +148,7 @@ export default function ProductMenuManager() {
         image: formImageUrl || undefined,
         isVegetarian: formIsVeg,
         isAvailable: formIsAvailable,
+        isActive: formIsAvailable,
         updatedAt: new Date().toISOString(),
       };
 
