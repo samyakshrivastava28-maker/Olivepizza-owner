@@ -7,20 +7,13 @@ import {
   Trash2,
   Sparkles,
   CheckCircle2,
-  XCircle,
-  FolderOpen,
-  Image as ImageIcon,
   UploadCloud,
-  Layers,
   X,
-  Zap,
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import {
   collection,
   onSnapshot,
-  query,
-  orderBy,
   doc,
   addDoc,
   updateDoc,
@@ -53,19 +46,29 @@ export default function ProductMenuManager() {
   // Firestore real-time listener for canonical products
   useEffect(() => {
     setLoading(true);
-    const q = query(collection(db, 'products'), orderBy('name', 'asc'));
     const unsubscribe = onSnapshot(
-      q,
+      collection(db, 'products'),
       (snapshot) => {
         const fetched: Product[] = [];
         snapshot.forEach((d) => {
           const data = d.data();
+          const pName = data.name || data.productName || 'Menu Item';
+          const pPrice = Number(data.price ?? data.basePrice) || 0;
           fetched.push({
             id: d.id,
             ...data,
+            name: pName,
+            price: pPrice,
+            basePrice: pPrice,
+            imageUrl: data.imageUrl || data.image || '',
+            image: data.imageUrl || data.image || '',
             isAvailable: data.isAvailable ?? data.isActive ?? true,
+            isVegetarian: data.isVegetarian ?? true,
           } as Product);
         });
+
+        // Client-side alphabetical sort
+        fetched.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
         setProducts(fetched);
         setLoading(false);
       },
@@ -105,10 +108,10 @@ export default function ProductMenuManager() {
 
   const handleOpenEdit = (prod: Product) => {
     setEditingProduct(prod);
-    setFormName(prod.name || '');
+    setFormName(prod.name || prod.productName || '');
     setFormDescription(prod.description || '');
     setFormCategory(prod.category || 'pizza');
-    setFormPrice(prod.price || 0);
+    setFormPrice(prod.price || prod.basePrice || 0);
     setFormImageUrl(prod.imageUrl || prod.image || '');
     setFormIsVeg(prod.isVegetarian ?? true);
     setFormIsAvailable(prod.isAvailable ?? true);
@@ -141,9 +144,11 @@ export default function ProductMenuManager() {
     try {
       const payload = {
         name: formName,
+        productName: formName,
         description: formDescription,
         category: formCategory,
         price: Number(formPrice) || 0,
+        basePrice: Number(formPrice) || 0,
         imageUrl: formImageUrl || undefined,
         image: formImageUrl || undefined,
         isVegetarian: formIsVeg,

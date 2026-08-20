@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   Search,
+  Plus,
   RefreshCw,
   Eye,
   UserCheck,
@@ -17,7 +18,7 @@ import {
   ChevronRight,
   Compass,
   ArrowUpRight,
-  SlidersHorizontal,
+  X,
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import {
@@ -25,8 +26,8 @@ import {
   onSnapshot,
   query,
   where,
-  orderBy,
   doc,
+  setDoc,
   updateDoc,
 } from 'firebase/firestore';
 import { DeliveryPartner, Order } from '../types/models';
@@ -41,44 +42,100 @@ import 'leaflet/dist/leaflet.css';
 export default function DeliveryManagement() {
   const [partners, setPartners] = useState<DeliveryPartner[]>([]);
   const [activeOrders, setActiveOrders] = useState<Order[]>([]);
-  const [locations, setLocations] = useState<Record<string, { lat: number; lng: number; speed?: number; bearing?: number; updatedAt?: string }>>({});
+  const [locations, setLocations] = useState<Record<string, { lat: number; lng: number; speed?: number; bearing?: number; updatedAt?: string; activeOrderId?: string }>>({});
   const [selectedPartnerId, setSelectedPartnerId] = useState<string | null>(null);
-  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'fleet' | 'dispatch'>('fleet');
   const [loading, setLoading] = useState(true);
+
+  // Add Partner Modal
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [newPartnerName, setNewPartnerName] = useState('');
+  const [newPartnerPhone, setNewPartnerPhone] = useState('');
+  const [newPartnerEmail, setNewPartnerEmail] = useState('');
+  const [newPartnerVehicle, setNewPartnerVehicle] = useState('Motorcycle');
+  const [newPartnerReg, setNewPartnerReg] = useState('');
 
   // Map DOM reference
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const markersRef = useRef<{ [key: string]: L.Marker | L.Polyline }>({});
 
-  // 1. Listen to Delivery Partners collection in Firestore
+  // 1. Listen to Delivery Partners collection & delivery users in Firestore
   useEffect(() => {
     setLoading(true);
-    const q = query(collection(db, 'delivery_partners'));
-    const unsubscribe = onSnapshot(
-      q,
+    let partnersFromColl: DeliveryPartner[] = [];
+    let partnersFromUsers: DeliveryPartner[] = [];
+
+    const mergePartners = () => {
+      const combinedMap = new Map<string, DeliveryPartner>();
+      partnersFromColl.forEach((p) => combinedMap.set(p.id, p));
+      partnersFromUsers.forEach((u) => {
+        if (!combinedMap.has(u.id)) {
+          combinedMap.set(u.id, u);
+        }
+      });
+      setPartners(Array.from(combinedMap.values()));
+      setLoading(false);
+    };
+
+    // A. delivery_partners collection
+    const unsubPartners = onSnapshot(
+      collection(db, 'delivery_partners'),
       (snapshot) => {
         const fetched: DeliveryPartner[] = [];
-        snapshot.forEach((docSnap) => {
-          fetched.push({ id: docSnap.id, ...docSnap.data() } as DeliveryPartner);
+        snapshot.forEach((d) => {
+          const data = d.data();
+          fetched.push({
+            id: d.id,
+            ...data,
+            name: data.name || data.displayName || 'Delivery Partner',
+            phone: data.phone || data.phoneNumber || '',
+            status: data.status || 'online',
+          } as DeliveryPartner);
         });
-        setPartners(fetched);
-        setLoading(false);
+        partnersFromColl = fetched;
+        mergePartners();
       },
       (err) => {
-        console.warn('[DeliveryManagement] Firestore partners stream warning:', err);
-        fetchApi('/api/delivery/partners')
-          .then((r) => r.json())
-          .then((d) => setPartners(d.partners || d || []))
-          .catch(() => {})
-          .finally(() => setLoading(false));
+        console.warn('[DeliveryManagement] Partners stream warning:', err);
       }
     );
 
-    return () => unsubscribe();
+    // B. users collection where role is delivery
+    const unsubUsers = onSnapshot(
+      query(collection(db, 'users'), where('role', '==', 'delivery')),
+      (snapshot) => {
+        const fetched: DeliveryPartner[] = [];
+        snapshot.forEach((d) => {
+          const data = d.data();
+          fetched.push({
+            id: d.id,
+            name: data.name || data.displayName || 'Delivery Partner',
+            phone: data.phone || '',
+            email: data.email || '',
+            status: data.isOnline ? 'online' : (data.status || 'online'),
+            approvalStatus: 'approved',
+            vehicleType: data.vehicleType || 'Motorcycle',
+            vehicleNumber: data.vehicleNumber || 'Standard',
+            rating: data.rating || 4.9,
+            totalDeliveries: data.totalDeliveries || 1,
+            lat: data.lat || (data.location ? data.location.lat : undefined),
+            lng: data.lng || (data.location ? data.location.lng : undefined),
+            isAvailable: true,
+          } as DeliveryPartner);
+        });
+        partnersFromUsers = fetched;
+        mergePartners();
+      },
+      () => {}
+    );
+
+    return () => {
+      unsubPartners();
+      unsubUsers();
+    };
   }, []);
 
   // 2. Listen to Active Orders (Preparing, Ready, Out for Delivery)
@@ -129,7 +186,6 @@ export default function DeliveryManagement() {
         setLocations(locMap);
       },
       () => {
-        // Fallback polling for backend live locations
         fetchApi('/api/tracking/locations/active')
           .then((r) => r.json())
           .then((data) => {
@@ -164,7 +220,6 @@ export default function DeliveryManagement() {
         zoomControl: false,
       });
 
-      // Dark Matter Map Tiles
       L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
         attribution: '&copy; OpenStreetMap &copy; CARTO',
         maxZoom: 19,
@@ -172,7 +227,6 @@ export default function DeliveryManagement() {
 
       L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-      // Add Restaurant Central Marker
       const restaurantIcon = L.divIcon({
         className: 'custom-restaurant-icon',
         html: `
@@ -195,10 +249,6 @@ export default function DeliveryManagement() {
 
       mapInstanceRef.current = map;
     }
-
-    return () => {
-      // Keep map instance alive across re-renders
-    };
   }, []);
 
   // 5. Update Map Markers & Live Route Polylines
@@ -215,11 +265,10 @@ export default function DeliveryManagement() {
       RESTAURANT_LOCATION.lng || 81.0123793,
     ];
 
-    // Render each rider marker
     partners.forEach((partner) => {
       const loc = locations[partner.id] || {
-        lat: partner.lat || partner.latitude || (restaurantCoords[0] + (Math.random() - 0.5) * 0.02),
-        lng: partner.lng || partner.longitude || (restaurantCoords[1] + (Math.random() - 0.5) * 0.02),
+        lat: partner.lat || partner.latitude || (restaurantCoords[0] + (Math.random() - 0.5) * 0.015),
+        lng: partner.lng || partner.longitude || (restaurantCoords[1] + (Math.random() - 0.5) * 0.015),
       };
 
       if (!loc.lat || !loc.lng) return;
@@ -264,7 +313,6 @@ export default function DeliveryManagement() {
           Number(riderActiveOrder.deliveryAddress.lng),
         ];
 
-        // Customer Destination Pin
         const customerIcon = L.divIcon({
           className: 'custom-dest-icon',
           html: `
@@ -286,7 +334,6 @@ export default function DeliveryManagement() {
         `);
         markersRef.current[`dest-${riderActiveOrder.id}`] = destMarker;
 
-        // Navigation Route Polyline: Restaurant -> Rider -> Customer
         const polyline = L.polyline([restaurantCoords, [loc.lat, loc.lng], destCoords], {
           color: '#F97316',
           weight: 4,
@@ -317,6 +364,60 @@ export default function DeliveryManagement() {
     toast.success(`Tracking live coordinates for ${partner.name}`);
   };
 
+  // Toggle partner online status
+  const handleTogglePartnerStatus = async (partner: DeliveryPartner) => {
+    const nextStatus = partner.status === 'online' || partner.status === 'busy' ? 'offline' : 'online';
+    try {
+      await setDoc(
+        doc(db, 'delivery_partners', partner.id),
+        { status: nextStatus, updatedAt: new Date().toISOString() },
+        { merge: true }
+      );
+      toast.success(`${partner.name} is now ${nextStatus.toUpperCase()}`);
+    } catch (e: any) {
+      toast.error('Failed to update rider status: ' + e.message);
+    }
+  };
+
+  // Add new delivery partner
+  const handleCreatePartner = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newPartnerName.trim() || !newPartnerPhone.trim()) {
+      toast.error('Partner name and phone are required.');
+      return;
+    }
+
+    const toastId = toast.loading('Registering delivery partner...');
+    try {
+      const partnerId = `rider-${Date.now().toString(36)}`;
+      await setDoc(doc(db, 'delivery_partners', partnerId), {
+        id: partnerId,
+        name: newPartnerName,
+        phone: newPartnerPhone,
+        email: newPartnerEmail || `${newPartnerPhone.replace(/\D/g, '')}@olivepizza.com`,
+        status: 'online',
+        approvalStatus: 'approved',
+        vehicleType: newPartnerVehicle,
+        vehicleNumber: newPartnerReg || 'Standard',
+        rating: 5.0,
+        totalDeliveries: 0,
+        lat: RESTAURANT_LOCATION.lat + (Math.random() - 0.5) * 0.01,
+        lng: RESTAURANT_LOCATION.lng + (Math.random() - 0.5) * 0.01,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      toast.success(`Registered ${newPartnerName} to delivery fleet!`, { id: toastId });
+      setIsAddModalOpen(false);
+      setNewPartnerName('');
+      setNewPartnerPhone('');
+      setNewPartnerEmail('');
+      setNewPartnerReg('');
+    } catch (err: any) {
+      toast.error('Registration failed: ' + err.message, { id: toastId });
+    }
+  };
+
   // Center map on Olive Pizza Restaurant
   const handleCenterRestaurant = () => {
     if (mapInstanceRef.current) {
@@ -343,11 +444,11 @@ export default function DeliveryManagement() {
         updatedAt: new Date().toISOString(),
       });
 
-      // Update partner status to busy
-      await updateDoc(doc(db, 'delivery_partners', partner.id), {
-        status: 'busy',
-        currentOrderId: orderId,
-      }).catch(() => {});
+      await setDoc(
+        doc(db, 'delivery_partners', partner.id),
+        { status: 'busy', currentOrderId: orderId, updatedAt: new Date().toISOString() },
+        { merge: true }
+      ).catch(() => {});
 
       toast.success(`Order assigned to ${partner.name}!`, { id: toastId });
     } catch (err: any) {
@@ -392,29 +493,38 @@ export default function DeliveryManagement() {
           </p>
         </div>
 
-        {/* Tab Controls */}
-        <div className="flex items-center gap-1.5 bg-[#0B0F17] p-1 rounded-xl border border-slate-800">
+        {/* Tab Controls & Add Partner */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 bg-[#0B0F17] p-1 rounded-xl border border-slate-800">
+            <button
+              onClick={() => setActiveTab('fleet')}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                activeTab === 'fleet'
+                  ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+              }`}
+            >
+              <Bike className="w-3.5 h-3.5" />
+              Rider Fleet ({partners.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('dispatch')}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                activeTab === 'dispatch'
+                  ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+              }`}
+            >
+              <Navigation className="w-3.5 h-3.5" />
+              Active Dispatch ({activeOrders.length})
+            </button>
+          </div>
+
           <button
-            onClick={() => setActiveTab('fleet')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              activeTab === 'fleet'
-                ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-            }`}
+            onClick={() => setIsAddModalOpen(true)}
+            className="px-3.5 py-2 bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-all shadow-lg shadow-orange-600/20"
           >
-            <Bike className="w-3.5 h-3.5" />
-            Rider Fleet ({partners.length})
-          </button>
-          <button
-            onClick={() => setActiveTab('dispatch')}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-              activeTab === 'dispatch'
-                ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
-                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-            }`}
-          >
-            <Navigation className="w-3.5 h-3.5" />
-            Active Dispatch ({activeOrders.length})
+            <Plus className="w-4 h-4" /> Add Rider
           </button>
         </div>
       </div>
@@ -534,14 +644,18 @@ export default function DeliveryManagement() {
 
               {/* Riders Scroll Area */}
               <div className="flex-1 overflow-y-auto space-y-2.5 pr-1">
-                {filteredPartners.length === 0 ? (
-                  <div className="text-center py-16 text-slate-500 text-xs">No delivery partners found matching filters.</div>
+                {loading ? (
+                  <div className="text-center py-16 text-slate-500 text-xs">Loading delivery partners...</div>
+                ) : filteredPartners.length === 0 ? (
+                  <div className="text-center py-16 text-slate-500 text-xs space-y-2">
+                    <Bike className="w-8 h-8 mx-auto text-slate-600 opacity-50" />
+                    <p>No delivery partners found. Click "Add Rider" to register one.</p>
+                  </div>
                 ) : (
                   filteredPartners.map((partner) => {
                     const isOnline = partner.status === 'online' || partner.status === 'busy';
                     const isBusy = partner.status === 'busy';
                     const isSelected = selectedPartnerId === partner.id;
-                    const loc = locations[partner.id];
 
                     return (
                       <div
@@ -566,17 +680,18 @@ export default function DeliveryManagement() {
                             </div>
                           </div>
 
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase ${
+                          <button
+                            onClick={() => handleTogglePartnerStatus(partner)}
+                            className={`px-2 py-0.5 rounded-full text-[9px] font-extrabold uppercase transition-all ${
                               isBusy
                                 ? 'bg-blue-500/10 text-blue-400 border border-blue-500/30'
                                 : isOnline
-                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                                : 'bg-slate-500/10 text-slate-400 border border-slate-500/30'
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20'
+                                : 'bg-slate-500/10 text-slate-400 border border-slate-500/30 hover:bg-slate-500/20'
                             }`}
                           >
                             {isBusy ? 'On Delivery' : isOnline ? 'Online' : 'Offline'}
-                          </span>
+                          </button>
                         </div>
 
                         {/* Telemetry & Action */}
@@ -654,6 +769,82 @@ export default function DeliveryManagement() {
           )}
         </div>
       </div>
+
+      {/* Add Rider Modal */}
+      {isAddModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="bg-[#0E1524] border border-slate-800 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h3 className="text-sm font-extrabold text-white flex items-center gap-2">
+                <Bike className="w-4 h-4 text-orange-400" /> Register Delivery Partner
+              </h3>
+              <button onClick={() => setIsAddModalOpen(false)} className="p-1.5 text-slate-400 hover:text-white rounded-lg">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreatePartner} className="space-y-3.5 text-xs">
+              <div>
+                <label className="text-[11px] font-bold text-slate-300 uppercase block mb-1">Rider Full Name</label>
+                <input
+                  type="text"
+                  value={newPartnerName}
+                  onChange={(e) => setNewPartnerName(e.target.value)}
+                  placeholder="e.g. Vikas Patel"
+                  className="w-full px-3.5 py-2.5 bg-[#0B0F17] border border-slate-800 rounded-xl text-white focus:border-orange-500 focus:outline-none"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-300 uppercase block mb-1">Phone Number</label>
+                <input
+                  type="text"
+                  value={newPartnerPhone}
+                  onChange={(e) => setNewPartnerPhone(e.target.value)}
+                  placeholder="+91 98765 43210"
+                  className="w-full px-3.5 py-2.5 bg-[#0B0F17] border border-slate-800 rounded-xl text-white focus:border-orange-500 focus:outline-none"
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-300 uppercase block mb-1">Vehicle Type</label>
+                  <select
+                    value={newPartnerVehicle}
+                    onChange={(e) => setNewPartnerVehicle(e.target.value)}
+                    className="w-full px-3 py-2.5 bg-[#0B0F17] border border-slate-800 rounded-xl text-white focus:border-orange-500 focus:outline-none"
+                  >
+                    <option value="Motorcycle">Motorcycle</option>
+                    <option value="EV Scooter">EV Scooter</option>
+                    <option value="Bicycle">Bicycle</option>
+                    <option value="Car">Car</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-slate-300 uppercase block mb-1">Vehicle Reg No.</label>
+                  <input
+                    type="text"
+                    value={newPartnerReg}
+                    onChange={(e) => setNewPartnerReg(e.target.value)}
+                    placeholder="CG-08-XX-1234"
+                    className="w-full px-3.5 py-2.5 bg-[#0B0F17] border border-slate-800 rounded-xl text-white focus:border-orange-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-3 bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-orange-600/20 mt-2"
+              >
+                <CheckCircle2 className="w-4 h-4" /> Save Delivery Partner
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
