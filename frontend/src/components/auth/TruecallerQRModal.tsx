@@ -26,7 +26,7 @@ export default function TruecallerQRModal({
   useEffect(() => {
     if (!isOpen || !requestId) return;
 
-    let pollInterval: NodeJS.Timeout;
+    let pollInterval: ReturnType<typeof setTimeout>;
     let isMounted = true;
 
     const startPolling = () => {

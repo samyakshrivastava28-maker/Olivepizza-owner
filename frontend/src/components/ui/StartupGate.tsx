@@ -60,8 +60,8 @@ export default function StartupGate({ children }: StartupGateProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playStarted = useRef(false);
   const endedRef = useRef(false);
-  const maxDurationTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const initialFailsafeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const maxDurationTimerRef = useRef<any | null>(null);
+  const initialFailsafeTimerRef = useRef<any | null>(null);
 
   const logDiagnostic = useCallback((reason: string, details?: any) => {
     try {

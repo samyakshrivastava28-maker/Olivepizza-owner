@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { useAuthStore } from '../../lib/store';
 import { LogOut, Bell, ShieldCheck, Activity } from 'lucide-react';
 import { Link } from 'react-router';
 import { fetchApi } from '../../lib/api';
 
-export const Header: React.FC = () => {
+interface HeaderProps { onToggleSidebar?: () => void; }
+export const Header: React.FC<HeaderProps> = ({ onToggleSidebar }) => {
   const { user, logout } = useAuthStore();
   const [serverOnline, setServerOnline] = useState<boolean | null>(null);
 
@@ -71,3 +72,4 @@ export const Header: React.FC = () => {
     </header>
   );
 };
+

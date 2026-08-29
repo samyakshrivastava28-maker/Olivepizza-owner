@@ -46,7 +46,9 @@ export type SectionType =
   | 'PIZZA_SHOWCASE'
   | 'TESTIMONIALS'
   | 'COUNTDOWN'
-  | 'GALLERY';
+  | 'GALLERY'
+  | 'ORDER_AGAIN'
+  | 'COMPLETE_MEAL';
 
 export type AnimationType = 'None' | 'Fade' | 'Fade Up' | 'Fade Down' | 'Slide' | 'Scale' | 'Pop' | 'Floating' | 'Stagger';
 

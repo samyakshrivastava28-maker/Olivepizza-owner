@@ -32,6 +32,38 @@ const DEFAULT_BRANCH_LAT = 21.0967;
 const DEFAULT_BRANCH_LNG = 81.0315;
 const DEFAULT_MAX_DELIVERY_RADIUS_KM = 12.0;
 
+
+// ─── GPS TELEMETRY VALIDATION & DEPARTURE REMINDER ENGINE ──────────────────
+interface GpsValidationResult {
+  valid: boolean;
+  error?: string;
+}
+
+function validateGpsTelemetry(lat: number, lng: number, speed?: number, timestamp?: string): GpsValidationResult {
+  if (isNaN(lat) || lat < -90 || lat > 90) {
+    return { valid: false, error: 'Invalid latitude value (-90 to 90 required)' };
+  }
+  if (isNaN(lng) || lng < -180 || lng > 180) {
+    return { valid: false, error: 'Invalid longitude value (-180 to 180 required)' };
+  }
+  // Max realistic speed: 150 km/h (41.6 m/s)
+  if (speed !== undefined && speed !== null && (speed < 0 || speed > 42)) {
+    return { valid: false, error: 'Unrealistic rider speed detected' };
+  }
+  if (timestamp) {
+    const timeMs = new Date(timestamp).getTime();
+    const nowMs = Date.now();
+    // Reject timestamps older than 2 minutes or more than 1 minute in the future
+    if (nowMs - timeMs > 120000) {
+      return { valid: false, error: 'Stale GPS timestamp (> 2 minutes old)' };
+    }
+    if (timeMs - nowMs > 60000) {
+      return { valid: false, error: 'Future GPS timestamp detected' };
+    }
+  }
+  return { valid: true };
+}
+
 // Updates delivery partner location
 router.post('/location/update', verifyToken, requireRole(['delivery', 'delivery_partner']), async (req: AuthRequest, res: Response) => {
   try {
@@ -42,6 +74,11 @@ router.post('/location/update', verifyToken, requireRole(['delivery', 'delivery_
     
     if (!actualPartnerId || actualLat === undefined || actualLng === undefined) {
       return res.status(400).json({ error: 'Missing required location data' });
+    }
+
+    const validation = validateGpsTelemetry(Number(actualLat), Number(actualLng), speed, req.body.timestamp);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
     }
 
     if (req.user?.uid !== actualPartnerId && req.user?.role !== 'admin') {
@@ -82,8 +119,39 @@ router.post('/location/update', verifyToken, requireRole(['delivery', 'delivery_
         last_updated = CURRENT_TIMESTAMP
     `, [actualPartnerId, orderId || null, actualLat, actualLng, accuracy || null, speed || null, heading || null]);
 
-    // If there's an active order, update distance and ETA in delivery_routes
+    // ── 300M RESTAURANT DEPARTURE REMINDER RULE ──────────────────────────
     if (orderId) {
+      try {
+        const orderSnap = await adminDb.collection('orders').doc(orderId).get();
+        if (orderSnap.exists) {
+          const oData = orderSnap.data()!;
+          const oStatus = (oData.status || '').toLowerCase();
+          
+          // Trigger reminder if rider is assigned/ready but has not moved to 'picked_up' or 'out_for_delivery'
+          if (['partner_assigned', 'ready'].includes(oStatus)) {
+            const restLat = oData.branchLat || DEFAULT_BRANCH_LAT;
+            const restLng = oData.branchLng || DEFAULT_BRANCH_LNG;
+            const distFromRestM = calculateDistance(Number(actualLat), Number(actualLng), Number(restLat), Number(restLng)) * 1000;
+            
+            if (distFromRestM >= 300 && (accuracy || 10) <= 35) {
+              console.log(`[DepartureRule] Rider ${actualPartnerId} is ${Math.round(distFromRestM)}m from store for order ${orderId}. Reminder triggered.`);
+              // Emit instant departure reminder event to rider
+              webSocketServer.broadcastToUser(actualPartnerId, {
+                type: 'DEPARTURE_REMINDER',
+                data: {
+                  orderId,
+                  distanceMeters: Math.round(distFromRestM),
+                  message: 'You have moved 300m away from the restaurant. Please update your order status to Picked Up.'
+                }
+              });
+            }
+          }
+        }
+      } catch (depErr: any) {
+        console.warn('[DepartureRule] Check notice:', depErr.message);
+      }
+
+    // If there's an active order, update distance and ETA in delivery_routes
       const routeResult = await client.query('SELECT customer_lat, customer_lng FROM delivery_routes WHERE order_id = $1 AND delivery_partner_id = $2', [orderId, actualPartnerId]);
       
       if (routeResult.rows.length > 0) {
@@ -387,3 +455,27 @@ router.get('/active-drivers', async (_req: Request, res: Response) => {
 
 export default router;
 
+
+// Get active driver locations for owner / manager tracking
+router.get('/locations/active', async (req, res) => {
+  try {
+    const locSnap = await adminDb.collection('delivery_locations').get();
+    const locations = [];
+    locSnap.forEach((d) => {
+      const data = d.data();
+      locations.push({
+        id: d.id,
+        delivery_partner_id: data.delivery_partner_id || d.id,
+        latitude: data.latitude || data.lat,
+        longitude: data.longitude || data.lng,
+        speed: data.speed || 0,
+        bearing: data.bearing || data.heading || 0,
+        updated_at: data.updated_at || data.updatedAt || new Date().toISOString(),
+        active_order_id: data.active_order_id || data.activeOrderId || null
+      });
+    });
+    res.json(locations);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});

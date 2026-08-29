@@ -64,7 +64,7 @@ export default function ProductMenuManager() {
             image: data.imageUrl || data.image || '',
             isAvailable: data.isAvailable ?? data.isActive ?? true,
             isVegetarian: data.isVegetarian ?? true,
-          } as Product);
+          } as unknown as Product);
         });
 
         // Client-side alphabetical sort
@@ -143,6 +143,7 @@ export default function ProductMenuManager() {
     const toastId = toast.loading('Saving menu product...');
     try {
       const payload = {
+        id: editingProduct?.id,
         name: formName,
         productName: formName,
         description: formDescription,
@@ -157,15 +158,36 @@ export default function ProductMenuManager() {
         updatedAt: new Date().toISOString(),
       };
 
-      if (editingProduct && editingProduct.id) {
-        await updateDoc(doc(db, 'products', editingProduct.id), payload);
-        toast.success(`Updated ${formName}!`, { id: toastId });
-      } else {
-        await addDoc(collection(db, 'products'), {
-          ...payload,
-          createdAt: new Date().toISOString(),
+      // 1. Primary: Save via backend API
+      let savedViaApi = false;
+      try {
+        const res = await fetchApi('/api/menu/master-products', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
         });
-        toast.success(`Added ${formName} to menu!`, { id: toastId });
+        if (res.ok) {
+          savedViaApi = true;
+          toast.success(`Saved ${formName}!`, { id: toastId });
+          setIsModalOpen(false);
+          return;
+        }
+      } catch (apiErr) {
+        console.warn('API save failed, falling back to direct Firestore:', apiErr);
+      }
+
+      // 2. Fallback: Direct Firestore
+      if (!savedViaApi) {
+        if (editingProduct && editingProduct.id) {
+          await updateDoc(doc(db, 'products', editingProduct.id), payload);
+          toast.success(`Updated ${formName}!`, { id: toastId });
+        } else {
+          await addDoc(collection(db, 'products'), {
+            ...payload,
+            createdAt: new Date().toISOString(),
+          });
+          toast.success(`Added ${formName} to menu!`, { id: toastId });
+        }
       }
 
       setIsModalOpen(false);
@@ -175,12 +197,42 @@ export default function ProductMenuManager() {
   };
 
   const handleDeleteProduct = async (prod: Product) => {
-    if (!confirm(`Are you sure you want to delete ${prod.name}?`)) return;
+    if (!prod || !prod.id) {
+      toast.error('Invalid product ID');
+      return;
+    }
+    if (!confirm(`Are you sure you want to delete "${prod.name}"?`)) return;
+
+    const toastId = toast.loading(`Deleting ${prod.name}...`);
+    const cleanId = prod.id.trim();
+
     try {
-      await deleteDoc(doc(db, 'products', prod.id));
-      toast.success(`Deleted ${prod.name}`);
+      // 1. Optimistically remove from local state
+      setProducts((prev) => prev.filter((p) => p.id !== cleanId));
+
+      // 2. Primary: Delete via Authoritative Backend API (Firebase Admin SDK)
+      let deletedViaApi = false;
+      try {
+        const res = await fetchApi(`/api/menu/master-products/${cleanId}`, {
+          method: 'DELETE'
+        });
+        if (res.ok) {
+          deletedViaApi = true;
+        }
+      } catch (apiErr) {
+        console.warn('Backend DELETE API failed, trying direct Firestore fallback:', apiErr);
+      }
+
+      // 3. Fallback: Direct Firestore deleteDoc
+      if (!deletedViaApi) {
+        await deleteDoc(doc(db, 'products', cleanId));
+      }
+
+      toast.success(`Deleted ${prod.name} successfully`, { id: toastId });
     } catch (e: any) {
-      toast.error('Delete failed: ' + e.message);
+      console.error('Delete error:', e);
+      // Restore on failure
+      toast.error('Delete failed: ' + (e.message || 'Check permissions'), { id: toastId });
     }
   };
 
@@ -506,3 +558,4 @@ export default function ProductMenuManager() {
     </div>
   );
 }
+

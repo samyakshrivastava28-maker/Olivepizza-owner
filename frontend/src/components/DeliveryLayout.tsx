@@ -41,7 +41,7 @@ export default function DeliveryLayout() {
         </div>
         <DeliveryAlertManager />
         <GlassCard className="p-8 max-w-md w-full z-10 flex flex-col items-center">
-          <div className="text-6xl mb-6">⏳</div>
+          <div className="text-6xl mb-6">â³</div>
           <h1 className="text-2xl font-black mb-2 text-white">Waiting for Approval</h1>
           <p className="text-white/60 font-medium mb-6">
             Your delivery partner account is currently <strong>{user.approvalStatus || 'pending'}</strong>. 
@@ -69,10 +69,10 @@ export default function DeliveryLayout() {
       await fetch(`/api/admin/users/${user.uid}/role`, { // Mock endpoint
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${await auth.currentUser?.getIdToken()}` },
-        body: JSON.stringify({ status: newStatus })
+        body: JSON.stringify({ status: newStatus as 'online' | 'offline' | 'busy' | 'break' })
       });
       // Update the local auth store so the UI reflects the change immediately
-      useAuthStore.getState().setUser({ ...user, status: newStatus }, role as any);
+      useAuthStore.getState().setUser({ ...user, status: newStatus as 'online' | 'offline' | 'busy' | 'break' }, role as any);
       toast.success(`Status updated to ${newStatus}`);
     } catch (err) {
       toast.error('Failed to update status');
@@ -130,7 +130,7 @@ export default function DeliveryLayout() {
               <option value="online">🟢 Online</option>
               <option value="busy">🟡 Busy</option>
               <option value="break">🔵 Break</option>
-              <option value="offline">⚪ Offline</option>
+              <option value="offline">âšª Offline</option>
             </select>
           </div>
         </div>

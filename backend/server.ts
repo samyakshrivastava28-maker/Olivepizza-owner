@@ -12,12 +12,14 @@ import { pineconeService } from './src/services/ai/PineconeService.ts';
 import { storageAnalyzer } from './src/services/storageAnalyzer.service.ts';
 import { validateEnvironmentVariables } from './src/config/validator.ts';
 import { initScheduler } from './src/scripts/scheduler.ts';
-import { initPostgres } from './src/config/postgres.ts';
+import { initPostgres, pgPool } from './src/config/postgres.ts';
+import { adminDb } from './src/config/firebase.ts';
 import { FirestoreListener } from './src/listeners/firestore.listener.ts';
 import { initKeepAlive } from './src/scripts/keepAlive.ts';
 import { webSocketServer } from './src/services/websocket/WebSocketServer.ts';
 import { AIHeartbeatJob } from './src/jobs/AIHeartbeatJob.ts';
 import { AiHealthMonitorService } from './src/services/AiHealthMonitorService.ts';
+import { SheetsSyncWorker } from './src/services/reports/SheetsSyncWorker.ts';
 
 dotenv.config();
 
@@ -33,7 +35,7 @@ process.on('unhandledRejection', (reason: any) => {
 validateEnvironmentVariables();
 
 const app = express();
-const PORT = process.env.PORT || 5175;
+const PORT = process.env.PORT || 5000;
 
 app.get('/health', (req, res) => {
   res.json({
@@ -45,10 +47,39 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.get('/ready', async (req, res) => {
+  const checks: Record<string, string> = {
+    server: 'ready',
+    firebase: 'checking',
+    postgres: 'checking'
+  };
+
+  try {
+    await adminDb.collection('settings').limit(1).get();
+    checks.firebase = 'healthy';
+  } catch (e: any) {
+    checks.firebase = 'degraded';
+  }
+
+  try {
+    await pgPool.query('SELECT 1');
+    checks.postgres = 'healthy';
+  } catch (e: any) {
+    checks.postgres = 'degraded';
+  }
+
+  const isReady = checks.server === 'ready';
+  res.status(isReady ? 200 : 503).json({
+    status: isReady ? 'ready' : 'not_ready',
+    checks,
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.get(['/api/heartbeat', '/heartbeat'], (req, res) => {
   res.json({
     status: 'ok',
-    service: 'Olive Pizza Owner Backend Service',
+    service: 'Olive Pizza Canonical Owner Backend Service',
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString()
   });
@@ -67,9 +98,9 @@ app.get('/keep-alive', (req, res) => {
 app.use('/api', apiApp);
 app.use(apiApp);
 
-// Start server immediately on port 5175
+// Start server on configured port (default: 5175 in dev)
 const server = app.listen(Number(PORT), '0.0.0.0', () => {
-  console.log(`🍕 Olive Pizza Full Owner Backend Server running on http://localhost:${PORT}`);
+  console.log(`⚡ Olive Pizza Canonical Backend Server running on http://localhost:${PORT}`);
   initKeepAlive();
   webSocketServer.attach(server);
   console.log('[WebSocketServer] Attached on path /ws');
@@ -81,6 +112,7 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
     DataRetentionJob.schedule();
     AIHeartbeatJob.schedule();
     AiHealthMonitorService.start();
+    SheetsSyncWorker.startBackgroundWorker(60000);
 
     kb.initialize().catch(err => console.warn('[KB] Non-fatal init error:', err.message));
     try {
@@ -94,3 +126,5 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
     FirestoreListener.init();
   })();
 });
+
+export default app;

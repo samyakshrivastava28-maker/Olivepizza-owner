@@ -66,14 +66,14 @@ export const LiveMapModal: React.FC<LiveMapModalProps> = ({
               <Navigation className="w-4 h-4 text-blue-400" />
               Assigned Delivery Partner
             </h4>
-            {partner || order.deliveryPartnerName ? (
+            {partner || (order as any).deliveryPartnerName ? (
               <div>
-                <p className="text-sm font-bold text-white">{partner?.name || order.deliveryPartnerName}</p>
+                <p className="text-sm font-bold text-white">{partner?.name || (order as any).deliveryPartnerName}</p>
                 <p className="text-xs text-slate-400">
                   {partner?.vehicleType || 'Motorcycle'} • {partner?.vehicleNumber || 'Registered'}
                 </p>
                 <p className="text-xs text-blue-400 font-mono mt-1">
-                  📞 {partner?.phone || order.deliveryPartnerPhone || 'Available'}
+                  📞 {partner?.phone || (order as any).deliveryPartnerPhone || 'Available'}
                 </p>
               </div>
             ) : (

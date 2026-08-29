@@ -1,0 +1,511 @@
+import { Router, Request, Response } from 'express';
+import { adminDb, adminAuth } from '../config/firebase.js';
+import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
+
+const router = Router();
+
+// ============================================================================
+// PUBLIC & PROTECTED GET: Restaurant Operational Status & Settings
+// ============================================================================
+router.get('/status', async (req: Request, res: Response) => {
+  try {
+    const branchId = (req.query.branchId as string) || 'main_branch';
+    const docRef = adminDb.collection('restaurant_settings').doc(branchId);
+    const snap = await docRef.get();
+
+    if (!snap.exists) {
+      // Default initial operational state
+      const defaultState = {
+        branchId,
+        franchiseId: 'olive_pizza_hq',
+        restaurantName: 'Olive Pizza — Rajnandgaon',
+        isOpen: true,
+        acceptingOrders: true,
+        closeReason: '',
+        currentPrepTime: 25,
+        services: {
+          delivery: true,
+          takeaway: true,
+          dineIn: true
+        },
+        deliverySettings: {
+          radiusKm: 12,
+          minOrderAmount: 199,
+          baseDeliveryFee: 40,
+          freeDeliveryThreshold: 499,
+          estimatedDeliveryMins: 30
+        },
+        paymentSettings: {
+          cashOnDelivery: true,
+          upi: true,
+          cards: true,
+          onlineGateway: true
+        },
+        taxAndCharges: {
+          gstPercentage: 5,
+          packagingCharge: 20,
+          serviceChargePercentage: 0
+        },
+        operatingHours: {
+          monday: { open: '10:00', close: '23:00', isOpen: true },
+          tuesday: { open: '10:00', close: '23:00', isOpen: true },
+          wednesday: { open: '10:00', close: '23:00', isOpen: true },
+          thursday: { open: '10:00', close: '23:00', isOpen: true },
+          friday: { open: '10:00', close: '23:30', isOpen: true },
+          saturday: { open: '10:00', close: '23:30', isOpen: true },
+          sunday: { open: '10:00', close: '23:30', isOpen: true }
+        },
+        specialHours: [],
+        updatedAt: new Date().toISOString(),
+        updatedBy: 'system'
+      };
+
+      await docRef.set(defaultState);
+      return res.json({ success: true, data: defaultState });
+    }
+
+    res.json({ success: true, data: snap.data() });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Helper for audit logging
+async function logAudit(
+  branchId: string, 
+  actorUid: string, 
+  actorEmail: string, 
+  actionType: string, 
+  fieldName: string, 
+  oldValue: any, 
+  newValue: any, 
+  notes?: string
+) {
+  try {
+    await adminDb.collection('restaurant_audit_logs').add({
+      branchId,
+      actorUid,
+      actorEmail,
+      actionType,
+      fieldName,
+      oldValue: oldValue !== undefined ? oldValue : null,
+      newValue,
+      notes: notes || '',
+      timestamp: new Date().toISOString()
+    });
+  } catch (e) {
+    console.warn('[RestaurantAudit] Audit log write notice:', e);
+  }
+}
+
+// ============================================================================
+// PROTECTED ROUTES: Require authentication + manager, owner, or admin role
+// ============================================================================
+router.use(verifyToken);
+router.use(requireRole(['owner', 'admin', 'manager', 'developer']));
+
+// 1. UPDATE OPERATIONAL STATUS (Open/Close, Accepting Orders, Reason)
+router.put('/status', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.body.branchId as string) || 'main_branch';
+    const { isOpen, acceptingOrders, closeReason, currentPrepTime } = req.body;
+    
+    const docRef = adminDb.collection('restaurant_settings').doc(branchId);
+    const prevSnap = await docRef.get();
+    const prevData = prevSnap.data() || {};
+
+    const updates: Record<string, any> = {
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user?.uid || 'manager',
+      updatedByEmail: req.user?.email || 'manager@olivepizza.in'
+    };
+
+    if (isOpen !== undefined) updates.isOpen = Boolean(isOpen);
+    if (acceptingOrders !== undefined) updates.acceptingOrders = Boolean(acceptingOrders);
+    if (closeReason !== undefined) updates.closeReason = String(closeReason);
+    if (currentPrepTime !== undefined) updates.currentPrepTime = Number(currentPrepTime);
+
+    await docRef.set(updates, { merge: true });
+
+    // Record audit log
+    await logAudit(
+      branchId,
+      req.user?.uid || 'manager',
+      req.user?.email || 'manager',
+      'STATUS_CHANGE',
+      'operational_status',
+      { isOpen: prevData.isOpen, acceptingOrders: prevData.acceptingOrders, closeReason: prevData.closeReason },
+      { isOpen: updates.isOpen, acceptingOrders: updates.acceptingOrders, closeReason: updates.closeReason },
+      updates.closeReason ? `Reason: ${updates.closeReason}` : 'Status toggle'
+    );
+
+    res.json({ success: true, message: 'Operational status updated successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 2. RESTAURANT PROFILE (Profile info, Address, Location, Contact)
+router.get('/profile', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.query.branchId as string) || 'main_branch';
+    const snap = await adminDb.collection('restaurant_profiles').doc(branchId).get();
+    
+    if (!snap.exists) {
+      const defaultProfile = {
+        branchId,
+        restaurantName: 'Olive Pizza',
+        legalName: 'Olive Pizza Food & Beverages Pvt. Ltd.',
+        fssaiNumber: '20524078000123',
+        gstNumber: '22AAAAA0000A1Z5',
+        phone: '+91 91799 91234',
+        email: 'olivepizzarjn@gmail.com',
+        addressLine: 'Dongargaon Road, Near Gurudwara',
+        landmark: 'Near Forest Office Colony',
+        city: 'Rajnandgaon',
+        state: 'Chhattisgarh',
+        pincode: '491441',
+        latitude: 21.0974,
+        longitude: 81.0378,
+        logoUrl: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?q=80&w=200',
+        coverUrl: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?q=80&w=1200'
+      };
+      await adminDb.collection('restaurant_profiles').doc(branchId).set(defaultProfile);
+      return res.json({ success: true, profile: defaultProfile });
+    }
+
+    res.json({ success: true, profile: snap.data() });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.put('/profile', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.body.branchId as string) || 'main_branch';
+    const profileData = {
+      ...req.body,
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user?.uid || 'manager'
+    };
+
+    await adminDb.collection('restaurant_profiles').doc(branchId).set(profileData, { merge: true });
+
+    await logAudit(
+      branchId,
+      req.user?.uid || 'manager',
+      req.user?.email || 'manager',
+      'PROFILE_UPDATE',
+      'restaurant_profile',
+      null,
+      profileData
+    );
+
+    res.json({ success: true, message: 'Restaurant profile updated successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 3. OPERATING HOURS
+router.put('/hours', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.body.branchId as string) || 'main_branch';
+    const { operatingHours } = req.body;
+    
+    if (!operatingHours) {
+      return res.status(400).json({ success: false, error: 'operatingHours object is required' });
+    }
+
+    await adminDb.collection('restaurant_settings').doc(branchId).set({
+      operatingHours,
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user?.uid || 'manager'
+    }, { merge: true });
+
+    await logAudit(
+      branchId,
+      req.user?.uid || 'manager',
+      req.user?.email || 'manager',
+      'HOURS_UPDATE',
+      'operatingHours',
+      null,
+      operatingHours
+    );
+
+    res.json({ success: true, message: 'Weekly operating hours saved successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 4. SPECIAL / HOLIDAY HOURS
+router.post('/special-hours', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.body.branchId as string) || 'main_branch';
+    const { date, name, isClosed, openTime, closeTime } = req.body;
+
+    const specialEntry = {
+      id: `special_${Date.now().toString(36)}`,
+      date,
+      name,
+      isClosed: Boolean(isClosed),
+      openTime: openTime || '10:00',
+      closeTime: closeTime || '23:00',
+      createdAt: new Date().toISOString(),
+      createdBy: req.user?.uid || 'manager'
+    };
+
+    const docRef = adminDb.collection('restaurant_settings').doc(branchId);
+    const snap = await docRef.get();
+    const existing = snap.data()?.specialHours || [];
+
+    const updated = [...existing.filter((s: any) => s.date !== date), specialEntry];
+    await docRef.set({ specialHours: updated }, { merge: true });
+
+    await logAudit(
+      branchId,
+      req.user?.uid || 'manager',
+      req.user?.email || 'manager',
+      'SPECIAL_HOURS_ADD',
+      'specialHours',
+      null,
+      specialEntry
+    );
+
+    res.json({ success: true, specialEntry });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.delete('/special-hours/:id', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.query.branchId as string) || 'main_branch';
+    const docRef = adminDb.collection('restaurant_settings').doc(branchId);
+    const snap = await docRef.get();
+    const existing = snap.data()?.specialHours || [];
+
+    const updated = existing.filter((s: any) => s.id !== req.params.id);
+    await docRef.set({ specialHours: updated }, { merge: true });
+
+    res.json({ success: true, deletedId: req.params.id });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 5. SERVICE AVAILABILITY (Delivery, Takeaway, Dine-In)
+router.put('/services', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.body.branchId as string) || 'main_branch';
+    const { services, currentPrepTime } = req.body;
+
+    const updates: Record<string, any> = {
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user?.uid || 'manager'
+    };
+
+    if (services) updates.services = services;
+    if (currentPrepTime !== undefined) updates.currentPrepTime = Number(currentPrepTime);
+
+    await adminDb.collection('restaurant_settings').doc(branchId).set(updates, { merge: true });
+
+    await logAudit(
+      branchId,
+      req.user?.uid || 'manager',
+      req.user?.email || 'manager',
+      'SERVICES_UPDATE',
+      'services',
+      null,
+      updates
+    );
+
+    res.json({ success: true, message: 'Service availability updated successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 6. DELIVERY SETTINGS
+router.put('/delivery-settings', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.body.branchId as string) || 'main_branch';
+    const { deliverySettings } = req.body;
+
+    if (!deliverySettings) return res.status(400).json({ success: false, error: 'deliverySettings required' });
+
+    await adminDb.collection('restaurant_settings').doc(branchId).set({
+      deliverySettings,
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user?.uid || 'manager'
+    }, { merge: true });
+
+    await logAudit(
+      branchId,
+      req.user?.uid || 'manager',
+      req.user?.email || 'manager',
+      'DELIVERY_SETTINGS_UPDATE',
+      'deliverySettings',
+      null,
+      deliverySettings
+    );
+
+    res.json({ success: true, message: 'Delivery settings saved successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 7. PAYMENT SETTINGS
+router.put('/payment-settings', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.body.branchId as string) || 'main_branch';
+    const { paymentSettings } = req.body;
+
+    if (!paymentSettings) return res.status(400).json({ success: false, error: 'paymentSettings required' });
+
+    await adminDb.collection('restaurant_settings').doc(branchId).set({
+      paymentSettings,
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user?.uid || 'manager'
+    }, { merge: true });
+
+    await logAudit(
+      branchId,
+      req.user?.uid || 'manager',
+      req.user?.email || 'manager',
+      'PAYMENT_SETTINGS_UPDATE',
+      'paymentSettings',
+      null,
+      paymentSettings
+    );
+
+    res.json({ success: true, message: 'Payment settings saved successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 8. TAX & CHARGES
+router.put('/tax-charges', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.body.branchId as string) || 'main_branch';
+    const { taxAndCharges } = req.body;
+
+    if (!taxAndCharges) return res.status(400).json({ success: false, error: 'taxAndCharges required' });
+
+    await adminDb.collection('restaurant_settings').doc(branchId).set({
+      taxAndCharges,
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user?.uid || 'manager'
+    }, { merge: true });
+
+    await logAudit(
+      branchId,
+      req.user?.uid || 'manager',
+      req.user?.email || 'manager',
+      'TAX_CHARGES_UPDATE',
+      'taxAndCharges',
+      null,
+      taxAndCharges
+    );
+
+    res.json({ success: true, message: 'Tax & charges configuration saved' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 9. STAFF & ROLES DIRECTORY
+router.get('/staff', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.query.branchId as string) || 'main_branch';
+    const snap = await adminDb.collection('users')
+      .where('role', 'in', ['owner', 'admin', 'manager', 'kitchen', 'cashier', 'delivery', 'staff'])
+      .get()
+      .catch(() => ({ docs: [] }));
+
+    const staff: any[] = [];
+    snap.docs.forEach((doc: any) => {
+      const data = doc.data();
+      staff.push({
+        id: doc.id,
+        name: data.name || data.displayName || 'Staff Member',
+        email: data.email || '',
+        phone: data.phone || data.phoneNumber || '',
+        role: data.role || 'staff',
+        isActive: data.isActive !== false,
+        branchId: data.branchId || branchId,
+        lastLogin: data.lastLogin || data.updatedAt || data.createdAt || ''
+      });
+    });
+
+    res.json({ success: true, staff });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.put('/staff/:id/role', async (req: AuthRequest, res: Response) => {
+  try {
+    const { role, isActive, branchId } = req.body;
+    const targetUid = req.params.id;
+
+    const updates: Record<string, any> = { updatedAt: new Date().toISOString() };
+    if (role) updates.role = role;
+    if (isActive !== undefined) updates.isActive = Boolean(isActive);
+    if (branchId) updates.branchId = branchId;
+
+    await adminDb.collection('users').doc(targetUid).set(updates, { merge: true });
+
+    if (role) {
+      await adminAuth.setCustomUserClaims(targetUid, { role }).catch(() => {});
+    }
+
+    await logAudit(
+      branchId || 'main_branch',
+      req.user?.uid || 'manager',
+      req.user?.email || 'manager',
+      'STAFF_ROLE_CHANGE',
+      'role',
+      null,
+      { targetUid, role, isActive }
+    );
+
+    res.json({ success: true, message: 'Staff member updated successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 10. AUDIT LOGS
+router.get('/audit-logs', async (req: AuthRequest, res: Response) => {
+  try {
+    const branchId = (req.query.branchId as string) || 'main_branch';
+    const limitCount = Number(req.query.limit) || 50;
+
+    const snap = await adminDb.collection('restaurant_audit_logs')
+      .where('branchId', '==', branchId)
+      .orderBy('timestamp', 'desc')
+      .limit(limitCount)
+      .get()
+      .catch(async () => {
+        // Fallback without composite index
+        return await adminDb.collection('restaurant_audit_logs').limit(limitCount).get();
+      });
+
+    const logs: any[] = [];
+    snap.docs.forEach((doc: any) => {
+      logs.push({ id: doc.id, ...doc.data() });
+    });
+
+    logs.sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
+
+    res.json({ success: true, logs });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+export default router;

@@ -59,7 +59,7 @@ export function CustomerGuard() {
   }
 
   // Prevent delivery partners and owners from accessing the customer dashboard directly
-  if (role === 'delivery_partner' || role === 'delivery') {
+  if ((role as string) === 'delivery_partner') {
     return <Navigate to="/delivery/dashboard" replace />;
   }
   
@@ -75,12 +75,12 @@ export function DeliveryGuard() {
   const { isAuthenticated, user, role, isLoading } = useAuthStore();
   const location = useLocation();
 
-  const isUnauthorized = !isAuthenticated || (role !== 'delivery_partner' && role !== 'delivery');
+  const isUnauthorized = !isAuthenticated || ((role as string) !== 'delivery_partner');
 
   React.useEffect(() => {
     if (!isLoading && isUnauthorized) {
       showNotFoundToast();
-      if (role && role !== 'delivery_partner' && role !== 'delivery') {
+      if (role && (role as string) !== 'delivery_partner') {
         logSecurityEvent({
           action: 'unauthorized_delivery_access_attempt',
           route: location.pathname,
@@ -160,7 +160,7 @@ export function AdminGuard() {
   return <Outlet />;
 }
 
-// 6. Developer Guard (strictly developer role or webhub2811@gmail.com — owners cannot access)
+// 6. Developer Guard (strictly developer role or webhub2811@gmail.com Ã¢â‚¬” owners cannot access)
 export function DeveloperGuard() {
   const { isAuthenticated, user, role, isLoading } = useAuthStore();
   const location = useLocation();

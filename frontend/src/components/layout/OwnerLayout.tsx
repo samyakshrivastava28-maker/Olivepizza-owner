@@ -1,4 +1,5 @@
-import React, { useState, useEffect, Suspense } from 'react';
+import { RouteErrorBoundary } from '../RouteErrorBoundary';
+﻿import React, { useState, useEffect, Suspense } from 'react';
 import { Outlet, NavLink, useLocation, useNavigate } from 'react-router';
 import { Header } from './Header';
 import { MobileNav } from './MobileNav';
@@ -19,6 +20,9 @@ import {
   FolderOpen,
   Pizza,
   Store,
+  Users,
+  Building2,
+  LayoutTemplate,
   X,
   Menu,
 } from 'lucide-react';
@@ -64,17 +68,18 @@ export const OwnerLayout: React.FC = () => {
     return () => unsubscribe();
   }, [user]);
 
-  // Streamlined 9 Core Canonical Navigation Items
+  // Core Canonical Navigation Items including Home Page Manager
   const navItems = [
     { label: 'Analytics', path: '/analytics', icon: BarChart3 },
     { label: 'Orders', path: '/orders', icon: Clock },
     { label: 'Delivery Fleet', path: '/delivery', icon: Bike },
+    { label: 'Home Page Manager', path: '/home-manager', icon: LayoutTemplate },
     { label: 'Restaurant Reports', path: '/reports', icon: FileText },
     { label: 'Notifications', path: '/notifications', icon: Bell },
     { label: 'Email', path: '/email', icon: Mail },
     { label: 'Media', path: '/media', icon: FolderOpen },
     { label: 'Product & Menu', path: '/products', icon: Pizza },
-    { label: 'Restaurant Management', path: '/restaurant', icon: Store },
+    { label: 'Franchise Management', path: '/franchises', icon: Building2 },
   ];
 
   return (
@@ -89,7 +94,7 @@ export const OwnerLayout: React.FC = () => {
         <div className="p-4 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2.5 overflow-hidden">
             <div className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-400 flex items-center justify-center font-bold text-sm shrink-0">
-              🍕
+              ðŸ•
             </div>
             {!isSidebarCollapsed && (
               <div>
@@ -100,20 +105,10 @@ export const OwnerLayout: React.FC = () => {
               </div>
             )}
           </div>
-          <button
-            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-            title="Toggle Sidebar"
-          >
-            <Menu className="w-4 h-4" />
-          </button>
         </div>
 
-        {/* Navigation Items */}
-        <nav className="flex-1 overflow-y-auto p-3 space-y-1.5">
-          <div className="px-3 pb-2 text-[10px] font-extrabold text-slate-500 uppercase tracking-widest">
-            {!isSidebarCollapsed && 'Operations'}
-          </div>
+        {/* Navigation Links */}
+        <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
           {navItems.map((item) => (
             <NavLink
               key={item.path}
@@ -123,43 +118,68 @@ export const OwnerLayout: React.FC = () => {
                   isActive
                     ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
                     : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                } ${isSidebarCollapsed ? 'justify-center px-2' : ''}`
+                }`
               }
-              title={isSidebarCollapsed ? item.label : undefined}
             >
-              <item.icon className="w-4 h-4 flex-shrink-0" />
+              <item.icon className="w-4 h-4 shrink-0" />
               {!isSidebarCollapsed && <span>{item.label}</span>}
             </NavLink>
           ))}
         </nav>
+
+        {/* Footer User Info */}
+        {!isSidebarCollapsed && (
+          <div className="p-4 border-t border-slate-800 flex items-center gap-3">
+            <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-xs font-bold text-slate-300">
+              {user?.name?.charAt(0) || 'O'}
+            </div>
+            <div className="overflow-hidden">
+              <div className="text-xs font-bold text-white truncate">{user?.name || 'Store Owner'}</div>
+              <div className="text-[10px] text-slate-400 truncate">{user?.email || 'olivepizzarjn@gmail.com'}</div>
+            </div>
+          </div>
+        )}
       </aside>
+
+      {/* Main Layout Area */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-screen">
+        <Header onToggleSidebar={() => setIsSidebarCollapsed(!isSidebarCollapsed)} />
+
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 pb-20 md:pb-8 overflow-y-auto">
+          <RouteErrorBoundary>
+            <Suspense fallback={<PizzaLoader text="Loading module..." />}>
+              <Outlet />
+            </Suspense>
+          </RouteErrorBoundary>
+        </main>
+
+        <MobileNav onOpenDrawer={() => setIsMobileDrawerOpen(true)} />
+      </div>
 
       {/* Mobile Drawer */}
       {isMobileDrawerOpen && (
-        <div className="fixed inset-0 z-50 md:hidden flex">
-          <div className="fixed inset-0 bg-black/75 backdrop-blur-sm" onClick={() => setIsMobileDrawerOpen(false)} />
-          <div className="relative w-72 max-w-[80vw] bg-[#0E1524] border-r border-slate-800 h-full flex flex-col p-4 z-10">
+        <div className="md:hidden fixed inset-0 z-50 flex">
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setIsMobileDrawerOpen(false)} />
+          <div className="relative w-72 bg-[#0E1524] h-full flex flex-col z-10 border-r border-slate-800 p-4">
             <div className="flex items-center justify-between pb-4 border-b border-slate-800 mb-4">
               <div className="flex items-center gap-2">
-                <span className="text-xl">🍕</span>
-                <span className="font-extrabold text-white text-sm">Olive Pizza Owner</span>
+                <span className="text-xl">ðŸ•</span>
+                <span className="font-extrabold text-sm text-white">OLIVE PIZZA OWNER</span>
               </div>
-              <button
-                onClick={() => setIsMobileDrawerOpen(false)}
-                className="p-1 text-slate-400 hover:text-white rounded-lg"
-              >
+              <button onClick={() => setIsMobileDrawerOpen(false)} className="p-1 text-slate-400 hover:text-white">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <nav className="flex-1 overflow-y-auto space-y-1.5">
+
+            <nav className="flex-1 space-y-1 overflow-y-auto">
               {navItems.map((item) => (
                 <NavLink
                   key={item.path}
                   to={item.path}
                   onClick={() => setIsMobileDrawerOpen(false)}
                   className={({ isActive }) =>
-                    `flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold transition-colors ${
-                      isActive ? 'bg-orange-500 text-white' : 'text-slate-300 hover:bg-slate-800/60'
+                    `flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold transition-all ${
+                      isActive ? 'bg-orange-500 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                     }`
                   }
                 >
@@ -172,21 +192,8 @@ export const OwnerLayout: React.FC = () => {
         </div>
       )}
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
-        <Header />
-        <main className="flex-1 overflow-y-auto p-4 sm:p-6 md:p-8 pb-24 md:pb-8">
-          <Suspense fallback={<PizzaLoader text="Loading module..." />}>
-            <Outlet />
-          </Suspense>
-        </main>
-        <MobileNav onOpenDrawer={() => setIsMobileDrawerOpen(true)} />
-      </div>
-
-      {/* Persistent Order Alert Alarm & Audio Manager */}
+      {/* System Overlays */}
       <OwnerAlertManager />
-
-      {/* Emergency Full-Screen Audio Overlay for New Pending Orders */}
       {emergencyOrder && (
         <NewOrderEmergencyOverlay
           order={emergencyOrder}
@@ -196,3 +203,4 @@ export const OwnerLayout: React.FC = () => {
     </div>
   );
 };
+

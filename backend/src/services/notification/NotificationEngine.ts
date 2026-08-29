@@ -404,6 +404,47 @@ export class NotificationEngine {
   }
 
   /**
+   * Resolves active user UIDs for restaurant managers/staff for a specific branch.
+   * Strictly scopes new-order and operational alerts to the target branch.
+   */
+  public async resolveBranchStaff(
+    branchId: string,
+    roles: string[] = ['restaurant_manager', 'kitchen_staff', 'manager']
+  ): Promise<string[]> {
+    const uidsSet = new Set<string>();
+
+    try {
+      // 1. Query Firestore users by branchId + role
+      for (const r of roles) {
+        const snap = await db.collection('users')
+          .where('branchId', '==', branchId)
+          .where('role', '==', r)
+          .get();
+        snap.docs.forEach(doc => {
+          if (doc.data()?.isActive !== false) {
+            uidsSet.add(doc.id);
+          }
+        });
+      }
+
+      // 2. Also check branchIds array (multi-branch managers)
+      const multiSnap = await db.collection('users')
+        .where('branchIds', 'array-contains', branchId)
+        .get();
+      multiSnap.docs.forEach(doc => {
+        const d = doc.data();
+        if (d?.isActive !== false && roles.includes(d?.role)) {
+          uidsSet.add(doc.id);
+        }
+      });
+    } catch (e: any) {
+      console.warn(`[NotificationEngine] Branch staff lookup failed for branch ${branchId}:`, e.message);
+    }
+
+    return Array.from(uidsSet);
+  }
+
+  /**
    * Automatic Token Cleanup Job:
    * 1. Deactivates tokens inactive > 30 days.
    * 2. Deletes duplicate inactive tokens older than 60 days.

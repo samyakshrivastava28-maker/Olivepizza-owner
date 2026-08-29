@@ -32,6 +32,7 @@ const Events = lazy(() => import('./pages/Events'));
 const Analytics = lazy(() => import('./pages/Analytics'));
 const DataManager = lazy(() => import('./pages/DataManager'));
 const Settings = lazy(() => import('./pages/Settings'));
+const Franchises = lazy(() => import('./pages/Franchises'));
 
 export default function App() {
   return (
@@ -82,7 +83,7 @@ export default function App() {
               <Route path="/events" element={<Events />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/data-manager" element={<DataManager />} />
-              <Route path="/settings" element={<Settings />} />
+              <Route path="/settings" element={<Settings />} />`r`n              <Route path="/franchises" element={<Franchises />} />
             </Route>
           </Route>
 

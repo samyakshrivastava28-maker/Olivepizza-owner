@@ -9,7 +9,7 @@ interface QueuedEvent {
 }
 
 let eventQueue: QueuedEvent[] = [];
-let flushTimer: NodeJS.Timeout | null = null;
+let flushTimer: any | null = null;
 
 function getSessionId(): string {
   if (typeof window === 'undefined') return 'server';

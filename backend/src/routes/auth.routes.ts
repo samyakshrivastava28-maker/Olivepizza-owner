@@ -63,4 +63,57 @@ router.post('/verify-recaptcha', async (req: Request, res: Response) => {
   }
 });
 
+
+import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
+import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
+
+// POST /api/auth/context-session - Owner Authorized Context Switching for Standalone Apps
+router.post('/context-session', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    const isGlobalOwner = FranchiseScopeService.isGlobalOwner(user.email, user.role);
+    if (!isGlobalOwner) {
+      res.status(403).json({ error: 'Forbidden. Only platform Global Owner can create scoped management contexts.' });
+      return;
+    }
+
+    const { targetApp, targetFranchiseId, targetBranchId, targetBranchName } = req.body;
+
+    const tokenPayload = {
+      ownerUid: user.uid,
+      ownerEmail: user.email,
+      targetApp: targetApp || 'restaurant_management',
+      targetFranchiseId: targetFranchiseId || 'fra_primary',
+      targetBranchId: targetBranchId || 'main_branch',
+      targetBranchName: targetBranchName || 'Olive Pizza — Rajnandgaon HQ',
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString() // 8 hour session
+    };
+
+    const sessionKey = Buffer.from(JSON.stringify(tokenPayload)).toString('base64url');
+
+    let targetUrl = 'http://localhost:5176';
+    if (targetApp === 'franchise') {
+      targetUrl = `http://localhost:5175?context=${sessionKey}&franchiseId=${encodeURIComponent(tokenPayload.targetFranchiseId)}`;
+    } else {
+      targetUrl = `http://localhost:5176?context=${sessionKey}&branchId=${encodeURIComponent(tokenPayload.targetBranchId)}&branchName=${encodeURIComponent(tokenPayload.targetBranchName)}`;
+    }
+
+    res.json({
+      success: true,
+      sessionKey,
+      targetUrl,
+      context: tokenPayload
+    });
+  } catch (error: any) {
+    console.error('[Auth] Error generating context session:', error);
+    res.status(500).json({ error: error?.message || 'Failed to generate context session' });
+  }
+});
+
 export default router;

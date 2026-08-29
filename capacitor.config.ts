@@ -6,7 +6,11 @@ const config: CapacitorConfig = {
   webDir: 'frontend/dist',
   server: {
     androidScheme: 'https',
+    iosScheme: 'https',
     cleartext: true,
+  },
+  ios: {
+    contentInset: 'always',
   },
   android: {
     allowMixedContent: true,

@@ -1,14 +1,17 @@
+import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
+import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { Router, Request, Response } from 'express';
 import { query } from '../lib/db.js';
 import { verifyToken, AuthRequest } from '../middleware/auth.middleware.js';
 import { adminDb } from '../config/firebase.js';
-import { OwnerTemplates, CustomerTemplates } from '../services/notification/NotificationTemplates.js';
+import { OwnerTemplates, CustomerTemplates, RestaurantTemplates } from '../services/notification/NotificationTemplates.js';
 
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
 import { orderEventService } from '../services/order/OrderEventService.js';
 import { queueEmail } from '../services/email.service.js';
 import { buildOrderStatusEmail } from '../services/emailTemplates.service.js';
 import { DeliveryCapacityService } from '../services/delivery/DeliveryCapacityService.js';
+import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogleSheetsService.js';
 import crypto from 'crypto';
 
 // Restaurant local timezone for daily order counter reset
@@ -41,39 +44,170 @@ async function getNextDailyOrderNumber(): Promise<{ dailyOrderNumber: number; or
 
 const router = Router();
 
-// Get orders for logged in user
+// 1. GET / - Get orders (Customer gets own orders, Staff gets scoped branch orders)
 router.get('/', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const userId = req.user?.uid;
-    if (!userId) {
+    const user = req.user;
+    if (!user || !user.uid) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
 
+    const role = (user.role || 'customer').toLowerCase();
+    const isStaff = ['restaurant_manager', 'manager', 'owner', 'developer', 'admin', 'platform_owner', 'kitchen_staff', 'cashier'].includes(role) ||
+      user.email === 'olivepizzarjn@gmail.com' ||
+      user.email === 'webhub2811@gmail.com';
+
+    if (isStaff) {
+      const scope = FranchiseScopeService.resolveScope(user);
+      const requestedBranchId = (req.query.branchId as string) || (req.headers['x-branch-id'] as string) || 'main_branch';
+      const effectiveBranchId = FranchiseScopeService.getEffectiveBranchId(scope, requestedBranchId);
+
+      let q: any = adminDb.collection('orders');
+      if (effectiveBranchId !== 'all') {
+        q = q.where('branchId', '==', effectiveBranchId);
+      }
+
+      const snapshot = await q.orderBy('createdAt', 'desc').limit(100).get().catch(async () => {
+        // Fallback without index if orderBy fails
+        let fallbackQ: any = adminDb.collection('orders');
+        if (effectiveBranchId !== 'all') {
+          fallbackQ = fallbackQ.where('branchId', '==', effectiveBranchId);
+        }
+        return await fallbackQ.limit(100).get();
+      });
+
+      const orders = snapshot.docs.map((doc: any) => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          orderNumber: data.orderNumber || `#${doc.id.slice(0, 6).toUpperCase()}`,
+          dailyOrderNumber: data.dailyOrderNumber,
+          userId: data.userId,
+          customerName: data.customerName || data.userName || data.deliveryAddress?.customerName || 'Customer',
+          contactPhone: data.contactPhone || data.phone || '',
+          customerEmail: data.customerEmail || data.userEmail || '',
+          deliveryAddress: data.deliveryAddress,
+          items: data.items || [],
+          subtotal: Number(data.subtotal || data.totalAmount || 0),
+          totalAmount: Number(data.totalAmount || 0),
+          deliveryFee: Number(data.deliveryFee || 0),
+          taxes: Number(data.taxes || 0),
+          packagingCharge: Number(data.packagingCharge || 0),
+          discountAmount: Number(data.discountAmount || 0),
+          status: (data.status || 'pending').toLowerCase(),
+          fulfillmentType: data.fulfillmentType || data.deliveryType || 'delivery',
+          deliveryType: data.deliveryType || 'delivery',
+          paymentStatus: data.paymentStatus || 'pending',
+          paymentMethod: data.paymentMethod || 'online',
+          deliveryPartnerId: data.deliveryPartnerId,
+          deliveryPartnerName: data.deliveryPartnerName,
+          branchId: data.branchId || 'main_branch',
+          createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : (data.createdAt || new Date()),
+          updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : (data.updatedAt || new Date()),
+        };
+      });
+
+      res.json(orders);
+      return;
+    }
+
+    // Normal customer: fetch only their own orders
     const snapshot = await adminDb.collection('orders')
-      .where('userId', '==', userId)
+      .where('userId', '==', user.uid)
       .orderBy('createdAt', 'desc')
-      .get();
+      .limit(50)
+      .get()
+      .catch(async () => {
+        return await adminDb.collection('orders').where('userId', '==', user.uid).limit(50).get();
+      });
       
-    const orders = snapshot.docs.map(doc => {
+    const orders = snapshot.docs.map((doc: any) => {
       const data = doc.data();
       return {
         id: doc.id,
         userId: data.userId,
+        orderNumber: data.orderNumber || `#${doc.id.slice(0, 6).toUpperCase()}`,
+        dailyOrderNumber: data.dailyOrderNumber,
         status: data.status,
-        totalAmount: Number(data.totalAmount),
+        totalAmount: Number(data.totalAmount || 0),
         deliveryFee: Number(data.deliveryFee || 0),
         contactPhone: data.contactPhone,
         deliveryAddress: data.deliveryAddress?.addressLine || data.deliveryAddress,
-        createdAt: data.createdAt instanceof Date ? data.createdAt : data.createdAt?.toDate ? data.createdAt.toDate() : new Date(data.createdAt),
-        updatedAt: data.updatedAt instanceof Date ? data.updatedAt : data.updatedAt?.toDate ? data.updatedAt.toDate() : new Date(data.updatedAt)
+        items: data.items || [],
+        createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : (data.createdAt || new Date()),
+        updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : (data.updatedAt || new Date())
       };
     });
 
     res.json(orders);
   } catch (error) {
-    console.error("Failed to fetch orders:", error);
+    console.error("[Orders] Failed to fetch orders:", error);
     res.status(500).json({ error: 'Failed to fetch orders' });
+  }
+});
+
+// 2. GET /live - Dedicated live orders endpoint for Restaurant Managers & KDS
+router.get('/live', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const scope = FranchiseScopeService.resolveScope(user);
+    const requestedBranchId = (req.query.branchId as string) || (req.headers['x-branch-id'] as string) || 'main_branch';
+    const effectiveBranchId = FranchiseScopeService.getEffectiveBranchId(scope, requestedBranchId);
+
+    const activeStatuses = ['pending', 'pending_acceptance', 'accepted', 'preparing', 'ready', 'partner_assigned', 'picked_up', 'out_for_delivery'];
+
+    let q: any = adminDb.collection('orders');
+    if (effectiveBranchId !== 'all') {
+      q = q.where('branchId', '==', effectiveBranchId);
+    }
+
+    const snapshot = await q.orderBy('createdAt', 'desc').limit(50).get().catch(async () => {
+      let fallbackQ: any = adminDb.collection('orders');
+      if (effectiveBranchId !== 'all') {
+        fallbackQ = fallbackQ.where('branchId', '==', effectiveBranchId);
+      }
+      return await fallbackQ.limit(50).get();
+    });
+
+    const activeOrders = snapshot.docs
+      .map((doc: any) => {
+        const data = doc.data();
+        const status = (data.status || 'pending').toLowerCase();
+        return {
+          id: doc.id,
+          orderNumber: data.orderNumber || `#${doc.id.slice(0, 6).toUpperCase()}`,
+          dailyOrderNumber: data.dailyOrderNumber,
+          userId: data.userId,
+          customerName: data.customerName || data.userName || data.deliveryAddress?.customerName || 'Customer',
+          contactPhone: data.contactPhone || data.phone || '',
+          deliveryAddress: data.deliveryAddress,
+          items: data.items || [],
+          subtotal: Number(data.subtotal || data.totalAmount || 0),
+          totalAmount: Number(data.totalAmount || 0),
+          deliveryFee: Number(data.deliveryFee || 0),
+          taxes: Number(data.taxes || 0),
+          status,
+          fulfillmentType: data.fulfillmentType || data.deliveryType || 'delivery',
+          deliveryType: data.deliveryType || 'delivery',
+          deliveryPartnerId: data.deliveryPartnerId,
+          deliveryPartnerName: data.deliveryPartnerName,
+          branchId: data.branchId || 'main_branch',
+          createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : (data.createdAt || new Date()),
+          updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : (data.updatedAt || new Date()),
+        };
+      })
+      .filter((o: any) => activeStatuses.includes(o.status));
+
+    res.json({ success: true, count: activeOrders.length, orders: activeOrders });
+  } catch (error: any) {
+    console.error("[Orders] Failed to fetch live orders:", error);
+    res.status(500).json({ error: error?.message || 'Failed to fetch live orders' });
   }
 });
 
@@ -235,8 +369,115 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
 
     const deliveryFee = deliveryType === 'delivery' ? Number(req.body.deliveryFee ?? 40) : 0;
     const taxes = Math.round(serverCalculatedTotal * 0.05);
-    const discountAmount = Number(req.body.discountAmount || 0);
+
+    // ── PHASE 3: SERVER-SIDE COUPON REVALIDATION ──────────────────────────────
+    // The client may supply a couponCode. The server independently verifies it.
+    // Client-supplied discountAmount is IGNORED in favor of the server-calculated value.
+    let discountAmount = 0;
+    let appliedCouponCode: string | null = null;
+    let couponRejectReason: string | null = null;
+
+    const clientCouponCode: string | null = req.body.couponCode?.trim()?.toUpperCase() || null;
+    if (clientCouponCode) {
+      try {
+        const couponSnap = await adminDb.collection('coupons')
+          .where('code', '==', clientCouponCode)
+          .limit(1)
+          .get();
+
+        if (!couponSnap.empty) {
+          const couponData = couponSnap.docs[0].data();
+          const now = new Date();
+          const expiresAt = couponData.expiresAt ? new Date(couponData.expiresAt) : null;
+          const startsAt = couponData.startsAt ? new Date(couponData.startsAt) : null;
+          const usageCount = Number(couponData.usageCount || 0);
+          const usageLimit = Number(couponData.usageLimit || Infinity);
+          const minOrderAmount = Number(couponData.minOrderAmount || 0);
+
+          if (!couponData.isActive) {
+            couponRejectReason = `Coupon ${clientCouponCode} is inactive.`;
+          } else if (expiresAt && now > expiresAt) {
+            couponRejectReason = `Coupon ${clientCouponCode} has expired.`;
+          } else if (startsAt && now < startsAt) {
+            couponRejectReason = `Coupon ${clientCouponCode} is not yet valid.`;
+          } else if (usageCount >= usageLimit) {
+            couponRejectReason = `Coupon ${clientCouponCode} has reached its usage limit.`;
+          } else if (serverCalculatedTotal < minOrderAmount) {
+            couponRejectReason = `Minimum order amount for this coupon is ₹${minOrderAmount}. Current subtotal: ₹${serverCalculatedTotal}.`;
+          } else {
+            // Calculate server-side discount
+            const discountType: string = couponData.discountType || 'percentage';
+            const discountValue = Number(couponData.discountValue || 0);
+            const maxDiscount = Number(couponData.maxDiscount || Infinity);
+
+            if (discountType === 'percentage') {
+              discountAmount = Math.min(Math.round(serverCalculatedTotal * (discountValue / 100)), maxDiscount);
+            } else if (discountType === 'flat') {
+              discountAmount = Math.min(discountValue, serverCalculatedTotal);
+            }
+
+            appliedCouponCode = clientCouponCode;
+            // Increment usage count asynchronously (non-blocking)
+            adminDb.collection('coupons').doc(couponSnap.docs[0].id).update({
+              usageCount: (couponData.usageCount || 0) + 1,
+              lastUsedAt: new Date().toISOString()
+            }).catch((e) => console.warn('[Orders] Coupon usage count update warning:', e));
+          }
+        } else {
+          couponRejectReason = `Coupon ${clientCouponCode} does not exist.`;
+        }
+      } catch (couponErr: any) {
+        console.warn('[Orders] Coupon validation error (non-blocking, coupon not applied):', couponErr.message);
+        couponRejectReason = 'Coupon validation temporarily unavailable. Order placed without discount.';
+      }
+    }
+
+    // ── PHASE 3: SCHEDULED ORDER VALIDATION ──────────────────────────────────
+    const orderTiming: string = req.body.orderTiming || 'immediate';
+    const scheduledFor: string | null = req.body.scheduledFor || null; // ISO string
+
+    if (orderTiming === 'scheduled') {
+      if (!scheduledFor) {
+        res.status(400).json({ error: 'scheduledFor (ISO datetime) is required for scheduled orders.' });
+        return;
+      }
+      const scheduledDate = new Date(scheduledFor);
+      if (isNaN(scheduledDate.getTime())) {
+        res.status(400).json({ error: 'scheduledFor must be a valid ISO datetime string.' });
+        return;
+      }
+      if (scheduledDate <= new Date()) {
+        res.status(400).json({ error: 'scheduledFor must be a future date/time.' });
+        return;
+      }
+      // Validate scheduled hour is within store opening hours (12:00–23:59)
+      const scheduledHour = scheduledDate.getHours();
+      const scheduledMinute = scheduledDate.getMinutes();
+      const scheduledTotalMinutes = scheduledHour * 60 + scheduledMinute;
+      const openMinutes = 12 * 60;   // 12:00 = 720
+      const closeMinutes = 23 * 60 + 59; // 23:59 = 1439
+      if (scheduledTotalMinutes < openMinutes || scheduledTotalMinutes > closeMinutes) {
+        res.status(400).json({
+          error: `Scheduled time must be between 12:00 PM and 11:59 PM (store operating hours). Requested: ${scheduledDate.toLocaleTimeString()}.`
+        });
+        return;
+      }
+    }
+
+    // ── PHASE 3: ORDER SOURCE TAGGING ─────────────────────────────────────────
+    // Distinguishes online customer orders from POS-originated orders.
+    // POS routes supply their own orderSource; online checkout defaults to 'ONLINE'.
+    const orderSource: string = req.body.orderSource || 'ONLINE';
+    const VALID_ORDER_SOURCES = ['ONLINE', 'POS_DINE_IN', 'POS_TAKEAWAY', 'POS_DELIVERY', 'OFFLINE_RESTAURANT'];
+    const resolvedOrderSource = VALID_ORDER_SOURCES.includes(orderSource) ? orderSource : 'ONLINE';
+
+    // Allow POS cashier manual discounts when no coupon is used
+    if (resolvedOrderSource !== 'ONLINE' && req.body.discountAmount && !clientCouponCode) {
+      discountAmount = Math.min(Math.max(0, Number(req.body.discountAmount) || 0), serverCalculatedTotal);
+    }
+
     const finalOrderTotal = Math.max(0, serverCalculatedTotal - discountAmount) + deliveryFee + taxes;
+
 
     // 2.5 Duplicate Order Prevention (Idempotency / Distributed Lock)
     const deviceId = (req.headers['x-device-id'] as string) || req.ip || 'unknown';
@@ -277,6 +518,8 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     // Human-readable daily number (#14) or fallback OP-XXXXXX
     const orderNumber = dailyOrderNumber > 0 ? '#' + dailyOrderNumber : 'OP-' + shortId;
 
+    const resolvedBranchId = req.body.session?.branchId || req.body.branchId || (req.headers['x-branch-id'] as string) || 'main_branch';
+
     try {
       await adminDb.collection('orders').doc(newOrderId).set({
         id: newOrderId,
@@ -287,7 +530,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         deliveryFee,
         taxes,
         discountAmount,
-        status: 'pending_acceptance',
+        status: 'pending',
         notification_version: 1,
         deliveryAddress: { 
           addressLine: userAddress || 'Pickup', 
@@ -307,11 +550,50 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         daily_order_number: orderNumber,
         paymentMethod: req.body.paymentMethod || 'COD',
         paymentId: req.body.paymentId || ('pay_' + newOrderId.slice(0, 8)),
-        deliveryType,
+        // Phase 3 canonical order fields
+        orderSource: resolvedOrderSource,
+        orderTiming,
+        scheduledFor: scheduledFor || null,
+        appliedCouponCode: appliedCouponCode || null,
+        couponRejectReason: couponRejectReason || null,
+        // POS & Multi-Tenant Terminal Metadata
+        tableNumber: req.body.tableNumber || null,
+        cashierName: req.body.session?.cashierName || req.body.cashierName || null,
+        terminalId: req.body.session?.terminalId || req.body.terminalId || (req.headers['x-terminal-id'] as string) || null,
+        branchId: resolvedBranchId,
+        branchName: req.body.session?.branchName || req.body.branchName || 'Olive Pizza — Rajnandgaon HQ',
+        franchiseId: req.body.session?.franchiseId || req.body.franchiseId || 'fra_primary',
+        organizationId: req.body.session?.organizationId || req.body.organizationId || 'org_olive_pizza',
+        paymentDetails: req.body.paymentDetails || null,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
+
       trace.steps.push({ step: 'Firestore Write', status: 'success', orderId: newOrderId, dailyOrderNumber });
+
+      // Asynchronously sync online order to franchise-specific Google Spreadsheet
+      FranchiseGoogleSheetsService.syncOrderToFranchise({
+        id: newOrderId,
+        userId,
+        items: validatedItems,
+        totalAmount: finalOrderTotal,
+        subtotal: serverCalculatedTotal,
+        deliveryFee,
+        taxes,
+        discountAmount,
+        status: 'pending',
+        contactPhone: userPhone,
+        customerName: userData.name || (req.user as any)?.name || 'Gourmet Customer',
+        dailyOrderNumber,
+        orderSource: resolvedOrderSource,
+        paymentMethod: req.body.paymentMethod || 'COD',
+        paymentStatus: (req.body.paymentMethod || 'COD').toUpperCase() === 'ONLINE' ? 'PAID' : 'PENDING',
+        branchId: resolvedBranchId,
+        branchName: req.body.session?.branchName || req.body.branchName || 'Olive Pizza — Rajnandgaon HQ',
+        franchiseId: req.body.session?.franchiseId || req.body.franchiseId || 'fra_rajnandgaon',
+        deliveryAddress: { addressLine: userAddress || 'Pickup' },
+        createdAt: new Date()
+      }).catch(e => console.warn('[OnlineOrderSheetSync] Notice:', e.message));
     } catch (err: any) {
       console.warn('[Orders] Firestore write failed:', err);
       trace.steps.push({ step: 'Firestore Write', status: 'error', error: err.message });
@@ -326,18 +608,23 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
       orderNumber, 
       dailyOrderNumber: dailyOrderNumber > 0 ? dailyOrderNumber : null, 
       orderDateLocal, 
+      orderSource: resolvedOrderSource,
+      appliedCouponCode: appliedCouponCode || null,
+      couponRejectReason: couponRejectReason || null,
+      discountAmount,
+      finalTotal: finalOrderTotal,
       trace: isDebug ? trace : undefined 
     });
 
     // Release checkout lock immediately so customer can place next order without waiting
     query('DELETE FROM checkout_locks WHERE user_id = $1', [userId]).catch(() => {});
 
-    // 5. Asynchronous Background Dispatch (Non-blocking: Customer receives instant response)
+    // 5. Asynchronous Background Dispatch (Targeted Restaurant Management Notification with Action Buttons)
     setImmediate(async () => {
       try {
-        const ownerUids = await notificationEngine.resolveByRole('owner');
-        if (ownerUids.length > 0) {
-          const ownerPayload = OwnerTemplates.newOrder(newOrderId, {
+        const branchStaffUids = await notificationEngine.resolveBranchStaff(resolvedBranchId);
+        if (branchStaffUids.length > 0) {
+          const restaurantPayload = RestaurantTemplates.newOrder(newOrderId, {
             customerName: userData.name || 'Customer',
             orderNumber,
             totalAmount: finalOrderTotal,
@@ -345,53 +632,60 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
             paymentMethod: req.body.paymentMethod || 'COD',
             deliveryAddress: userAddress || 'Pickup',
             phone: userPhone,
-            orderTime: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+            branchId: resolvedBranchId,
+            orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
             version: 1,
           });
-          await notificationEngine.sendBulk(ownerUids, ownerPayload, { category: 'alarm_actionable', priority: 'critical', orderId: newOrderId });
+          await notificationEngine.sendBulk(branchStaffUids, restaurantPayload, {
+            category: 'alarm_actionable',
+            priority: 'critical',
+            orderId: newOrderId
+          });
         }
       } catch (notifErr: any) {
-        console.error('[Orders] Async NotificationEngine dispatch error:', notifErr.message);
+        console.error('[Orders] Async Restaurant Notification dispatch error:', notifErr.message);
       }
 
-      // Customer Confirmation Email Dispatch (Non-blocking)
-      if (userData.email) {
-        try {
-          const { buildOrderStatusEmail } = await import('../services/emailTemplates.service.js');
-          const customerEmailHtml = buildOrderStatusEmail({
-            customerName: userData.name || 'Valued Customer',
-            subject: 'Order Placed - Olive Pizza',
-            stage: 'pending',
-            orderId: newOrderId,
-            data: { orderNumber, totalAmount: 'Rs. ' + finalOrderTotal },
-            orderData: {
-              items: validatedItems,
-              total_amount: finalOrderTotal,
-              subtotal: serverCalculatedTotal,
-              delivery_address: { addressLine1: userAddress, fullName: userData.name, phone: userPhone },
-              payment_method: req.body.paymentMethod || 'COD'
-            }
-          });
-
-          await queueEmail(
-            userData.email,
-            'Your Olive Pizza Order ' + orderNumber + ' is Received!',
-            customerEmailHtml,
-            'transactional',
-            null,
-            'order_placed_' + newOrderId
-          );
-        } catch (emailErr: any) {
-          console.warn('[Orders] Customer order placed email queue warning:', emailErr.message);
-        }
-      }
+      // Transactional order email removed in favor of real-time push / in-app notification system (Section 5)
 
       try {
         await orderEventService.emitNewOrder(newOrderId);
       } catch (pushErr: any) {
         console.error('[Orders] Async OrderEventService failed:', pushErr.message);
       }
+
+      // Phase 10: Google Sheets Sync Engine (Non-blocking)
+      try {
+        const { SheetsSyncWorker } = await import('../services/reports/SheetsSyncWorker.js');
+        await SheetsSyncWorker.queueOrder(newOrderId, {
+          orderNumber,
+          customerName: userData.name || 'Customer',
+          customerPhone: userPhone,
+          totalAmount: finalOrderTotal,
+          subtotal: serverCalculatedTotal,
+          discountAmount,
+          taxes,
+          deliveryFee,
+          paymentMethod: req.body.paymentMethod || 'COD',
+          orderType: deliveryType,
+          orderSource: resolvedOrderSource,
+          tableNumber: req.body.tableNumber || undefined,
+          terminalId: req.body.session?.terminalId || req.body.terminalId || (req.headers['x-terminal-id'] as string) || undefined,
+          cashierName: req.body.session?.cashierName || req.body.cashierName || undefined,
+          branchName: req.body.session?.branchName || req.body.branchName || 'Olive Pizza — Rajnandgaon HQ',
+          franchiseId: req.body.session?.franchiseId || req.body.franchiseId || 'fra_primary',
+          status: 'pending',
+          itemCount: validatedItems.reduce((sum: number, it: any) => sum + (it.quantity || 1), 0),
+          items: validatedItems,
+          couponCode: appliedCouponCode || undefined,
+          createdAt: new Date().toISOString()
+        });
+      } catch (sheetErr: any) {
+        console.warn('[Orders] SheetsSyncWorker notice:', sheetErr.message);
+      }
     });
+
+
   } catch (error: any) {
     console.error('Error creating order:', error);
     trace.steps.push({ step: 'Fatal Error', status: 'failed', error: error.message });
@@ -408,45 +702,368 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
   }
 });
 
-// Owner Accept Order
-router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) => {
+// Universal Order Status Update (Owner, Admin, Delivery Partner)
+router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const userRole = req.user?.role;
-    const uid = req.user?.uid;
-    if (userRole !== 'owner' || !uid) return res.status(403).json({ error: 'Unauthorized' });
+    const { status, cancellationReason, deliveryPartnerId, deliveryPartnerName, deliveryPartnerPhone } = req.body;
+    const uid = req.user?.uid || 'system';
+    const role = req.user?.role || 'restaurant_manager';
+    const name = (req.user as any)?.name || (req.user as any)?.displayName || req.user?.email || 'Staff';
 
-    await adminDb.collection('orders').doc(id).update({
-      status: 'preparing',
-      updatedAt: new Date()
-    });
+    if (!status) {
+      res.status(400).json({ error: 'Status is required' });
+      return;
+    }
 
-    orderEventService.emitStatusChange(id, 'preparing', uid);
-    res.json({ success: true, status: 'preparing' });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to accept order' });
+    const metadata: Record<string, any> = {};
+    if (cancellationReason) metadata.cancellationReason = cancellationReason;
+    if (deliveryPartnerId) metadata.deliveryPartnerId = deliveryPartnerId;
+    if (deliveryPartnerName) metadata.deliveryPartnerName = deliveryPartnerName;
+    if (deliveryPartnerPhone) metadata.deliveryPartnerPhone = deliveryPartnerPhone;
+
+    const result = await OrderStateMachine.transition(id, status as any, { uid, role, name }, metadata);
+    if (!result.success) {
+      res.status(400).json({ error: result.error || 'Failed to update order status' });
+      return;
+    }
+
+    res.json({ success: true, orderId: id, status: result.currentStatus, version: result.version });
+  } catch (error: any) {
+    console.error('[Orders] Universal status update failed:', error?.message);
+    res.status(500).json({ error: 'Failed to update order status' });
   }
 });
 
-// Owner Reject Order
-router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) => {
+// Restaurant Manager / Staff Accept Order Action (From App or Notification Action)
+router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) => {
+  const requestId = `req_acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   try {
     const { id } = req.params;
     const userRole = req.user?.role;
     const uid = req.user?.uid;
-    if (userRole !== 'owner' || !uid) return res.status(403).json({ error: 'Unauthorized' });
+    const userBranchId = req.user?.branchId;
+    const name = (req.user as any)?.name || req.user?.email || 'Manager';
+    const isAuthorizedStaff = ['owner', 'admin', 'developer', 'manager', 'restaurant_manager', 'kitchen_staff'].includes(userRole || '');
+    
+    if (!isAuthorizedStaff || !uid) {
+      return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
+    }
 
-    await adminDb.collection('orders').doc(id).update({
-      status: 'cancelled',
-      cancellationReason: req.body.reason || 'Rejected by restaurant',
-      updatedAt: new Date()
+    // Pre-check order existence and branch scoping
+    const orderDoc = await adminDb.collection('orders').doc(id).get();
+    if (!orderDoc.exists) {
+      return res.status(404).json({ success: false, error: 'Order not found', requestId });
+    }
+
+    const orderData = orderDoc.data()!;
+    const orderBranchId = orderData.branchId || 'main_branch';
+    const isGlobalUser = ['owner', 'admin', 'developer'].includes(userRole || '') || 
+      ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'].includes(req.user?.email?.toLowerCase() || '');
+
+    if (!isGlobalUser && userBranchId && userBranchId !== orderBranchId) {
+      return res.status(403).json({
+        success: false,
+        error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
+        requestId
+      });
+    }
+
+    // Idempotency check: if order was already accepted, return 200 without re-transitioning
+    const currentStatus = orderData.status;
+    if (['accepted', 'preparing', 'ready', 'partner_assigned', 'picked_up', 'out_for_delivery', 'delivered'].includes(currentStatus)) {
+      return res.json({
+        success: true,
+        message: `Order #${orderData.orderNumber || id} is already in progress (${currentStatus})`,
+        orderId: id,
+        status: currentStatus,
+        duplicate: true,
+        requestId
+      });
+    }
+
+    if (currentStatus === 'cancelled' || currentStatus === 'rejected') {
+      return res.status(409).json({
+        success: false,
+        error: `Order #${orderData.orderNumber || id} has already been cancelled`,
+        status: currentStatus,
+        requestId
+      });
+    }
+
+    // Step 1: Transition to accepted
+    const accResult = await OrderStateMachine.transition(id, 'accepted', { uid, role: userRole || 'restaurant_manager', name, branchId: orderBranchId });
+    if (!accResult.success) {
+      return res.status(400).json({ success: false, error: accResult.error, requestId });
+    }
+
+    // Step 2: Transition to preparing
+    const prepResult = await OrderStateMachine.transition(id, 'preparing', { uid, role: userRole || 'restaurant_manager', name, branchId: orderBranchId });
+    if (!prepResult.success) {
+      return res.status(400).json({ success: false, error: prepResult.error, requestId });
+    }
+
+    res.json({
+      success: true,
+      message: `Order #${orderData.orderNumber || id} accepted and baking started`,
+      orderId: id,
+      status: 'preparing',
+      version: prepResult.version,
+      requestId
+    });
+  } catch (error: any) {
+    console.error('[Orders] Accept action failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to accept order', requestId });
+  }
+});
+
+// Restaurant Manager / Staff Reject Order Action (From App or Notification Action)
+router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) => {
+  const requestId = `req_rej_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  try {
+    const { id } = req.params;
+    const userRole = req.user?.role;
+    const uid = req.user?.uid;
+    const userBranchId = req.user?.branchId;
+    const name = (req.user as any)?.name || req.user?.email || 'Manager';
+    const isAuthorizedStaff = ['owner', 'admin', 'developer', 'manager', 'restaurant_manager'].includes(userRole || '');
+    
+    if (!isAuthorizedStaff || !uid) {
+      return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
+    }
+
+    const orderDoc = await adminDb.collection('orders').doc(id).get();
+    if (!orderDoc.exists) {
+      return res.status(404).json({ success: false, error: 'Order not found', requestId });
+    }
+
+    const orderData = orderDoc.data()!;
+    const orderBranchId = orderData.branchId || 'main_branch';
+    const isGlobalUser = ['owner', 'admin', 'developer'].includes(userRole || '') || 
+      ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'].includes(req.user?.email?.toLowerCase() || '');
+
+    if (!isGlobalUser && userBranchId && userBranchId !== orderBranchId) {
+      return res.status(403).json({
+        success: false,
+        error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
+        requestId
+      });
+    }
+
+    const currentStatus = orderData.status;
+    if (['preparing', 'ready', 'partner_assigned', 'picked_up', 'out_for_delivery', 'delivered'].includes(currentStatus)) {
+      return res.status(409).json({
+        success: false,
+        error: `Cannot reject order #${orderData.orderNumber || id} because it is already ${currentStatus}`,
+        status: currentStatus,
+        requestId
+      });
+    }
+
+    const result = await OrderStateMachine.transition(id, 'cancelled', { uid, role: userRole || 'restaurant_manager', name, branchId: orderBranchId }, {
+      cancellationReason: req.body.reason || 'Restaurant is at full capacity'
     });
 
-    orderEventService.emitStatusChange(id, 'cancelled', uid);
-    res.json({ success: true, status: 'cancelled' });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to reject order' });
+    if (!result.success) {
+      return res.status(400).json({ success: false, error: result.error, requestId });
+    }
+
+    res.json({
+      success: true,
+      message: `Order #${orderData.orderNumber || id} rejected successfully`,
+      orderId: id,
+      status: 'cancelled',
+      version: result.version,
+      requestId
+    });
+  } catch (error: any) {
+    console.error('[Orders] Reject action failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to reject order', requestId });
+  }
+});
+
+
+// Manual Assignment: Get eligible riders for order (Section 14)
+router.get('/:id/eligible-riders', verifyToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { RiderDispatchEngine } = await import('../services/delivery/RiderDispatchEngine.js');
+    const riders = await RiderDispatchEngine.findEligibleRiders(id);
+    res.json({ success: true, orderId: id, riders });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to query eligible riders' });
+  }
+});
+
+// Manual Assignment: Assign specific rider to order (Section 14)
+router.post('/:id/assign-rider', verifyToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { riderId } = req.body;
+    const userRole = req.user?.role;
+    const uid = req.user?.uid;
+    const name = (req.user as any)?.name || req.user?.email || 'Manager';
+    
+    if (!['owner', 'admin', 'developer', 'manager', 'restaurant_manager'].includes(userRole || '')) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+
+    if (!riderId) return res.status(400).json({ error: 'riderId is required' });
+
+    const { RiderDispatchEngine } = await import('../services/delivery/RiderDispatchEngine.js');
+    const eligibleRiders = await RiderDispatchEngine.findEligibleRiders(id);
+    const selected = eligibleRiders.find(r => r.uid === riderId);
+
+    if (!selected && userRole !== 'owner' && userRole !== 'admin') {
+      return res.status(400).json({ error: 'Selected rider is ineligible (offline, busy, or out of branch radius).' });
+    }
+
+    const { adminDb } = await import('../config/firebase.js');
+    const riderDoc = await adminDb.collection('users').doc(riderId).get();
+    const rData = riderDoc.data() || {};
+
+    const result = await OrderStateMachine.transition(id, 'partner_assigned', { uid: uid || 'system', role: userRole || 'restaurant_manager', name }, {
+      deliveryPartnerId: riderId,
+      deliveryPartnerName: rData.name || rData.displayName || 'Rider',
+      deliveryPartnerPhone: rData.phone || rData.phoneNumber || '+91 91799 44445',
+    });
+
+    if (!result.success) return res.status(400).json({ error: result.error });
+
+    // Notify Rider
+    const { notificationEngine } = await import('../services/notification/NotificationEngine.js');
+    await notificationEngine.send(riderId, {
+      notification: {
+        title: '🛵 New Delivery Assigned!',
+        body: `Order #${id.slice(-6)} has been assigned to you.`,
+      },
+      data: { orderId: id, type: 'rider_assignment' }
+    }, { category: 'alarm_actionable', priority: 'critical', orderId: id });
+
+    res.json({ success: true, orderId: id, status: 'partner_assigned', rider: { id: riderId, name: rData.name } });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ─── POST /:id/rating — Customer Post-Delivery Rating ───────────────────────
+router.post('/:id/rating', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.uid;
+    const { foodRating, deliveryRating, overallRating, comment } = req.body;
+
+    if (!overallRating || Number(overallRating) < 1 || Number(overallRating) > 5) {
+      res.status(400).json({ error: 'Valid overallRating (1-5) is required.' });
+      return;
+    }
+
+    const orderRef = adminDb.collection('orders').doc(id);
+    const snap = await orderRef.get();
+    if (!snap.exists) {
+      res.status(404).json({ error: 'Order not found' });
+      return;
+    }
+
+    const orderData = snap.data()!;
+    if (orderData.userId !== userId && req.user?.role !== 'owner' && req.user?.role !== 'admin') {
+      res.status(403).json({ error: 'Forbidden: You can only rate your own orders.' });
+      return;
+    }
+
+    const ratingRecord = {
+      orderId: id,
+      userId,
+      customerName: orderData.customerName || 'Customer',
+      foodRating: Number(foodRating || overallRating),
+      deliveryRating: Number(deliveryRating || overallRating),
+      overallRating: Number(overallRating),
+      comment: comment ? String(comment).trim() : '',
+      branchId: orderData.branchId || 'main_branch',
+      deliveryPartnerId: orderData.deliveryPartnerId || null,
+      createdAt: new Date().toISOString(),
+    };
+
+    await adminDb.collection('order_ratings').add(ratingRecord);
+    await orderRef.update({
+      isRated: true,
+      rating: ratingRecord,
+      updatedAt: new Date(),
+    });
+
+    res.json({ success: true, message: 'Thank you for your rating!', rating: ratingRecord });
+  } catch (err: any) {
+    console.error('[Orders] Rating error:', err);
+    res.status(500).json({ error: 'Failed to submit rating' });
+  }
+});
+
+// ─── POST /:id/reorder — 1-Click Reorder with Fresh Pricing & Stock Check ───
+router.post('/:id/reorder', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.uid;
+
+    const snap = await adminDb.collection('orders').doc(id).get();
+    if (!snap.exists) {
+      res.status(404).json({ error: 'Original order not found' });
+      return;
+    }
+
+    const oldOrder = snap.data()!;
+    const items = oldOrder.items || [];
+    if (!items || items.length === 0) {
+      res.status(400).json({ error: 'No items in original order to reorder' });
+      return;
+    }
+
+    // Revalidate items against current catalog
+    const freshItems: any[] = [];
+    let serverCalculatedTotal = 0;
+
+    for (const it of items) {
+      const itemId = it.menuItemId || it.id;
+      let currentPrice = Number(it.price || 0);
+      let isAvailable = true;
+
+      if (itemId && typeof itemId === 'string' && !itemId.startsWith('item-')) {
+        const prodSnap = await adminDb.collection('products').doc(itemId).get();
+        if (prodSnap.exists) {
+          const pData = prodSnap.data()!;
+          if (pData.isAvailable === false || pData.isActive === false) isAvailable = false;
+          currentPrice = Number(pData.offerPrice || pData.basePrice || pData.price || currentPrice);
+        }
+      }
+
+      if (!isAvailable) {
+        res.status(400).json({ error: `Item '${it.name}' is currently unavailable for reorder.` });
+        return;
+      }
+
+      const qty = Number(it.quantity || 1);
+      serverCalculatedTotal += currentPrice * qty;
+      freshItems.push({
+        ...it,
+        price: currentPrice,
+        quantity: qty,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Reorder validated with current catalog prices',
+      reorderItems: freshItems,
+      subtotal: serverCalculatedTotal,
+      taxes: Math.round(serverCalculatedTotal * 0.05),
+      deliveryAddress: oldOrder.deliveryAddress,
+      deliveryType: oldOrder.deliveryType || 'delivery',
+    });
+  } catch (err: any) {
+    console.error('[Orders] Reorder error:', err);
+    res.status(500).json({ error: 'Failed to prepare reorder' });
   }
 });
 
 export default router;
+

@@ -15,8 +15,8 @@ export default function LocationPrompt() {
 
   useEffect(() => {
     // Only prompt customer users who haven't saved an address yet
-    if (isAuthenticated && user && (role === 'customer' || !role) && !user.lat && !user.fullAddress && !dismissed) {
-      let timer: NodeJS.Timeout;
+    if (isAuthenticated && user && (role === 'customer' || !role) && !(user as any).lat && !(user as any).fullAddress && !dismissed) {
+      let timer: any;
       LocationManager.shouldPrompt().then(should => {
         if (should && !dismissed) {
           timer = setTimeout(() => setShowPrompt(true), 2500);

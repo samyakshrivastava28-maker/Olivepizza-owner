@@ -249,7 +249,7 @@ export class StorageAnalyzerService {
       const listPromise = CloudflareR2Service.listObjects('');
       const timeoutPromise = new Promise<any[]>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000));
       const objects = await Promise.race([listPromise, timeoutPromise]).catch(() => []);
-      const totalUsedBytes = objects.reduce((sum, obj) => sum + (obj.size || 0), 0);
+      const totalUsedBytes = (objects as any[]).reduce((sum: number, obj: any) => sum + (obj.size || 0), 0);
       const filesCount = objects.length;
       const limitBytes = 10 * 1024 * 1024 * 1024; // 10 GB Free R2 Tier Limit
 

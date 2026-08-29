@@ -18,11 +18,21 @@ import {
   Zap,
 } from 'lucide-react';
 import { db } from '../lib/firebase';
-import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
+import { collection, onSnapshot } from 'firebase/firestore';
 import { Order } from '../types/models';
 import { fetchApi } from '../lib/api';
 
 type TimeRange = 'today' | 'yesterday' | 'week' | 'month' | 'custom';
+
+function parseTimestamp(val: any): Date {
+  if (!val) return new Date();
+  if (val instanceof Date) return val;
+  if (typeof val.toDate === 'function') return val.toDate();
+  if (typeof val === 'object' && val._seconds) return new Date(val._seconds * 1000);
+  if (typeof val === 'number') return new Date(val);
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? new Date() : d;
+}
 
 export default function Analytics() {
   const [orders, setOrders] = useState<Order[]>([]);
@@ -36,28 +46,34 @@ export default function Analytics() {
   // Subscribe to real-time orders from Firestore
   useEffect(() => {
     setLoading(true);
-    const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(500));
     const unsubscribe = onSnapshot(
-      q,
+      collection(db, 'orders'),
       (snapshot) => {
         const fetchedOrders: Order[] = [];
-        snapshot.forEach((doc) => {
-          fetchedOrders.push({ id: doc.id, ...doc.data() } as Order);
+        snapshot.forEach((docSnap) => {
+          fetchedOrders.push({ id: docSnap.id, ...docSnap.data() } as Order);
         });
+
+        // Client-side sort by parsed timestamp
+        fetchedOrders.sort((a, b) => {
+          const timeA = parseTimestamp(a.createdAt).getTime();
+          const timeB = parseTimestamp(b.createdAt).getTime();
+          return timeB - timeA;
+        });
+
         setOrders(fetchedOrders);
         setIsLive(true);
         setLoading(false);
         setLastRefreshed(new Date());
       },
       (error) => {
-        console.warn('[Analytics] Firestore real-time listener failed, falling back to API:', error);
+        console.warn('[Analytics] Firestore stream notice, trying API fallback:', error);
         setIsLive(false);
         fetchApi('/api/orders?limit=300')
-          .then((res) => res.json())
+          .then(async (res) => { if (!res.ok) return {}; return res.json().catch(() => ({})); })
           .then((data) => {
-            if (data.orders || Array.isArray(data)) {
-              setOrders(data.orders || data);
-            }
+            const list = Array.isArray(data) ? data : data.orders || [];
+            setOrders(list);
           })
           .catch((err) => console.error('[Analytics] API fallback failed:', err))
           .finally(() => setLoading(false));
@@ -76,7 +92,7 @@ export default function Analytics() {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
 
     return orders.filter((order) => {
-      const orderTime = new Date(order.createdAt?.toDate ? order.createdAt.toDate() : order.createdAt || 0).getTime();
+      const orderTime = parseTimestamp(order.createdAt).getTime();
 
       switch (timeRange) {
         case 'today':
@@ -116,29 +132,29 @@ export default function Analytics() {
 
     filteredOrders.forEach((o) => {
       const status = (o.status || 'pending').toLowerCase();
-      const amount = Number(o.total || o.finalAmount || o.totalAmount || 0);
+      const amount = Number(o.totalAmount ?? (o as any).total ?? (o as any).finalAmount ?? 0);
 
-      if (status !== 'cancelled') {
+      if (status !== 'cancelled' && status !== 'rejected') {
         totalRevenue += amount;
       }
 
       if (status === 'delivered' || status === 'completed') completedCount++;
-      else if (status === 'cancelled') cancelledCount++;
+      else if (status === 'cancelled' || status === 'rejected') cancelledCount++;
       else activeCount++;
 
       // Fulfillment
-      const fulfillment = (o.fulfillmentType || o.fulfillment || 'delivery').toLowerCase();
+      const fulfillment = ((o as any).deliveryType || (o as any).fulfillmentType || (o as any).fulfillment || 'delivery').toLowerCase();
       if (fulfillment.includes('takeaway') || fulfillment.includes('pickup')) takeawayCount++;
       else if (fulfillment.includes('dine')) dineInCount++;
       else deliveryCount++;
 
       // Source
-      const source = (o.orderSource || o.source || 'online').toLowerCase();
+      const source = ((o as any).orderSource || (o as any).source || 'online').toLowerCase();
       if (source.includes('offline') || source.includes('pos') || source.includes('restaurant')) restaurantCount++;
       else onlineCount++;
 
       // Payment
-      const pay = (o.paymentMethod || o.payment?.method || 'UPI').toUpperCase();
+      const pay = (o.paymentMethod || (o as any).payment?.method || 'UPI').toUpperCase();
       paymentMethods[pay] = (paymentMethods[pay] || 0) + 1;
 
       // Products breakdown
@@ -149,7 +165,9 @@ export default function Analytics() {
         const price = Number(it.price || 0) * qty;
         const cat = it.category || 'Pizza';
 
-        if (!itemMap[name]) itemMap[name] = { name, count: 0, revenue: 0 };
+        if (!itemMap[name]) {
+          itemMap[name] = { name, count: 0, revenue: 0 };
+        }
         itemMap[name].count += qty;
         itemMap[name].revenue += price;
 
@@ -157,12 +175,15 @@ export default function Analytics() {
       });
     });
 
-    const aov = totalOrders > 0 ? Math.round(totalRevenue / Math.max(1, totalOrders - cancelledCount)) : 0;
-    const popularItems = Object.values(itemMap).sort((a, b) => b.count - a.count).slice(0, 5);
+    const averageOrderValue = totalOrders > 0 ? Math.round(totalRevenue / Math.max(1, totalOrders - cancelledCount)) : 0;
+    const topItems = Object.values(itemMap)
+      .sort((a, b) => b.revenue - a.revenue)
+      .slice(0, 5);
 
     return {
       totalOrders,
       totalRevenue,
+      averageOrderValue,
       completedCount,
       cancelledCount,
       activeCount,
@@ -171,195 +192,214 @@ export default function Analytics() {
       dineInCount,
       onlineCount,
       restaurantCount,
-      aov,
-      popularItems,
-      categoryMap,
       paymentMethods,
+      topItems,
+      categoryMap,
     };
   }, [filteredOrders]);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      {/* Header Bar */}
+      {/* Header & Controls */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0E1524] p-5 rounded-2xl border border-slate-800 shadow-lg">
         <div>
-          <div className="flex items-center gap-2.5">
-            <h1 className="text-xl font-extrabold text-white tracking-tight">Live Restaurant Analytics</h1>
-            {isLive && (
-              <span className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-black uppercase tracking-wider animate-pulse">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> LIVE
-              </span>
-            )}
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl font-extrabold text-white tracking-tight">Business Analytics & Metrics</h1>
+            <span
+              className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                isLive ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400' : 'bg-slate-700 text-slate-300'
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${isLive ? 'bg-emerald-400 animate-pulse' : 'bg-slate-400'}`} />
+              {isLive ? 'Live Sync' : 'Polled'}
+            </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Real-time business performance, order velocity, and sales intelligence. Last refreshed at{' '}
-            {lastRefreshed.toLocaleTimeString()}.
+            Real-time financial performance, volume, channel distribution, and product metrics.
           </p>
         </div>
 
-        {/* Timeframe Selector */}
-        <div className="flex items-center gap-1.5 bg-[#0B0F17] p-1 rounded-xl border border-slate-800">
-          {(['today', 'yesterday', 'week', 'month', 'custom'] as TimeRange[]).map((t) => (
+        {/* Timeframe Filter Buttons */}
+        <div className="flex flex-wrap items-center gap-1.5 bg-[#0B0F17] p-1 rounded-xl border border-slate-800">
+          {(['today', 'yesterday', 'week', 'month'] as TimeRange[]).map((tr) => (
             <button
-              key={t}
-              onClick={() => setTimeRange(t)}
+              key={tr}
+              onClick={() => setTimeRange(tr)}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold capitalize transition-all ${
-                timeRange === t
+                timeRange === tr
                   ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
               }`}
             >
-              {t}
+              {tr}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Custom Date Range Row */}
-      {timeRange === 'custom' && (
-        <div className="flex flex-wrap items-center gap-3 p-4 bg-[#0E1524] rounded-2xl border border-slate-800 text-xs">
-          <Calendar className="w-4 h-4 text-orange-400" />
-          <span className="text-slate-300 font-bold">Custom Range:</span>
-          <input
-            type="date"
-            value={customStart}
-            onChange={(e) => setCustomStart(e.target.value)}
-            className="bg-[#0B0F17] border border-slate-800 text-white rounded-lg px-2.5 py-1 focus:border-orange-500 focus:outline-none"
-          />
-          <span className="text-slate-500">to</span>
-          <input
-            type="date"
-            value={customEnd}
-            onChange={(e) => setCustomEnd(e.target.value)}
-            className="bg-[#0B0F17] border border-slate-800 text-white rounded-lg px-2.5 py-1 focus:border-orange-500 focus:outline-none"
-          />
-        </div>
-      )}
-
-      {/* Top 4 KPI Metrics */}
+      {/* 4 Core Financial KPI Metric Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-5 shadow-md">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Total Sales</span>
-            <div className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-400 flex items-center justify-center">
-              <DollarSign className="w-4 h-4" />
+        {/* Gross Revenue */}
+        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-5 shadow-md flex flex-col justify-between">
+          <div className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wider">
+            <span>Gross Revenue</span>
+            <DollarSign className="w-4 h-4 text-orange-400" />
+          </div>
+          <div className="my-3">
+            <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono">
+              ₹{metrics.totalRevenue.toLocaleString('en-IN')}
+            </div>
+            <div className="text-[11px] text-emerald-400 font-bold flex items-center gap-1 mt-1">
+              <TrendingUp className="w-3.5 h-3.5" /> Direct gross sales
             </div>
           </div>
-          <div className="text-2xl font-extrabold text-white mt-2 font-mono">
-            ₹{metrics.totalRevenue.toLocaleString('en-IN')}
-          </div>
-          <div className="text-[11px] text-slate-400 mt-1 flex items-center gap-1">
-            <span className="text-emerald-400 font-bold flex items-center gap-0.5">
-              <TrendingUp className="w-3 h-3" /> Realtime
-            </span>
-            <span>across {metrics.totalOrders} total orders</span>
+          <div className="text-[10px] text-slate-500 border-t border-slate-800/80 pt-2">
+            Excludes cancelled/failed orders
           </div>
         </div>
 
-        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-5 shadow-md">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Active Orders</span>
-            <div className="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 flex items-center justify-center">
-              <Clock className="w-4 h-4" />
+        {/* Total Orders */}
+        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-5 shadow-md flex flex-col justify-between">
+          <div className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wider">
+            <span>Total Orders</span>
+            <ShoppingBag className="w-4 h-4 text-orange-400" />
+          </div>
+          <div className="my-3">
+            <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono">{metrics.totalOrders}</div>
+            <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-1">
+              <span className="text-emerald-400 font-bold">{metrics.completedCount} Done</span>
+              <span className="text-slate-600">•</span>
+              <span className="text-amber-400 font-bold">{metrics.activeCount} Active</span>
             </div>
           </div>
-          <div className="text-2xl font-extrabold text-white mt-2 font-mono">{metrics.activeCount}</div>
-          <div className="text-[11px] text-slate-400 mt-1">Kitchen & in-transit orders</div>
+          <div className="text-[10px] text-slate-500 border-t border-slate-800/80 pt-2">
+            {metrics.cancelledCount} cancelled orders
+          </div>
         </div>
 
-        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-5 shadow-md">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Avg Order Value (AOV)</span>
-            <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center">
-              <ShoppingBag className="w-4 h-4" />
+        {/* Average Order Value */}
+        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-5 shadow-md flex flex-col justify-between">
+          <div className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wider">
+            <span>Average Order Value</span>
+            <TrendingUp className="w-4 h-4 text-orange-400" />
+          </div>
+          <div className="my-3">
+            <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono">
+              ₹{metrics.averageOrderValue.toLocaleString('en-IN')}
             </div>
+            <div className="text-[11px] text-slate-400 mt-1">Per completed transaction</div>
           </div>
-          <div className="text-2xl font-extrabold text-white mt-2 font-mono">
-            ₹{metrics.aov.toLocaleString('en-IN')}
-          </div>
-          <div className="text-[11px] text-slate-400 mt-1">Per completed ticket</div>
+          <div className="text-[10px] text-slate-500 border-t border-slate-800/80 pt-2">Basket size indicator</div>
         </div>
 
-        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-5 shadow-md">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Delivered vs Cancelled</span>
-            <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
-              <CheckCircle2 className="w-4 h-4" />
-            </div>
+        {/* Kitchen Velocity */}
+        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-5 shadow-md flex flex-col justify-between">
+          <div className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wider">
+            <span>Active Kitchen Load</span>
+            <Zap className="w-4 h-4 text-orange-400" />
           </div>
-          <div className="text-2xl font-extrabold text-white mt-2 font-mono">
-            <span className="text-emerald-400">{metrics.completedCount}</span>
-            <span className="text-slate-500 text-sm mx-1.5">/</span>
-            <span className="text-rose-400 text-lg">{metrics.cancelledCount}</span>
+          <div className="my-3">
+            <div className="text-2xl sm:text-3xl font-extrabold text-white font-mono">{metrics.activeCount}</div>
+            <div className="text-[11px] text-orange-400 font-bold mt-1">In Preparation / In Transit</div>
           </div>
-          <div className="text-[11px] text-slate-400 mt-1">
-            {metrics.totalOrders > 0
-              ? `${Math.round((metrics.completedCount / metrics.totalOrders) * 100)}% fulfillment rate`
-              : 'No orders yet'}
-          </div>
+          <div className="text-[10px] text-slate-500 border-t border-slate-800/80 pt-2">Current kitchen queue</div>
         </div>
       </div>
 
-      {/* 2-Column Operational Distribution */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Fulfillment & Channel Breakdown */}
+      {/* Grid: Channel Breakdown & Top Products Leaderboard */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Channel Distribution */}
         <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-6 shadow-md space-y-4">
-          <h2 className="text-sm font-extrabold text-white uppercase tracking-wider flex items-center gap-2">
-            <Bike className="w-4 h-4 text-orange-400" /> Channel & Fulfillment Breakdown
-          </h2>
+          <h3 className="text-sm font-extrabold text-white uppercase tracking-wider flex items-center gap-2">
+            <Bike className="w-4 h-4 text-orange-400" /> Channel Distribution
+          </h3>
 
-          <div className="grid grid-cols-3 gap-3 text-center">
-            <div className="p-3 bg-[#0B0F17] rounded-xl border border-slate-800">
-              <div className="text-xs text-slate-400 font-medium">Delivery</div>
-              <div className="text-lg font-bold text-white font-mono mt-1">{metrics.deliveryCount}</div>
+          <div className="space-y-3">
+            {/* Delivery */}
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs font-bold">
+                <span className="text-slate-300">Home Delivery</span>
+                <span className="text-white font-mono">{metrics.deliveryCount} orders</span>
+              </div>
+              <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-orange-500 rounded-full"
+                  style={{
+                    width: `${metrics.totalOrders > 0 ? (metrics.deliveryCount / metrics.totalOrders) * 100 : 0}%`,
+                  }}
+                />
+              </div>
             </div>
-            <div className="p-3 bg-[#0B0F17] rounded-xl border border-slate-800">
-              <div className="text-xs text-slate-400 font-medium">Takeaway</div>
-              <div className="text-lg font-bold text-white font-mono mt-1">{metrics.takeawayCount}</div>
+
+            {/* Takeaway */}
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs font-bold">
+                <span className="text-slate-300">Takeaway / Pickup</span>
+                <span className="text-white font-mono">{metrics.takeawayCount} orders</span>
+              </div>
+              <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 rounded-full"
+                  style={{
+                    width: `${metrics.totalOrders > 0 ? (metrics.takeawayCount / metrics.totalOrders) * 100 : 0}%`,
+                  }}
+                />
+              </div>
             </div>
-            <div className="p-3 bg-[#0B0F17] rounded-xl border border-slate-800">
-              <div className="text-xs text-slate-400 font-medium">Dine-In</div>
-              <div className="text-lg font-bold text-white font-mono mt-1">{metrics.dineInCount}</div>
+
+            {/* Dine-in */}
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs font-bold">
+                <span className="text-slate-300">Dine-In Table</span>
+                <span className="text-white font-mono">{metrics.dineInCount} orders</span>
+              </div>
+              <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500 rounded-full"
+                  style={{
+                    width: `${metrics.totalOrders > 0 ? (metrics.dineInCount / metrics.totalOrders) * 100 : 0}%`,
+                  }}
+                />
+              </div>
             </div>
           </div>
 
-          <div className="pt-2 border-t border-slate-800 flex justify-between items-center text-xs">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-              <span className="text-slate-300">Online Orders (App/Web):</span>
-            </div>
-            <span className="font-bold text-white font-mono">{metrics.onlineCount}</span>
-          </div>
-          <div className="flex justify-between items-center text-xs">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-blue-400"></span>
-              <span className="text-slate-300">Restaurant / POS Walk-in:</span>
-            </div>
-            <span className="font-bold text-white font-mono">{metrics.restaurantCount}</span>
+          <div className="pt-4 border-t border-slate-800 text-[11px] text-slate-400 flex justify-between">
+            <span>Online Web & App: <strong>{metrics.onlineCount}</strong></span>
+            <span>In-Store / Direct: <strong>{metrics.restaurantCount}</strong></span>
           </div>
         </div>
 
-        {/* Popular Items Leaderboard */}
-        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-6 shadow-md space-y-4">
-          <h2 className="text-sm font-extrabold text-white uppercase tracking-wider flex items-center gap-2">
-            <Pizza className="w-4 h-4 text-orange-400" /> Best Selling Menu Items
-          </h2>
+        {/* Top-Selling Menu Items */}
+        <div className="lg:col-span-2 bg-[#0E1524] border border-slate-800 rounded-2xl p-6 shadow-md space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-extrabold text-white uppercase tracking-wider flex items-center gap-2">
+              <Pizza className="w-4 h-4 text-orange-400" /> Best-Selling Items Leaderboard
+            </h3>
+            <span className="text-[11px] text-slate-400">By Gross Volume</span>
+          </div>
 
-          {metrics.popularItems.length === 0 ? (
-            <div className="text-center py-8 text-slate-500 text-xs">No product sales in selected timeframe</div>
+          {metrics.topItems.length === 0 ? (
+            <div className="text-center py-10 text-slate-500 text-xs">No product sales recorded in this timeframe.</div>
           ) : (
-            <div className="space-y-3">
-              {metrics.popularItems.map((item, idx) => (
-                <div key={item.name} className="flex items-center justify-between p-2.5 bg-[#0B0F17] rounded-xl border border-slate-800 text-xs">
-                  <div className="flex items-center gap-2.5">
-                    <span className="w-5 h-5 rounded-lg bg-orange-500/10 text-orange-400 font-bold flex items-center justify-center text-[10px]">
+            <div className="space-y-2.5">
+              {metrics.topItems.map((item, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center justify-between p-3 bg-[#0B0F17] rounded-xl border border-slate-800/80 hover:border-slate-700 transition-all"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="w-6 h-6 rounded-lg bg-orange-500/10 text-orange-400 font-extrabold text-xs flex items-center justify-center font-mono">
                       #{idx + 1}
                     </span>
-                    <span className="font-bold text-white">{item.name}</span>
+                    <div>
+                      <div className="font-bold text-white text-xs">{item.name}</div>
+                      <div className="text-[11px] text-slate-400">{item.count} units sold</div>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-4">
-                    <span className="text-slate-400">{item.count} sold</span>
-                    <span className="font-mono font-bold text-orange-400">₹{item.revenue.toLocaleString('en-IN')}</span>
+                  <div className="text-right font-mono">
+                    <div className="text-xs font-extrabold text-orange-400">₹{item.revenue.toLocaleString('en-IN')}</div>
+                    <div className="text-[10px] text-slate-500">Revenue</div>
                   </div>
                 </div>
               ))}

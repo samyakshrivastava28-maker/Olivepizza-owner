@@ -6,7 +6,7 @@ import { adminDb as db } from '../config/firebase.js';
 import { pgPool } from '../config/postgres.js';
 import { notificationQueue } from '../services/notification/NotificationQueueService.js';
 
-import { OwnerTemplates, CustomerTemplates, DeliveryTemplates } from '../services/notification/NotificationTemplates.js';
+import { OwnerTemplates, CustomerTemplates, DeliveryTemplates, RestaurantTemplates } from '../services/notification/NotificationTemplates.js';
 import { queueEmail } from '../services/email.service.js';
 import { buildOrderStatusEmail } from '../services/emailTemplates.service.js';
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
@@ -111,13 +111,14 @@ export class FirestoreListener {
 
             if (orderData.orderTiming === 'scheduled') continue; // Skip push alarms for scheduled until ready
 
-            // 1. FCM PUSH NOTIFICATION FOR NEW ORDER (OWNER ALARM & CUSTOMER PLACED)
+            // 1. FCM PUSH NOTIFICATION FOR NEW ORDER (RESTAURANT MANAGEMENT ALARM & CUSTOMER PLACED)
             (async () => {
               try {
-                // Dispatch Owner Alarm to all registered owners
-                const ownerRecipients = await this.getOwnerRecipients();
-                if (ownerRecipients.length > 0) {
-                  const ownerPayload = OwnerTemplates.newOrder(orderData.id, {
+                // Dispatch Restaurant Management Alarm strictly to authorized staff of this branch
+                const branchId = orderData.branchId || 'main_branch';
+                const branchStaffRecipients = await notificationEngine.resolveBranchStaff(branchId);
+                if (branchStaffRecipients.length > 0) {
+                  const restaurantPayload = RestaurantTemplates.newOrder(orderData.id, {
                     customerName: orderData.customerName || orderData.customer_name || 'Customer',
                     orderNumber,
                     totalAmount,
@@ -125,12 +126,13 @@ export class FirestoreListener {
                     paymentMethod: orderData.paymentMethod || 'COD',
                     deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Pickup',
                     phone: orderData.contactPhone || orderData.phone,
+                    branchId,
                     orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
                   });
-                  await notificationEngine.sendBulk(ownerRecipients, ownerPayload, {
+                  await notificationEngine.sendBulk(branchStaffRecipients, restaurantPayload, {
                     orderId: orderData.id,
                     category: 'alarm_actionable',
-                    tag: `order_owner_${orderData.id}`,
+                    tag: `order_restaurant_${orderData.id}`,
                   });
                 }
 

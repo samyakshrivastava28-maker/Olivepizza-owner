@@ -3,8 +3,10 @@ export type OrderStatus = 'pending' | 'accepted' | 'preparing' | 'ready' | 'part
 export interface Product {
   id: string;
   name: string;
+  productName?: string;
   description?: string;
   price: number;
+  basePrice?: number;
   category: string;
   image?: string;
   imageUrl?: string;
@@ -98,6 +100,18 @@ export interface DeliveryPartner {
   totalDeliveries?: number;
   lat?: number;
   lng?: number;
+  latitude?: number;
+  longitude?: number;
+  currentLat?: number;
+  currentLng?: number;
+  liveLocation?: {
+    lat: number;
+    lng: number;
+    speed?: number;
+    bearing?: number;
+    updatedAt?: string;
+    activeOrderId?: string;
+  };
 }
 
 export interface MenuItem {
@@ -113,18 +127,9 @@ export interface MenuItem {
   isVegetarian: boolean;
   isAvailable: boolean;
   productIds?: string[];
-  variants?: {
-    name: string;
-    price: number;
-  }[];
-  crusts?: {
-    name: string;
-    price: number;
-  }[];
-  addons?: {
-    name: string;
-    price: number;
-  }[];
+  variants?: { name: string; price: number; }[];
+  crusts?: { name: string; price: number; }[];
+  addons?: { name: string; price: number; }[];
 }
 
 export interface CartItem {
@@ -141,12 +146,14 @@ export interface CartItem {
   isVegetarian?: boolean;
 }
 
+export type UserRole = 'customer' | 'owner' | 'delivery_partner' | 'admin' | 'developer' | 'franchise_owner' | 'restaurant_manager' | 'cashier';
+
 export interface User {
   id: string;
   email: string;
   name?: string;
   phone?: string;
-  role: 'customer' | 'owner' | 'delivery_partner' | 'admin' | 'developer';
+  role: UserRole;
   fullAddress?: string;
   city?: string;
   state?: string;
@@ -154,20 +161,29 @@ export interface User {
   lat?: number;
   lng?: number;
   photoUrl?: string;
-  
+  photoURL?: string;
+  onboardingComplete?: boolean;
+  phoneSetupCompleted?: boolean;
+  locationSetupCompleted?: boolean;
   approvalStatus?: 'pending' | 'approved' | 'suspended';
   status?: 'online' | 'offline' | 'busy' | 'break';
   vehicleType?: string;
   vehicleNumber?: string;
   joinedAt?: string;
-  
+  liveLocation?: {
+    lat: number;
+    lng: number;
+    speed?: number;
+    bearing?: number;
+    updatedAt?: string;
+    activeOrderId?: string;
+  };
   fcmTokens?: string[];
   notificationEnabled?: boolean;
   lastTokenUpdate?: string;
   deviceName?: string;
   platform?: string;
   browser?: string;
-
   getIdToken?: () => Promise<string>;
 }
 
@@ -178,13 +194,10 @@ export interface Order {
   userId: string;
   customerName?: string;
   customerPhone?: string;
-  customerInfo?: {
-    name: string;
-    phone: string;
-    email?: string;
-  };
+  customerInfo?: { name: string; phone: string; email?: string; };
   items: CartItem[];
   totalAmount: number;
+  subtotal?: number;
   paymentMethod?: string;
   status: OrderStatus;
   deliveryAddress?: {
@@ -200,31 +213,19 @@ export interface Order {
   createdAt: any;
   updatedAt: any;
   deliveryPartnerId?: string;
-  
   orderTiming?: 'now' | 'scheduled';
   scheduledDate?: string | null;
   scheduledTime?: string | null;
   noContactDelivery?: boolean;
-  
   cancellationReason?: string;
   cancelledAt?: string;
   declinedPartnerIds?: string[];
   orderDateLocal?: string;
-  
-  deliveryProof?: {
-    photoUrl?: string;
-    note?: string;
-    signatureUrl?: string;
-  };
-  deliveryRating?: {
-    score: number;
-    review?: string;
-    createdAt: string;
-  };
+  deliveryProof?: { photoUrl?: string; note?: string; signatureUrl?: string; };
+  deliveryRating?: { score: number; review?: string; createdAt: string; };
   pickedUpAt?: string;
   deliveredAt?: string;
   deliveryFee?: number;
-  
   alertSent?: boolean;
   firstAlertAt?: string | null;
   secondAlertAt?: string | null;

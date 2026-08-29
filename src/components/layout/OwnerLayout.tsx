@@ -11,7 +11,7 @@ import { soundPlayer } from '../../lib/audio';
 import { initFCMNotifications } from '../../lib/fcm';
 import { useAuthStore } from '../../lib/store';
 import {
-  LayoutDashboard,
+  LayoutDashboard, Building2,
   Clock,
   BookOpen,
   Pizza,
@@ -121,6 +121,7 @@ export const OwnerLayout: React.FC = () => {
         { label: 'Email Center', path: '/email', icon: Mail },
         { label: 'Events & Campaigns', path: '/events', icon: Calendar },
         { label: 'Website Analytics', path: '/analytics', icon: BarChart3 },
+        { label: 'Franchise Branches', path: '/franchises', icon: Building2 },
       ],
     },
     {
@@ -149,7 +150,7 @@ export const OwnerLayout: React.FC = () => {
       >
         <div className="p-4 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2.5 overflow-hidden">
-            <span className="text-2xl">🍕</span>
+            <span className="text-2xl">ðŸ•</span>
             {!isSidebarCollapsed && (
               <div>
                 <h1 className="text-sm font-extrabold text-white leading-tight">OLIVE PIZZA</h1>
@@ -203,7 +204,7 @@ export const OwnerLayout: React.FC = () => {
           <div className="relative w-72 max-w-[80vw] bg-[#0E1524] border-r border-slate-800 h-full flex flex-col p-4 z-10">
             <div className="flex items-center justify-between pb-4 border-b border-slate-800 mb-4">
               <div className="flex items-center gap-2">
-                <span className="text-2xl">🍕</span>
+                <span className="text-2xl">ðŸ•</span>
                 <span className="font-extrabold text-white text-sm">Olive Pizza Owner</span>
               </div>
               <button

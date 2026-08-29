@@ -12,10 +12,10 @@ export const OPENING_HOUR = 12; // 12 PM (noon)
 export const CLOSING_HOUR = 24; // 12 AM (midnight)
 
 // In production, the client queries the dedicated Owner backend API on Render.
-export const PRODUCTION_BACKEND_URL = "https://olivepizza-owner.onrender.com";
+export const PRODUCTION_BACKEND_URL = "https://api.olivepizza.in";
 
 // Development fallback
-const DEV_BACKEND_URL = "http://localhost:5175";
+const DEV_BACKEND_URL = "http://localhost:5000";
 
 export function getApiBaseUrl(): string {
   if (import.meta.env.VITE_API_BASE_URL) {
@@ -67,9 +67,12 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
   const headers = new Headers(init?.headers || {});
 
   try {
+    if (auth && (auth as any).authStateReady) {
+      await (auth as any).authStateReady();
+    }
     const currentUser = auth.currentUser;
     if (currentUser && !headers.has('Authorization')) {
-      const token = await currentUser.getIdToken();
+      const token = await currentUser.getIdToken(true);
       if (token) {
         headers.set('Authorization', `Bearer ${token}`);
       }
@@ -84,17 +87,26 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
   };
 
   try {
-    const res = await fetch(primaryUrl, config);
-    if (res.ok || !primaryUrl.startsWith('/')) return res;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(primaryUrl, { ...config, signal: controller.signal });
+    clearTimeout(timeoutId);
+    if (res.ok) return res;
 
-    // Fallback directly to production host if relative route proxy failed
-    const directUrl = `${PRODUCTION_BACKEND_URL}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
-    return await fetch(directUrl, config);
-  } catch (err) {
+    // If primary URL failed (404/401/etc) or is relative, try fallback to backend host
     if (primaryUrl.startsWith('/')) {
-      const directUrl = `${PRODUCTION_BACKEND_URL}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
-      return await fetch(directUrl, config);
+      const directDevUrl = `http://localhost:5000${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+      const devRes = await fetch(directDevUrl, config);
+      if (devRes.ok) return devRes;
     }
-    throw err;
+
+    return res;
+  } catch (err) {
+    try {
+      const directDevUrl = `http://localhost:5000${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+      return await fetch(directDevUrl, config);
+    } catch {
+      throw err;
+    }
   }
 };

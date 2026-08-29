@@ -208,6 +208,10 @@ interface BuildOptions {
   vibrate?: number[];
   ongoing?: boolean;
   groupKey?: string;
+  // Custom action & branch fields
+  actionUrlAccept?: string;
+  actionUrlReject?: string;
+  branchId?: string;
   // Sync fields from OrderEvent
   eventId?: string;
   previousStatus?: string;
@@ -239,6 +243,12 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
   if (opts.currentStatus) safeData.currentStatus = opts.currentStatus;
   if (opts.eventTimestamp) safeData.eventTimestamp = opts.eventTimestamp;
   if (opts.serverTimestamp) safeData.serverTimestamp = opts.serverTimestamp;
+
+  // Custom action & branch fields
+  if (opts.channelId) safeData.channelId = opts.channelId;
+  if (opts.actionUrlAccept) safeData.actionUrlAccept = opts.actionUrlAccept;
+  if (opts.actionUrlReject) safeData.actionUrlReject = opts.actionUrlReject;
+  if (opts.branchId) safeData.branchId = opts.branchId;
 
   // Feature flags
   if (opts.role) safeData.role = opts.role;
@@ -329,6 +339,65 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
       fcm_options: { link: opts.url || '/' },
     },
   };
+}
+
+// =============================================================================
+// RESTAURANT MANAGEMENT TEMPLATES (Actionable Push for Branch Managers)
+// =============================================================================
+export class RestaurantTemplates {
+  /**
+   * New Order for Restaurant Management — with REAL actionable buttons: [ ACCEPT ] [ REJECT ]
+   */
+  static newOrder(
+    orderId: string,
+    payload: {
+      customerName: string;
+      orderNumber: string;
+      totalAmount: number;
+      items: string[];
+      paymentMethod: string;
+      deliveryAddress?: string;
+      phone?: string;
+      orderTime?: string;
+      branchId?: string;
+      version?: number;
+    }
+  ): NotificationPayload {
+    const title = `🍕 NEW ORDER #${payload.orderNumber} (₹${payload.totalAmount})`;
+    const body = [
+      `Customer: ${payload.customerName}`,
+      payload.phone ? `Phone: ${payload.phone}` : '',
+      `Items: ${payload.items.slice(0, 3).join(', ')}${payload.items.length > 3 ? ` +${payload.items.length - 3} more` : ''}`,
+      `Payment: ${payload.paymentMethod}`,
+      payload.deliveryAddress ? `Address: ${payload.deliveryAddress}` : ''
+    ].filter(Boolean).join(' • ');
+
+    return buildPayload(title, body, {
+      tag: `order_restaurant_${orderId}`,
+      channelId: ANDROID_CHANNELS.ORDER_NEW,
+      orderId,
+      url: `/restaurant/live-orders`,
+      sound: 'new_order',
+      category: 'alarm_actionable' as any,
+      priority: 'critical',
+      role: 'restaurant_manager' as any,
+      requireInteraction: true,
+      stage: 'new_order',
+      alert: 'continuous',
+      version: payload.version || 1,
+      notificationId: `rest_new_${orderId}`,
+      vibrate: [300, 200, 300, 200, 300],
+      actions: [
+        { action: 'ACCEPT', title: 'ACCEPT' },
+        { action: 'REJECT', title: 'REJECT' },
+      ],
+      currentStatus: 'pending',
+      serverTimestamp: new Date().toISOString(),
+      actionUrlAccept: `/api/orders/${orderId}/accept`,
+      actionUrlReject: `/api/orders/${orderId}/reject`,
+      branchId: payload.branchId || 'main_branch'
+    });
+  }
 }
 
 // =============================================================================
@@ -518,10 +587,11 @@ export class DeliveryTemplates {
       notificationId: `delivery_assign_${orderId}`,
       vibrate: [200, 100, 200, 100, 400],
       actions: [
-        { action: 'accept_delivery', title: '✅ Accept' },
-        { action: 'reject_delivery', title: '❌ Reject' },
-        { action: 'stop_alert', title: '🔕 Stop Alert' },
+        { action: 'ACCEPT', title: 'ACCEPT' },
+        { action: 'DECLINE', title: 'DECLINE' },
       ],
+      actionUrlAccept: `/api/delivery/rider/orders/${orderId}/accept`,
+      actionUrlReject: `/api/delivery/rider/orders/${orderId}/decline`,
       eventId: payload.eventId,
       previousStatus: payload.previousStatus,
       currentStatus: 'partner_assigned',

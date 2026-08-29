@@ -40,9 +40,8 @@ export default function NotificationsCenter() {
 
   useEffect(() => {
     // Listen to real-time notification audit logs in Firestore
-    const q = query(collection(db, 'notification_logs'), orderBy('createdAt', 'desc'), limit(50));
     const unsubscribe = onSnapshot(
-      q,
+      collection(db, 'notification_logs'),
       (snapshot) => {
         const fetched: any[] = [];
         snapshot.forEach((d) => fetched.push({ id: d.id, ...d.data() }));

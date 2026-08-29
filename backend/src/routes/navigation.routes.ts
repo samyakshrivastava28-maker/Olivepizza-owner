@@ -85,7 +85,7 @@ router.post('/route', verifyToken, async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const geojson: GeoJSON.Feature<GeoJSON.LineString> = {
+    const geojson: any = {
       type: 'Feature',
       properties: {},
       geometry: {

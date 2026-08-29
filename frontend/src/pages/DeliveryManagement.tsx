@@ -231,7 +231,7 @@ export default function DeliveryManagement() {
         className: 'custom-restaurant-icon',
         html: `
           <div class="w-10 h-10 rounded-2xl bg-orange-600 border-2 border-white shadow-xl flex items-center justify-center text-lg animate-bounce" style="box-shadow: 0 0 20px rgba(249, 115, 22, 0.6)">
-            🍕
+            ðŸ•
           </div>
         `,
         iconSize: [40, 40],
@@ -242,7 +242,7 @@ export default function DeliveryManagement() {
         .addTo(map)
         .bindPopup(`
           <div style="color: #0E1524; font-family: sans-serif; padding: 4px;">
-            <strong style="font-size: 13px;">🍕 Olive Pizza HQ</strong>
+            <strong style="font-size: 13px;">ðŸ• Olive Pizza HQ</strong>
             <p style="font-size: 11px; margin: 4px 0 0; color: #64748B;">Central Kitchen & Dispatch</p>
           </div>
         `);
@@ -267,8 +267,8 @@ export default function DeliveryManagement() {
 
     partners.forEach((partner) => {
       const loc = locations[partner.id] || {
-        lat: partner.lat || partner.latitude || (restaurantCoords[0] + (Math.random() - 0.5) * 0.015),
-        lng: partner.lng || partner.longitude || (restaurantCoords[1] + (Math.random() - 0.5) * 0.015),
+        lat: partner.lat || (partner.latitude ?? partner.lat) || (restaurantCoords[0] + (Math.random() - 0.5) * 0.015),
+        lng: partner.lng || (partner.longitude ?? partner.lng) || (restaurantCoords[1] + (Math.random() - 0.5) * 0.015),
       };
 
       if (!loc.lat || !loc.lng) return;
@@ -304,7 +304,7 @@ export default function DeliveryManagement() {
 
       // If rider has an active order, draw line to customer address
       const riderActiveOrder = activeOrders.find(
-        (o) => o.deliveryPartnerId === partner.id || o.deliveryPartner?.id === partner.id || loc.activeOrderId === o.id
+        (o) => o.deliveryPartnerId === partner.id || loc.activeOrderId === o.id
       );
 
       if (riderActiveOrder && riderActiveOrder.deliveryAddress?.lat && riderActiveOrder.deliveryAddress?.lng) {
@@ -317,7 +317,7 @@ export default function DeliveryManagement() {
           className: 'custom-dest-icon',
           html: `
             <div class="w-8 h-8 rounded-full bg-emerald-600 border-2 border-white shadow-lg flex items-center justify-center text-white text-xs font-bold animate-pulse">
-              📍
+              ðŸ“
             </div>
           `,
           iconSize: [32, 32],
@@ -350,8 +350,8 @@ export default function DeliveryManagement() {
   const handleTrackRider = (partner: DeliveryPartner) => {
     setSelectedPartnerId(partner.id);
     const loc = locations[partner.id] || {
-      lat: partner.lat || partner.latitude || (RESTAURANT_LOCATION.lat + 0.005),
-      lng: partner.lng || partner.longitude || (RESTAURANT_LOCATION.lng + 0.005),
+      lat: partner.lat || (partner.latitude ?? partner.lat) || (RESTAURANT_LOCATION.lat + 0.005),
+      lng: partner.lng || (partner.longitude ?? partner.lng) || (RESTAURANT_LOCATION.lng + 0.005),
     };
 
     if (mapInstanceRef.current && loc.lat && loc.lng) {
@@ -583,7 +583,7 @@ export default function DeliveryManagement() {
                 onClick={handleCenterRestaurant}
                 className="px-3 py-1.5 bg-[#0B0F17] hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all"
               >
-                🍕 Center HQ
+                ðŸ• Center HQ
               </button>
             </div>
           </div>
@@ -741,7 +741,7 @@ export default function DeliveryManagement() {
                       </div>
 
                       <div className="text-[11px] text-slate-400 line-clamp-1">
-                        📍 {order.deliveryAddress?.address || order.deliveryAddress || 'Delivery Address'}
+                        ðŸ“ {(order.deliveryAddress?.address || (typeof order.deliveryAddress === 'string' ? order.deliveryAddress : order.deliveryAddress?.addressLine) || 'Delivery Address')}
                       </div>
 
                       {/* Partner Assignment Dropdown */}
@@ -848,3 +848,4 @@ export default function DeliveryManagement() {
     </div>
   );
 }
+

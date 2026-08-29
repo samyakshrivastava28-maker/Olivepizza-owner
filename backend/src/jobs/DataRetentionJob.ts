@@ -96,29 +96,44 @@ export class DataRetentionJob {
     }
   }
 
-  public static async runNavigationCleanup(): Promise<void> {
+  /**
+   * Enforces 5-Minute High-Frequency GPS Telemetry Retention Rule:
+   * - Deletes raw GPS breadcrumb points in `navigation_points` older than 5 minutes.
+   * - Deletes ended/expired navigation sessions older than 5 minutes.
+   * - Preserves `delivery_locations` (current live state per rider).
+   * - Permanent business records (`orders`, `delivery_history`, `payments`) are NEVER deleted.
+   */
+  public static async runNavigationCleanup(): Promise<{ deletedPoints: number; deletedSessions: number }> {
+    let deletedPoints = 0;
+    let deletedSessions = 0;
     try {
       const client = await pgPool.connect();
       try {
-        await client.query(`
+        // 1. Purge all high-frequency GPS breadcrumbs older than 5 minutes
+        const ptsRes = await client.query(`
           DELETE FROM navigation_points 
-          WHERE session_id IN (
-            SELECT id FROM navigation_sessions 
-            WHERE status IN ('STOPPED', 'DELIVERED') 
-            AND expires_at <= NOW()
-          );
+          WHERE created_at < NOW() - INTERVAL '5 minutes';
         `);
-        await client.query(`
+        deletedPoints = ptsRes.rowCount ?? 0;
+
+        // 2. Purge expired / stopped navigation sessions older than 5 minutes
+        const sessRes = await client.query(`
           DELETE FROM navigation_sessions 
-          WHERE status IN ('STOPPED', 'DELIVERED') 
-          AND expires_at <= NOW();
+          WHERE (status IN ('STOPPED', 'DELIVERED') AND (ended_at < NOW() - INTERVAL '5 minutes' OR expires_at <= NOW()))
+             OR (expires_at <= NOW() - INTERVAL '5 minutes');
         `);
+        deletedSessions = sessRes.rowCount ?? 0;
+
+        if (deletedPoints > 0 || deletedSessions > 0) {
+          console.log(`[DataRetentionJob] 5-min GPS retention: Purged ${deletedPoints} points and ${deletedSessions} sessions.`);
+        }
       } finally {
         client.release();
       }
     } catch (e: any) {
-      // Quiet fail on minutely background check
+      console.warn('[DataRetentionJob] Navigation telemetry cleanup warning:', e.message);
     }
+    return { deletedPoints, deletedSessions };
   }
 
   public static schedule() {

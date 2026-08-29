@@ -305,4 +305,75 @@ router.get('/diagnostics', verifyToken, requireOwnerOrAdmin, async (_req: AuthRe
   }
 });
 
+
+/**
+ * GET /api/reports/looker-studio/config
+ * Returns Looker Studio embed URL, spreadsheet metadata, and live sync state.
+ */
+router.get('/looker-studio/config', verifyToken, requireOwnerOrAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const config = await GoogleSheetsReportService.getLookerStudioConfig();
+    res.json({ success: true, ...config });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/reports/looker-studio/set-embed-url
+ * Updates Looker Studio embed URL in Firestore settings.
+ */
+router.post('/looker-studio/set-embed-url', verifyToken, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
+  try {
+    const { embedUrl } = req.body;
+    if (!embedUrl) return res.status(400).json({ error: 'embedUrl is required' });
+
+    await GoogleSheetsReportService.setLookerStudioEmbedUrl(embedUrl);
+    res.json({ success: true, embedUrl });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/reports/looker-studio/feed
+ * Provides continuous standardized time-series reporting feed for Looker Studio / BI ingestion.
+ */
+router.get('/looker-studio/feed', async (req: AuthRequest, res: Response) => {
+  try {
+    const { franchiseId, limit } = req.query;
+    const feed = await GoogleSheetsReportService.getLookerStudioFeed({
+      franchiseId: franchiseId as string,
+      limit: limit ? Number(limit) : 500,
+    });
+    res.json({
+      success: true,
+      count: feed.length,
+      timestamp: new Date().toISOString(),
+      data: feed,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
+
+// Looker Studio Config Aliases
+router.get('/looker/config', async (req, res) => {
+  try {
+    const config = await GoogleSheetsReportService.getLookerStudioConfig();
+    res.json({ success: true, ...config });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/config', async (req, res) => {
+  try {
+    const config = await GoogleSheetsReportService.getLookerStudioConfig();
+    res.json({ success: true, ...config });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});

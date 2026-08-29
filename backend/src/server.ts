@@ -29,7 +29,7 @@ process.on('unhandledRejection', (reason: any) => {
 validateEnvironmentVariables();
 
 const app = express();
-const PORT = process.env.PORT || 5175;
+const PORT = process.env.PORT || 5000;
 
 // Health & Heartbeat
 app.get('/health', (req, res) => {

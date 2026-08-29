@@ -229,4 +229,81 @@ router.post('/revoke-all-sessions', async (req: AuthRequest, res: Response): Pro
   }
 });
 
+// ── POST /deletion-request — Customer Account Deletion Request ────────────────
+// Records a deletion request with 30-day grace period before actual erasure.
+// Any pending active orders are noted on the request but do NOT block it.
+router.post('/deletion-request', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { email, reason, downloadData } = req.body;
+
+    if (!email || typeof email !== 'string') {
+      res.status(400).json({ error: 'Email address is required to confirm your identity.' });
+      return;
+    }
+
+    // Verify email matches authenticated user's registered email
+    const userRecord = await adminAuth.getUser(uid).catch(() => null);
+    if (userRecord && userRecord.email && userRecord.email.toLowerCase() !== email.toLowerCase()) {
+      res.status(400).json({ error: 'The email address provided does not match your registered account email.' });
+      return;
+    }
+
+    const now = new Date();
+    const gracePeriodEnd = new Date(now);
+    gracePeriodEnd.setDate(gracePeriodEnd.getDate() + 30);
+
+    // Check for any active orders before logging the request
+    const activeOrdersSnap = await adminDb.collection('orders')
+      .where('userId', '==', uid)
+      .get()
+      .catch(() => ({ docs: [] } as any));
+
+    const activeOrders = activeOrdersSnap.docs
+      .filter((d: any) => !['delivered', 'cancelled', 'rejected', 'failed'].includes(d.data().status))
+      .map((d: any) => d.id);
+
+    const requestData = {
+      uid,
+      email: email.toLowerCase(),
+      reason: reason || 'No reason provided',
+      downloadDataRequested: Boolean(downloadData),
+      status: 'pending',
+      activeOrdersAtRequest: activeOrders,
+      requestedAt: now.toISOString(),
+      gracePeriodEnd: gracePeriodEnd.toISOString(),
+      scheduledErasureAt: gracePeriodEnd.toISOString(),
+      source: 'customer_portal',
+      ipAddress: req.ip || 'unknown'
+    };
+
+    await adminDb.collection('deletion_requests').add(requestData);
+
+    // Mark user account as pending deletion (prevents new orders but doesn't deactivate immediately)
+    await adminDb.collection('users').doc(uid).set({
+      deletionRequestPending: true,
+      deletionRequestedAt: now.toISOString(),
+      deletionScheduledFor: gracePeriodEnd.toISOString()
+    }, { merge: true });
+
+    console.log(`[UserRoutes] Account deletion request logged for uid=${uid} email=${email} grace_period_end=${gracePeriodEnd.toISOString()}`);
+
+    res.json({
+      success: true,
+      message: 'Account deletion request recorded. Your account will be permanently erased after the 30-day grace period.',
+      gracePeriodEnd: gracePeriodEnd.toISOString(),
+      activeOrdersAtRequest: activeOrders.length
+    });
+  } catch (error: any) {
+    console.error('[UserRoutes] Deletion request error:', error);
+    res.status(500).json({ error: error.message || 'Failed to submit deletion request' });
+  }
+});
+
 export default router;
+

@@ -12,17 +12,39 @@ service cloud.firestore {
 
     function isAdmin() {
       return request.auth != null && (
-        request.auth.token.role == 'admin' ||
-        request.auth.token.email == 'olivepizzarjn@gmail.com' ||
-        request.auth.token.email == 'webhub2811@gmail.com'
+        request.auth.token.role in ['admin', 'owner', 'developer', 'platform_owner', 'restaurant_manager'] ||
+        (request.auth.token.email != null && request.auth.token.email.matches('(?i)(olivepizzarjn@gmail\\.com|webhub2811@gmail\\.com|samyakshrivastava28@gmail\\.com|ssamyak265@gmail\\.com|s\\.callhub2811@gmail\\.com|samyaks695@gmail\\.com|shrivastavadhirendra587@gmail\\.com|shrishikhar184@gmail\\.com|homkumarsahu@gmail\\.com)')) ||
+        request.auth.uid in [
+          'ZzMmHLa6fBeDYY7clYNjP70fbiE2',
+          '6tLLR6q7aTYqzTG2blRx3TU5sA42',
+          'Zf1MDESejSPbVLdKdAAB7xGGUV42',
+          '4JhyFDVHmrcbnE95lxeT3TprlsY2',
+          'zRZ60M8P5oXBXMU3Y1LMV3YlmGH3',
+          'Uln5UKsRyZaCzTePgBmfourQngu1',
+          'luEQTDTTtnReIOtK3lwfSn8F1i92',
+          'pF2XORJbdtXtJmrOPMQxB8TbFhx1',
+          'alWThK3kB4Wv0dhIaVuSxOyUaAI2'
+        ] ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['owner', 'admin', 'developer', 'platform_owner'])
       );
     }
 
     function isAppOwner() {
       return request.auth != null && (
-        request.auth.token.role == 'owner' ||
-        request.auth.token.email == 'olivepizzarjn@gmail.com' ||
-        request.auth.token.email == 'webhub2811@gmail.com'
+        request.auth.token.role in ['owner', 'admin', 'developer', 'platform_owner'] ||
+        (request.auth.token.email != null && request.auth.token.email.matches('(?i)(olivepizzarjn@gmail\\.com|webhub2811@gmail\\.com|samyakshrivastava28@gmail\\.com|ssamyak265@gmail\\.com|s\\.callhub2811@gmail\\.com|samyaks695@gmail\\.com|shrivastavadhirendra587@gmail\\.com|shrishikhar184@gmail\\.com|homkumarsahu@gmail\\.com)')) ||
+        request.auth.uid in [
+          'ZzMmHLa6fBeDYY7clYNjP70fbiE2',
+          '6tLLR6q7aTYqzTG2blRx3TU5sA42',
+          'Zf1MDESejSPbVLdKdAAB7xGGUV42',
+          '4JhyFDVHmrcbnE95lxeT3TprlsY2',
+          'zRZ60M8P5oXBXMU3Y1LMV3YlmGH3',
+          'Uln5UKsRyZaCzTePgBmfourQngu1',
+          'luEQTDTTtnReIOtK3lwfSn8F1i92',
+          'pF2XORJbdtXtJmrOPMQxB8TbFhx1',
+          'alWThK3kB4Wv0dhIaVuSxOyUaAI2'
+        ] ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['owner', 'admin', 'developer', 'platform_owner'])
       );
     }
 

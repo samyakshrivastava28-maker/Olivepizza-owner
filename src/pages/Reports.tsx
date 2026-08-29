@@ -5,7 +5,17 @@ import { Order } from '../types/models';
 import { StatCard } from '../components/ui/StatCard';
 import { TableSkeleton } from '../components/ui/Skeleton';
 import { ErrorState } from '../components/ui/ErrorState';
-import { IndianRupee, ShoppingBag, Download, TrendingUp, Award, Calendar } from 'lucide-react';
+import { fetchApi } from '../lib/api';
+import { 
+  IndianRupee, 
+  ShoppingBag, 
+  Download, 
+  TrendingUp, 
+  Award, 
+  FileSpreadsheet, 
+  RefreshCw, 
+  ExternalLink 
+} from 'lucide-react';
 import toast from 'react-hot-toast';
 
 export default function Reports() {
@@ -13,6 +23,14 @@ export default function Reports() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [period, setPeriod] = useState<'today' | 'week' | 'month' | 'all'>('month');
+
+  // Google Sheets state
+  const [sheetSyncing, setSheetSyncing] = useState(false);
+  const [liveSheet, setLiveSheet] = useState<{
+    spreadsheetId: string | null;
+    currentSheetTitle: string | null;
+    url: string | null;
+  } | null>(null);
 
   useEffect(() => {
     const fetchOrders = async () => {
@@ -28,7 +46,21 @@ export default function Reports() {
         setLoading(false);
       }
     };
+
+    const fetchSheetStatus = async () => {
+      try {
+        const res = await fetchApi('/api/reports/monthly');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.liveSheet) setLiveSheet(data.liveSheet);
+        }
+      } catch (err) {
+        console.warn('[Reports] Could not fetch live sheet status:', err);
+      }
+    };
+
     fetchOrders();
+    fetchSheetStatus();
   }, []);
 
   const now = Date.now();
@@ -98,6 +130,29 @@ export default function Reports() {
     toast.success('CSV Report downloaded.');
   };
 
+  const handleSyncGoogleSheets = async () => {
+    setSheetSyncing(true);
+    try {
+      const res = await fetchApi('/api/reports/google-sheet/sync', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Google Sheets sync failed');
+      }
+      toast.success(`Successfully synced ${data.syncedCount || 0} orders to Google Sheets!`);
+      if (data.spreadsheetId) {
+        setLiveSheet({
+          spreadsheetId: data.spreadsheetId,
+          currentSheetTitle: 'Live Monthly Sheet',
+          url: `https://docs.google.com/spreadsheets/d/${data.spreadsheetId}`
+        });
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Google Sheets sync failed');
+    } finally {
+      setSheetSyncing(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -108,6 +163,14 @@ export default function Reports() {
         </div>
         <div className="flex items-center gap-3">
           <button
+            onClick={handleSyncGoogleSheets}
+            disabled={sheetSyncing}
+            className="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center gap-2 border border-emerald-600 transition-colors shadow-sm"
+          >
+            <RefreshCw className={`w-4 h-4 text-emerald-200 ${sheetSyncing ? 'animate-spin' : ''}`} />
+            {sheetSyncing ? 'Syncing...' : 'Sync to Google Sheets'}
+          </button>
+          <button
             onClick={exportCSV}
             className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 border border-slate-700 transition-colors"
           >
@@ -116,6 +179,37 @@ export default function Reports() {
           </button>
         </div>
       </div>
+
+      {/* Google Sheets Live Link Bar */}
+      {liveSheet?.url && (
+        <div className="p-3.5 bg-emerald-950/30 border border-emerald-500/30 rounded-2xl flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+              <FileSpreadsheet className="w-4 h-4" />
+            </div>
+            <div>
+              <p className="text-xs font-bold text-white flex items-center gap-1.5">
+                Google Sheets Live Accounting
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono">
+                  Connected
+                </span>
+              </p>
+              <p className="text-[11px] text-emerald-300/80 font-mono truncate max-w-md">
+                ID: {liveSheet.spreadsheetId}
+              </p>
+            </div>
+          </div>
+          <a
+            href={liveSheet.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 transition-colors shrink-0"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            Open Google Sheet
+          </a>
+        </div>
+      )}
 
       {error && <ErrorState message={error} onRetry={() => window.location.reload()} />}
 

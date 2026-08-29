@@ -41,6 +41,13 @@ pnpm-debug.log*
 android/.gradle/
 android/app/build/
 android/build/
-android/local.properties
 *.apk
 *.aab
+
+# Temporary & Local Mocks
+backend/.r2_mock/
+backend/cloudflared/
+.r2_mock/
+cloudflared/
+coverage/
+scratch/

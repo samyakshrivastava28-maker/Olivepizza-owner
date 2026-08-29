@@ -10,6 +10,7 @@ import { notificationEngine } from '../services/notification/NotificationEngine.
 
 import { DeliveryCapacityService } from '../services/delivery/DeliveryCapacityService.js';
 import { webSocketServer } from '../services/websocket/WebSocketServer.js';
+import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 
 const router = Router();
 
@@ -132,12 +133,16 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
         }
 
         if (riderLat != null && riderLng != null) {
+          const requiredRadiusMeters = process.env.DELIVERY_COMPLETION_RADIUS_METERS
+            ? Number(process.env.DELIVERY_COMPLETION_RADIUS_METERS)
+            : 200;
+
           const distMeters = calculateDistanceMeters(Number(riderLat), Number(riderLng), Number(customerLat), Number(customerLng));
-          if (distMeters > 100) {
+          if (distMeters > requiredRadiusMeters) {
             res.status(400).json({
-              error: 'Delivery cannot be completed yet. You must be within 100 meters of the customer location.',
+              error: `Delivery cannot be completed yet. You must be within ${requiredRadiusMeters} meters of the customer location.`,
               distanceMeters: Math.round(distMeters),
-              requiredDistanceMeters: 100,
+              requiredDistanceMeters: requiredRadiusMeters,
             });
             return;
           }
@@ -335,5 +340,118 @@ const handleLocationUpdate = async (req: AuthRequest, res: Response) => {
 
 router.post('/orders/:id/location', requireRole(['delivery', 'delivery_partner']), handleLocationUpdate);
 router.post('/location', requireRole(['delivery', 'delivery_partner']), handleLocationUpdate);
+
+
+// ─── POST /orders/:id/assign-partner — Manual Rider Assignment ─────────────
+router.post('/orders/:id/assign-partner', requireRole(['restaurant_manager', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { deliveryPartnerId, deliveryPartnerName, deliveryPartnerPhone } = req.body;
+
+    if (!deliveryPartnerId) {
+      res.status(400).json({ error: 'deliveryPartnerId is required' });
+      return;
+    }
+
+    // Verify rider eligibility: must be online and not handling another active order
+    const riderDoc = await adminDb.collection('users').doc(deliveryPartnerId).get();
+    if (!riderDoc.exists) {
+      res.status(404).json({ error: 'Delivery partner not found' });
+      return;
+    }
+
+    const rData = riderDoc.data()!;
+    if (rData.isOnline === false || rData.isActive === false) {
+      res.status(400).json({ error: 'Selected delivery partner is currently offline or inactive.' });
+      return;
+    }
+
+    if (rData.activeOrderId && rData.activeOrderId !== id) {
+      res.status(400).json({ error: 'Selected delivery partner is already on an active delivery assignment.' });
+      return;
+    }
+
+    const result = await OrderStateMachine.transition(
+      id,
+      'partner_assigned',
+      { uid: req.user!.uid, role: req.user!.role || 'restaurant_manager', name: req.user!.email },
+      {
+        deliveryPartnerId,
+        deliveryPartnerName: deliveryPartnerName || rData.name || 'Delivery Partner',
+        deliveryPartnerPhone: deliveryPartnerPhone || rData.phone || '',
+        manualAssignment: true,
+        assignedByUid: req.user!.uid,
+      }
+    );
+
+    if (!result.success) {
+      res.status(400).json({ error: result.error || 'Failed to assign rider' });
+      return;
+    }
+
+    // Set rider busy status
+    await adminDb.collection('users').doc(deliveryPartnerId).update({
+      activeOrderId: id,
+      isBusy: true,
+      updatedAt: new Date(),
+    });
+
+    res.json({ success: true, message: 'Rider manually assigned successfully', orderId: id, deliveryPartnerId });
+  } catch (err: any) {
+    console.error('[Delivery Routes] Manual assign error:', err);
+    res.status(500).json({ error: 'Failed to assign rider' });
+  }
+});
+
+// ─── POST /orders/:id/decline — Rider Assignment Decline & Reassignment ────
+router.post('/orders/:id/decline', requireRole(['delivery', 'delivery_partner', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const riderId = req.user?.uid;
+    const { reason } = req.body;
+
+    const orderDoc = await adminDb.collection('orders').doc(id).get();
+    if (!orderDoc.exists) {
+      res.status(404).json({ error: 'Order not found' });
+      return;
+    }
+
+    const oData = orderDoc.data()!;
+    const declinedPartners = Array.isArray(oData.declinedPartnerIds) ? [...oData.declinedPartnerIds] : [];
+    if (riderId && !declinedPartners.includes(riderId)) {
+      declinedPartners.push(riderId);
+    }
+
+    // Clear active rider assignment on order and record declined ID
+    await adminDb.collection('orders').doc(id).update({
+      deliveryPartnerId: null,
+      deliveryPartnerName: null,
+      deliveryPartnerPhone: null,
+      declinedPartnerIds: declinedPartners,
+      lastDeclineReason: reason || 'Rider declined assignment',
+      updatedAt: new Date(),
+    });
+
+    // Release rider busy state
+    if (riderId) {
+      await adminDb.collection('users').doc(riderId).update({
+        activeOrderId: null,
+        isBusy: false,
+        updatedAt: new Date(),
+      }).catch(() => {});
+    }
+
+    // Auto-dispatch next available eligible rider in the background
+    const { RiderDispatchEngine } = await import('../services/delivery/RiderDispatchEngine.js');
+    RiderDispatchEngine.autoDispatchRider(id).catch((e) =>
+      console.warn('[Delivery Routes] Reassignment notice:', e.message)
+    );
+
+    res.json({ success: true, message: 'Assignment declined. Next available rider is being dispatched.', orderId: id });
+  } catch (err: any) {
+    console.error('[Delivery Routes] Decline error:', err);
+    res.status(500).json({ error: 'Failed to process rider decline' });
+  }
+});
 
 export default router;

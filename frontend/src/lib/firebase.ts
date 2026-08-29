@@ -1,8 +1,7 @@
-import { initializeApp, getApps, getApp, type FirebaseApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, type Auth } from 'firebase/auth';
-import { getFirestore, type Firestore } from 'firebase/firestore';
-import { getStorage, type FirebaseStorage } from 'firebase/storage';
-import { getMessaging, isSupported, type Messaging } from 'firebase/messaging';
+﻿import { initializeApp } from 'firebase/app';
+import { getAuth, GoogleAuthProvider } from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
+import { getStorage } from 'firebase/storage';
 
 export const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyAqkcY-WQrW3WoZWRrv8oo7MTAI_nVrLw4",
@@ -10,27 +9,26 @@ export const firebaseConfig = {
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "olive-pizza-08",
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "olive-pizza-08.firebasestorage.app",
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "1017239455106",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:1017239455106:web:ea5dd73d10722020007b9b",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:1017239455106:web:ea5dd73d10722020007b9b"
 };
 
-export const app: FirebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const auth: Auth = getAuth(app);
-export const db: Firestore = getFirestore(app);
-export const storage: FirebaseStorage = getStorage(app);
+export const app = initializeApp(firebaseConfig);
+export const auth = getAuth(app);
+export const db = getFirestore(app);
+export const storage = getStorage(app);
 export const googleProvider = new GoogleAuthProvider();
 
-export const getFirebaseMessaging = async (): Promise<Messaging | null> => {
+export const getMessagingInstance = async () => {
+  if (typeof window === 'undefined' || !('Notification' in window)) return null;
   try {
-    if (typeof window !== 'undefined' && (await isSupported())) {
-      return getMessaging(app);
-    }
-  } catch (e) {
-    console.warn('[Firebase] Messaging unsupported in this environment:', e);
+    const { getMessaging } = await import('firebase/messaging');
+    return getMessaging(app);
+  } catch {
+    return null;
   }
-  return null;
 };
 
-export const getMessagingInstance = getFirebaseMessaging;
+export const getFirebaseMessaging = getMessagingInstance;
 
 export const getCurrentAuthToken = async (): Promise<string> => {
   if (auth.currentUser) {
@@ -50,7 +48,7 @@ export const getCurrentAuthToken = async (): Promise<string> => {
     } catch {}
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const unsubscribe = auth.onAuthStateChanged(async (user) => {
       unsubscribe();
       if (user) {
@@ -60,14 +58,12 @@ export const getCurrentAuthToken = async (): Promise<string> => {
             resolve(token);
             return;
           }
-        } catch {}
+        } catch (e) {
+          reject(e);
+          return;
+        }
       }
-      resolve('');
+      reject(new Error("User not authenticated with Firebase Auth"));
     });
-
-    setTimeout(() => {
-      unsubscribe();
-      resolve('');
-    }, 3000);
   });
 };

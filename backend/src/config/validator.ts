@@ -10,23 +10,28 @@ export function validateEnvironmentVariables() {
   const missing = REQUIRED_VARS.filter(v => !process.env[v]);
 
   if (missing.length > 0) {
-    console.warn('\n=========================================');
-    console.warn('⚠️  STARTUP WARNING: MISSING OPTIONAL/REQUIRED ENV VARS');
-    console.warn('=========================================');
-    console.warn('The following environment variables are not set yet:');
-    missing.forEach(v => console.warn(` - ${v}`));
-    console.warn('\nPlease add them in the Render Dashboard Environment tab for full functionality.');
-    console.warn('=========================================\n');
-  } else {
-    // Validate Base64 encoding for Firebase Service Account if provided
-    try {
-      if (process.env.FIREBASE_SERVICE_ACCOUNT_BASE64) {
-        const decoded = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64, 'base64').toString('utf8');
-        JSON.parse(decoded);
-      }
-    } catch (err) {
-      console.warn('⚠️  WARNING: FIREBASE_SERVICE_ACCOUNT_BASE64 is not valid base64 JSON.');
-    }
-    console.log('✅ Environment validation passed.');
+    console.error('\n=========================================');
+    console.error('❌ CRITICAL STARTUP ERROR: MISSING ENV VARIABLES');
+    console.error('=========================================');
+    console.error('The following required environment variables are missing:');
+    missing.forEach(v => console.error(` - ${v}`));
+    console.error('\nThe server cannot start without these. Please add them to your backend/.env file or deployment environment.');
+    console.error('=========================================\n');
+    process.exit(1);
   }
+
+  // Validate Base64 encoding for Firebase Service Account
+  try {
+    const decoded = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64!, 'base64').toString('utf8');
+    JSON.parse(decoded);
+  } catch (err) {
+    console.error('\n=========================================');
+    console.error('❌ CRITICAL STARTUP ERROR: INVALID FIREBASE CREDS');
+    console.error('=========================================');
+    console.error('FIREBASE_SERVICE_ACCOUNT_BASE64 is not a valid base64 encoded JSON string.');
+    console.error('=========================================\n');
+    process.exit(1);
+  }
+
+  console.log('✅ Environment validation passed.');
 }

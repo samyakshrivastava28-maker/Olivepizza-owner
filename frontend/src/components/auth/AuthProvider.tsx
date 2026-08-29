@@ -6,7 +6,7 @@ import { useAuthStore, isAuthorizedOwnerEmail } from '../../lib/store';
 import { initFCMNotifications } from '../../lib/fcm';
 
 export default function AuthProvider({ children }: { children: React.ReactNode }) {
-  const { setUser, setLoading, logout } = useAuthStore();
+  const { setUser, setInitialized, setLoading, setAuthStatus, user: currentUser } = useAuthStore();
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -17,31 +17,49 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       try {
         unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
           if (!mounted) return;
+
           if (firebaseUser) {
             try {
-              const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-              if (!mounted) return;
-
               const isOwnerEmail = isAuthorizedOwnerEmail(firebaseUser.email);
-              
-              if (userDoc.exists()) {
-                const data = userDoc.data();
-                const resolvedRole = isOwnerEmail ? 'owner' : (data.role || 'customer');
+              let resolvedRole = isOwnerEmail ? 'owner' : 'customer';
+              let name = firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Owner';
+              let phone = firebaseUser.phoneNumber;
+
+              // Check Firestore user doc for role
+              try {
+                const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+                if (userDoc.exists()) {
+                  const data = userDoc.data();
+                  if (data.role) {
+                    resolvedRole = data.role;
+                  }
+                  if (data.name) name = data.name;
+                  if (data.phone) phone = data.phone;
+                }
+              } catch (fsErr: any) {
+                console.warn('[AuthProvider] Firestore user doc read notice:', fsErr?.message);
+              }
+
+              // Set authenticated state in store
+              if (mounted) {
                 setUser(
                   {
                     uid: firebaseUser.uid,
                     email: firebaseUser.email,
-                    name: data.name || firebaseUser.displayName || 'Owner',
-                    phone: data.phone,
+                    name,
+                    phone: phone || undefined,
                     role: resolvedRole,
                   },
-                  resolvedRole
+                  resolvedRole as any
                 );
 
                 // Silently sync FCM tokens for owner alerts
                 initFCMNotifications(firebaseUser.uid).catch(() => {});
-              } else {
-                const fallbackRole = isOwnerEmail ? 'owner' : 'customer';
+              }
+            } catch (error: any) {
+              console.warn('[AuthProvider] Auth user resolution warning:', error?.message);
+              if (mounted) {
+                const fallbackRole = isAuthorizedOwnerEmail(firebaseUser.email) ? 'owner' : 'customer';
                 setUser(
                   {
                     uid: firebaseUser.uid,
@@ -49,36 +67,36 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
                     name: firebaseUser.displayName || 'Owner',
                     role: fallbackRole,
                   },
-                  fallbackRole
+                  fallbackRole as any
                 );
               }
-            } catch (error: any) {
-              console.warn('[AuthProvider] Firestore read failed:', error?.message);
-              const fallbackRole = isAuthorizedOwnerEmail(firebaseUser.email) ? 'owner' : 'customer';
-              setUser(
-                {
-                  uid: firebaseUser.uid,
-                  email: firebaseUser.email,
-                  name: firebaseUser.displayName || 'Owner',
-                  role: fallbackRole,
-                },
-                fallbackRole
-              );
             }
           } else {
-            logout();
+            // Firebase Auth reported no active session
+            if (mounted) {
+              // If there was no cached user or auth initialized, mark unauthenticated
+              setUser(null, null);
+            }
           }
-          setLoading(false);
-        }, (error: any) => {
-          console.warn('[AuthProvider] Auth state error:', error?.message);
-          setLoading(false);
+
           if (mounted) {
-            retryTimer.current = setTimeout(setupAuth, 5000);
+            setInitialized(true);
+            setLoading(false);
+          }
+        }, (error: any) => {
+          console.warn('[AuthProvider] onAuthStateChanged error:', error?.message);
+          if (mounted) {
+            setLoading(false);
+            setInitialized(true);
+            retryTimer.current = setTimeout(setupAuth, 4000);
           }
         });
       } catch (err: any) {
-        console.error('[AuthProvider] Fatal auth init error:', err?.message);
-        setLoading(false);
+        console.error('[AuthProvider] Fatal auth listener setup error:', err?.message);
+        if (mounted) {
+          setLoading(false);
+          setInitialized(true);
+        }
       }
     };
 
@@ -89,7 +107,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       if (unsubscribe) unsubscribe();
       if (retryTimer.current) clearTimeout(retryTimer.current);
     };
-  }, [setUser, setLoading, logout]);
+  }, [setUser, setInitialized, setLoading, setAuthStatus]);
 
   return <>{children}</>;
 }

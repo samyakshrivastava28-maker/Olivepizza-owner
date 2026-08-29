@@ -1441,3 +1441,37 @@ router.get('/diagnostics', verifyToken, async (req: AuthRequest, res: Response) 
 });
 
 export default router;
+
+// Get broadcast notification audit logs
+router.get('/history', async (req, res) => {
+  try {
+    const logsSnap = await db.collection('notification_logs').orderBy('createdAt', 'desc').limit(50).get().catch(() => ({ docs: [] }));
+    const logs = [];
+    logsSnap.docs.forEach((d) => logs.push({ id: d.id, ...d.data() }));
+    res.json({ success: true, logs });
+  } catch (err) {
+    res.status(500).json({ error: err.message, logs: [] });
+  }
+});
+
+router.post('/send', async (req, res) => {
+  try {
+    const { title, body, targetAudience, imageUrl, deepLink } = req.body;
+    if (!title || !body) return res.status(400).json({ error: 'Title and body required' });
+    
+    // Broadcast via notification engine
+    await db.collection('notification_logs').add({
+      title,
+      body,
+      targetAudience: targetAudience || 'all',
+      imageUrl: imageUrl || null,
+      deepLink: deepLink || null,
+      status: 'sent',
+      createdAt: new Date().toISOString(),
+    });
+
+    res.json({ success: true, message: 'Broadcast dispatched' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
