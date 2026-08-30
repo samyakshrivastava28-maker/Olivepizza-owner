@@ -12,7 +12,7 @@ export const OPENING_HOUR = 12; // 12 PM (noon)
 export const CLOSING_HOUR = 24; // 12 AM (midnight)
 
 // In production, the client queries the dedicated Owner backend API on Render.
-export const PRODUCTION_BACKEND_URL = "https://api.olivepizza.in";
+export const PRODUCTION_BACKEND_URL = "https://olivepizza-owner.onrender.com";
 
 // Development fallback
 const DEV_BACKEND_URL = "http://localhost:5000";

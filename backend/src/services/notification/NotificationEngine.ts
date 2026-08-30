@@ -365,15 +365,21 @@ export class NotificationEngine {
 
   /**
    * Resolve all active FCM tokens for users with a given role.
-   * Resolves UIDs from Firestore users collection (role == owner | delivery_partner | customer).
-   * Does NOT assume a 'role' column exists in PostgreSQL fcm_tokens.
+   * Resolves UIDs from Firestore users collection.
    */
-  public async resolveByRole(role: 'owner' | 'delivery_partner' | 'customer'): Promise<string[]> {
-    const targetRoles = role === 'delivery_partner'
-      ? ['delivery_partner', 'delivery']
-      : role === 'owner'
-      ? ['owner', 'admin']
-      : ['customer'];
+  public async resolveByRole(role: 'owner' | 'delivery_partner' | 'customer' | 'restaurant_manager' | 'restaurant' | 'franchise' | string): Promise<string[]> {
+    let targetRoles: string[] = [role];
+    if (role === 'delivery_partner' || role === 'delivery') {
+      targetRoles = ['delivery_partner', 'delivery'];
+    } else if (role === 'restaurant' || role === 'restaurant_manager') {
+      targetRoles = ['restaurant_manager', 'kitchen_staff', 'manager'];
+    } else if (role === 'franchise' || role === 'franchise_manager') {
+      targetRoles = ['franchise_owner', 'franchise_manager'];
+    } else if (role === 'owner' || role === 'admin') {
+      targetRoles = ['owner', 'admin'];
+    } else if (role === 'customer') {
+      targetRoles = ['customer'];
+    }
 
     const uidsSet = new Set<string>();
 

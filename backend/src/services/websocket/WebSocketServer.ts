@@ -193,8 +193,9 @@ class OliveWebSocketServer {
     });
 
     appEventBus.on('order.created', (event: OrderCreatedEvent) => {
-      // Broadcast new order to all owner/manager clients
-      this.broadcastToRole('owner', {
+      // Broadcast new order strictly to restaurant management & staff
+      console.log('[NOTIFICATION_ROUTED]', { event: 'order.created', orderId: event.orderId, targetRoles: ['restaurant', 'manager', 'restaurant_manager'] });
+      const orderPayload = {
         type: 'order.created',
         data: {
           orderId: event.orderId,
@@ -203,7 +204,10 @@ class OliveWebSocketServer {
           totalAmount: event.totalAmount,
           timestamp: event.timestamp,
         },
-      });
+      };
+      this.broadcastToRole('restaurant', orderPayload);
+      this.broadcastToRole('manager', orderPayload);
+      this.broadcastToRole('restaurant_manager', orderPayload);
     });
 
     console.log('[WebSocketServer] Attached to HTTP server on path /ws');
@@ -246,6 +250,7 @@ class OliveWebSocketServer {
 
     // 2. Broadcast to all owner/admin clients for real-time fleet map
     this.broadcastToRole('owner', broadcastMsg);
+    this.broadcastToRole('admin', broadcastMsg);
   }
 
   /**
@@ -279,13 +284,13 @@ class OliveWebSocketServer {
   }
 
   /**
-   * Broadcast to all users with a specific role (for owner/delivery dashboards).
+   * Broadcast to all users with a specific role (for targeted operational dashboards).
    */
   broadcastToRole(role: string, message: object): void {
     const payload = JSON.stringify(message);
     for (const userClients of this.clients.values()) {
       for (const client of userClients) {
-        if ((client.role === role || client.role === 'owner' || client.role === 'admin') && client.ws.readyState === WebSocket.OPEN) {
+        if (client.role === role && client.ws.readyState === WebSocket.OPEN) {
           client.ws.send(payload);
         }
       }

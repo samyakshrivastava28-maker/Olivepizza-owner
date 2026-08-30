@@ -337,17 +337,6 @@ export class FirestoreListener {
       // 1. Send Customer Email to customer's registered email account
       await queueEmail(email, subject, htmlBody, 'transactional');
       console.log(`[Email] Customer order email queued for ${email} (Stage: ${status})`);
-
-      // 2. Also send Owner Alert Email to olivepizzarjn@gmail.com for New Orders & Cancellations
-      if (status === 'pending' || status === 'cancelled') {
-        const ownerEmail = process.env.OWNER_EMAIL || 'olivepizzarjn@gmail.com';
-        const ownerSubject = status === 'pending'
-          ? `🍕 NEW ORDER RECEIVED — #${orderNumber} (₹${totalAmount})`
-          : `❌ ORDER CANCELLED — #${orderNumber}`;
-
-        await queueEmail(ownerEmail, ownerSubject, htmlBody, 'transactional');
-        console.log(`[Email] Owner alert email queued for ${ownerEmail} (Stage: ${status})`);
-      }
     } catch (e) {
       console.warn('❌ Email dispatch failed:', e);
     }

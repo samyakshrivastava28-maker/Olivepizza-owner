@@ -388,13 +388,14 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
         firestoreUpdates.acceptedAt = new Date().toISOString();
         firestoreUpdates.eta = '20-30 mins';
         
-        // Stop owner continuous alarm & send customer confirmed notification
+        // Stop restaurant branch continuous alarm & send customer confirmed notification
         backgroundTasks.push(async () => {
           try {
-            const ownerUids = await notificationEngine.resolveByRole('owner');
-            if (ownerUids.length > 0) {
+            const branchId = orderData.branchId || 'main_branch';
+            const branchStaff = await notificationEngine.resolveBranchStaff(branchId);
+            if (branchStaff.length > 0) {
               const stopPayload = { data: { action: 'stop_alert', orderId } } as any;
-              await notificationEngine.sendBulk(ownerUids, stopPayload, { priority: 'high', orderId });
+              await notificationEngine.sendBulk(branchStaff, stopPayload, { priority: 'high', orderId, tag: `order_restaurant_${orderId}` });
             }
             if (customerFirebaseUid) {
               const cPayload = CustomerTemplates.orderUpdate(orderId, {
@@ -406,23 +407,24 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
               await notificationEngine.send(customerFirebaseUid, cPayload, { category: 'pinned_live', priority: 'high', orderId });
             }
           } catch (e: any) {
-            console.error(`[Action][${requestId}] Owner accept notifications failed:`, e.message);
+            console.error(`[Action][${requestId}] Accept notifications failed:`, e.message);
           }
         });
 
       } else if (action === 'reject' || action === 'cancel_order' || action === 'cancelled') {
-        const cancellationReason = reason || 'Cancelled by store owner';
+        const cancellationReason = reason || 'Cancelled by store staff';
         firestoreUpdates.cancellationReason = cancellationReason;
         firestoreUpdates.cancelledAt = new Date().toISOString();
         trace.steps.push({ step: 'Cancellation Reason', status: 'success', reason: cancellationReason });
 
-        // Stop owner continuous alarm & send unpinned customer cancellation notification
+        // Stop restaurant branch continuous alarm & send unpinned customer cancellation notification
         backgroundTasks.push(async () => {
           try {
-            const ownerUids = await notificationEngine.resolveByRole('owner');
-            if (ownerUids.length > 0) {
+            const branchId = orderData.branchId || 'main_branch';
+            const branchStaff = await notificationEngine.resolveBranchStaff(branchId);
+            if (branchStaff.length > 0) {
               const stopPayload = { data: { action: 'stop_alert', orderId } } as any;
-              await notificationEngine.sendBulk(ownerUids, stopPayload, { priority: 'high', orderId });
+              await notificationEngine.sendBulk(branchStaff, stopPayload, { priority: 'high', orderId, tag: `order_restaurant_${orderId}` });
             }
             if (customerFirebaseUid) {
               const cPayload = CustomerTemplates.orderUpdate(orderId, {

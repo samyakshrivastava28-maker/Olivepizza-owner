@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
 import { verifyToken, AuthRequest, requireRole } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
+import { webSocketServer } from '../services/websocket/WebSocketServer.js';
 
 const router = Router();
 
@@ -89,13 +90,20 @@ router.get('/master-catalog', async (req: Request, res: Response): Promise<void>
 
 router.post('/master-products', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { id, name, description, category, basePrice, imageUrl, variants, crusts, addons, channelAvailability } = req.body;
-    if (!name || !category || !basePrice) {
+    const { id, name, description, category, basePrice, imageUrl, variants, crusts, addons, channelAvailability, isActive, isAvailable, createdAt } = req.body;
+    if (!name || !category || basePrice === undefined) {
       res.status(400).json({ success: false, error: 'name, category, and basePrice are required' });
       return;
     }
     const docId = id || ('prod_' + Date.now());
-    const productPayload = {
+    const isNew = !id;
+    const nowIso = new Date().toISOString();
+
+    const activeState = isActive !== undefined ? Boolean(isActive) : (isAvailable !== undefined ? Boolean(isAvailable) : true);
+    const availState = isAvailable !== undefined ? Boolean(isAvailable) : activeState;
+
+    const productPayload: any = {
+      id: docId,
       productName: name,
       name,
       description: description || '',
@@ -104,16 +112,41 @@ router.post('/master-products', verifyToken, requireRole(['owner', 'admin', 'dev
       price: Number(basePrice),
       imageUrl: imageUrl || 'https://res.cloudinary.com/dxmlvkff1/image/upload/v1786517437/olive-pizza/ai-product-images/dv4uty06rq4tznlpqz2i.jpg',
       isVegetarian: req.body.isVegetarian ?? true,
-      isActive: true,
-      isAvailable: true,
+      isActive: activeState,
+      isAvailable: availState,
       variants: variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
       crusts: crusts || ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst'],
       addons: addons || [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }],
       channelAvailability: channelAvailability || { online: true, dineIn: true, takeaway: true, posDelivery: true },
-      updatedAt: new Date().toISOString()
+      createdAt: createdAt || nowIso,
+      updatedAt: nowIso
     };
+
     await adminDb.collection('products').doc(docId).set(productPayload, { merge: true });
-    res.json({ success: true, message: 'Master product saved successfully', product: { id: docId, ...productPayload } });
+
+    // Structured logging
+    console.log(isNew ? '[PRODUCT_CREATED]' : '[PRODUCT_UPDATED]', {
+      productId: docId,
+      name,
+      category,
+      price: basePrice,
+      isActive: activeState,
+      isAvailable: availState,
+      timestamp: nowIso
+    });
+
+    // Realtime broadcast to all operational apps
+    webSocketServer.broadcastToAll({
+      type: isNew ? 'product.created' : 'product.updated',
+      data: {
+        productId: docId,
+        action: isNew ? 'create' : 'update',
+        product: productPayload,
+        timestamp: nowIso
+      }
+    });
+
+    res.json({ success: true, message: 'Master product saved successfully', product: productPayload });
   } catch (error: any) {
     console.error('[MenuRoutes] Error creating master product:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -146,6 +179,14 @@ router.delete(['/master-products/:id', '/products/:id', '/:id'], verifyToken, re
     } catch (overrideErr) {
       console.warn('[MenuRoutes] Warning cleaning up branch overrides on product delete:', overrideErr);
     }
+
+    console.log('[PRODUCT_DISABLED]', { productId: id, timestamp: new Date().toISOString() });
+
+    // Realtime broadcast deletion to all connected apps
+    webSocketServer.broadcastToAll({
+      type: 'product.deleted',
+      data: { productId: id, action: 'delete', timestamp: new Date().toISOString() }
+    });
 
     res.json({
       success: true,
@@ -182,6 +223,13 @@ router.post(['/master-products/:id/delete', '/products/:id/delete', '/:id/delete
     } catch (overrideErr) {
       console.warn('[MenuRoutes] Warning cleaning up branch overrides:', overrideErr);
     }
+
+    console.log('[PRODUCT_DISABLED]', { productId, timestamp: new Date().toISOString() });
+
+    webSocketServer.broadcastToAll({
+      type: 'product.deleted',
+      data: { productId, action: 'delete', timestamp: new Date().toISOString() }
+    });
 
     res.json({
       success: true,
@@ -303,13 +351,22 @@ router.post('/branch/:branchId/toggle', verifyToken, requireRole(['restaurant_ma
       return;
     }
     const docKey = branchId + '_' + productId;
+    const nowIso = new Date().toISOString();
     await adminDb.collection('branch_menu_overrides').doc(docKey).set({
       branchId,
       productId,
       isEnabledForBranch: isEnabled,
-      updatedAt: new Date().toISOString(),
+      updatedAt: nowIso,
       updatedBy: req.user?.email || 'manager'
     }, { merge: true });
+
+    console.log('[PRODUCT_UPDATED]', { branchId, productId, isEnabled, type: 'branch_toggle', timestamp: nowIso });
+
+    webSocketServer.broadcastToAll({
+      type: 'branch_menu.updated',
+      data: { branchId, productId, isEnabledForBranch: isEnabled, timestamp: nowIso }
+    });
+
     res.json({ success: true, message: 'Product ' + productId + ' ' + (isEnabled ? 'enabled' : 'disabled') + ' for branch ' + branchId, branchId, productId, isEnabledForBranch: isEnabled });
   } catch (error: any) {
     console.error('[MenuRoutes] Error toggling branch product:', error);
@@ -326,10 +383,11 @@ router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restau
       return;
     }
     const docKey = branchId + '_' + productId;
+    const nowIso = new Date().toISOString();
     const overrideData: any = {
       branchId,
       productId,
-      updatedAt: new Date().toISOString(),
+      updatedAt: nowIso,
       updatedBy: req.user?.email || 'manager'
     };
     if (allowedSizes) overrideData.allowedSizes = allowedSizes;
@@ -338,6 +396,12 @@ router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restau
     if (channelAvailability) overrideData.channelAvailability = channelAvailability;
     if (customPrice) overrideData.customPrice = Number(customPrice);
     await adminDb.collection('branch_menu_overrides').doc(docKey).set(overrideData, { merge: true });
+
+    webSocketServer.broadcastToAll({
+      type: 'branch_menu.updated',
+      data: { branchId, productId, override: overrideData, timestamp: nowIso }
+    });
+
     res.json({ success: true, message: 'Customizations updated for product ' + productId + ' in branch ' + branchId, override: overrideData });
   } catch (error: any) {
     console.error('[MenuRoutes] Error saving branch customizations:', error);
@@ -348,22 +412,33 @@ router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restau
 router.post('/branch/:branchId/stock-status', verifyToken, requireRole(['cashier', 'restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { branchId } = req.params;
-    const { productId, stockStatus } = req.body;
-    if (!productId || !stockStatus) {
-      res.status(400).json({ success: false, error: 'productId and stockStatus are required' });
+    const { productId, stockStatus, inStock } = req.body;
+    const normalizedStock = stockStatus || (inStock === false ? 'OUT_OF_STOCK' : 'IN_STOCK');
+    if (!productId) {
+      res.status(400).json({ success: false, error: 'productId is required' });
       return;
     }
     const docKey = branchId + '_' + productId;
+    const nowIso = new Date().toISOString();
     await adminDb.collection('branch_menu_overrides').doc(docKey).set({
       branchId,
       productId,
-      stockStatus,
-      updatedAt: new Date().toISOString(),
-      stockUpdatedBy: req.user?.email || 'cashier'
+      stockStatus: normalizedStock,
+      inStock: normalizedStock === 'IN_STOCK',
+      updatedAt: nowIso,
+      updatedBy: req.user?.email || 'manager'
     }, { merge: true });
-    res.json({ success: true, message: 'Stock status for ' + productId + ' set to ' + stockStatus, branchId, productId, stockStatus });
+
+    console.log('[PRODUCT_UPDATED]', { branchId, productId, stockStatus: normalizedStock, timestamp: nowIso });
+
+    webSocketServer.broadcastToAll({
+      type: 'stock.updated',
+      data: { branchId, productId, stockStatus: normalizedStock, inStock: normalizedStock === 'IN_STOCK', timestamp: nowIso }
+    });
+
+    res.json({ success: true, message: 'Stock status updated for ' + productId, branchId, productId, stockStatus: normalizedStock });
   } catch (error: any) {
-    console.error('[MenuRoutes] Error updating stock status:', error);
+    console.error('[MenuRoutes] Error updating branch stock status:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
