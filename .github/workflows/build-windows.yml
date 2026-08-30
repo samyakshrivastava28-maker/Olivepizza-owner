@@ -1,0 +1,41 @@
+name: Build Windows — Owner
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Build frontend
+        run: cd frontend && npm ci && npm run build
+        env:
+          VITE_API_BASE_URL: https://olivepizza-owner.onrender.com
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_PROJECT_ID: olive-pizza-08
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+      - run: npx electron-builder --win --x64 --config electron-builder.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OlivePizza-Owner-Windows-Installer
+          path: dist-electron/*.exe
+          retention-days: 30
+      - name: Build status
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist-electron -Filter *.exe -ErrorAction SilentlyContinue
+          if ($files) {
+            "## Windows Build: WINDOWS_BUILD_READY`n**Files**: $($files.Name -join ', ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          } else {
+            "## Windows Build: WINDOWS_BUILD_FAILED" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+          }

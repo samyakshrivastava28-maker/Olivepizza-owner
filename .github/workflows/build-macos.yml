@@ -1,0 +1,38 @@
+name: Build macOS — Owner
+
+on:
+  workflow_dispatch:
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - name: Build frontend
+        run: cd frontend && npm ci && npm run build
+        env:
+          VITE_API_BASE_URL: https://olivepizza-owner.onrender.com
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_PROJECT_ID: olive-pizza-08
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+      - run: npx electron-builder --mac --config electron-builder.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OlivePizza-Owner-macOS-DMG
+          path: dist-electron/*.dmg
+          retention-days: 14
+      - name: Build status
+        run: |
+          if ls dist-electron/*.dmg 2>/dev/null; then
+            echo "## macOS Build: MACOS_BUILD_READY — MACOS_SIGNING_NOT_CONFIGURED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## macOS Build: MACOS_BUILD_FAILED" >> $GITHUB_STEP_SUMMARY
+          fi

@@ -1,0 +1,49 @@
+{
+  "appId": "in.olivepizza.owner",
+  "productName": "Olive Pizza Owner",
+  "directories": {
+    "buildResources": "electron/resources",
+    "output": "dist-electron"
+  },
+  "files": [
+    "electron/**/*",
+    "dist/**/*",
+    "!node_modules/**/*"
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "electron/resources/icon.ico"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "installerIcon": "electron/resources/icon.ico",
+    "uninstallerIcon": "electron/resources/icon.ico",
+    "installerHeaderIcon": "electron/resources/icon.ico",
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Olive Pizza Owner"
+  },
+  "mac": {
+    "target": [
+      {
+        "target": "dmg",
+        "arch": ["x64", "arm64"]
+      }
+    ],
+    "category": "public.app-category.business",
+    "icon": "electron/resources/icon.icns"
+  },
+  "dmg": {
+    "background": null,
+    "window": {
+      "width": 540,
+      "height": 380
+    }
+  }
+}

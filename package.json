@@ -11,7 +11,10 @@
     "build:backend": "cd backend && npm install",
     "build": "npm run build:frontend && mkdir -p dist && cp -r frontend/dist/* dist/ || true",
     "start": "tsx backend/server.ts",
-    "server": "tsx backend/server.ts"
+    "server": "tsx backend/server.ts",
+    "desktop": "electron electron/main.cjs",
+    "build:electron": "npm run build:frontend && electron-builder --win --x64 --config electron-builder.json",
+    "build:mac": "npm run build:frontend && electron-builder --mac --config electron-builder.json"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1104.0",
@@ -23,6 +26,7 @@
     "@capacitor/cli": "^8.4.1",
     "@capacitor/core": "^8.4.1",
     "@capacitor/geolocation": "^8.2.0",
+    "@capacitor/ios": "^8.5.0",
     "@capacitor/push-notifications": "^8.1.1",
     "@google-cloud/recaptcha-enterprise": "^6.4.2",
     "@google/genai": "latest",
@@ -72,6 +76,8 @@
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
-    "@types/node": "^22.10.0"
+    "@types/node": "^22.10.0",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
   }
 }

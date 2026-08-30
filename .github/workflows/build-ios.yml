@@ -1,0 +1,128 @@
+name: Build iOS — Owner
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: false
+        default: 'archive'
+        type: choice
+        options:
+          - archive
+
+jobs:
+  build-ios:
+    name: Build iOS Project
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend (bundled into app)
+        run: cd frontend && npm ci && npm run build
+        env:
+          VITE_API_BASE_URL: https://olivepizza-owner.onrender.com
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_PROJECT_ID: olive-pizza-08
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+
+      - name: Capacitor Sync iOS
+        run: npx cap sync ios
+
+      - name: Install CocoaPods
+        run: |
+          sudo gem install cocoapods
+          cd ios/App
+          pod install --repo-update
+
+      - name: Select Xcode version
+        run: sudo xcode-select -switch /Applications/Xcode.app
+
+      - name: Build and Archive iOS
+        run: |
+          cd ios/App
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath ${{ github.workspace }}/OlivePizza-Owner.xcarchive \
+            archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            2>&1 | xcpretty || true
+
+      - name: Check archive
+        run: |
+          if [ -d "${{ github.workspace }}/OlivePizza-Owner.xcarchive" ]; then
+            echo "IOS_BUILD_STATUS=ARCHIVE_READY_IOS_SIGNING_REQUIRED" >> $GITHUB_ENV
+            echo "✅ Xcode archive created — IOS_SIGNING_REQUIRED for IPA export"
+          else
+            echo "IOS_BUILD_STATUS=BUILD_FAILED" >> $GITHUB_ENV
+            echo "❌ Archive not found — build may have failed"
+          fi
+
+      - name: Export IPA (requires signing secrets)
+        if: env.APPLE_CERTIFICATE_BASE64 != ''
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          echo "Signing configured — exporting IPA..."
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 -d > /tmp/certificate.p12
+          echo "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 -d > /tmp/profile.mobileprovision
+          security create-keychain -p "" build.keychain
+          security import /tmp/certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -A
+          security set-keychain-settings -t 3600 -u build.keychain
+          security unlock-keychain -p "" build.keychain
+          security list-keychains -d user -s build.keychain "$(security list-keychains -d user | head -1 | tr -d '"')"
+          mkdir -p /tmp/ipa-export
+          cat > /tmp/ExportOptions.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>ad-hoc</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+            <key>uploadBitcode</key><false/>
+            <key>compileBitcode</key><false/>
+          </dict></plist>
+          EOF
+          xcodebuild \
+            -exportArchive \
+            -archivePath "${{ github.workspace }}/OlivePizza-Owner.xcarchive" \
+            -exportPath /tmp/ipa-export \
+            -exportOptionsPlist /tmp/ExportOptions.plist
+          echo "IOS_BUILD_STATUS=IPA_READY" >> $GITHUB_ENV
+
+      - name: Upload archive/IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OlivePizza-Owner-iOS-${{ env.IOS_BUILD_STATUS }}
+          path: |
+            OlivePizza-Owner.xcarchive
+            /tmp/ipa-export/*.ipa
+          retention-days: 14
+
+      - name: Build status summary
+        run: |
+          echo "## iOS Build Result" >> $GITHUB_STEP_SUMMARY
+          echo "**Status**: ${{ env.IOS_BUILD_STATUS }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ env.IOS_BUILD_STATUS }}" = "ARCHIVE_READY_IOS_SIGNING_REQUIRED" ]; then
+            echo "**Next step**: Add APPLE_CERTIFICATE_BASE64, APPLE_PROVISIONING_PROFILE_BASE64, APPLE_CERTIFICATE_PASSWORD, APPLE_TEAM_ID to GitHub Secrets for IPA export." >> $GITHUB_STEP_SUMMARY
+          fi
