@@ -46,6 +46,8 @@ export interface NotificationEngineOptions {
   expiresInSeconds?: number;
   /** For pinned_live: collapse notifications with same tag on device */
   collapseKey?: string;
+  /** Target client application to prevent cross-app notification leaks */
+  targetApp?: 'customer' | 'owner' | 'franchise' | 'restaurant' | 'delivery' | 'pos';
 }
 
 export interface SendResult {
@@ -84,7 +86,7 @@ export class NotificationEngine {
     }
 
     // ── 1. Resolve FCM tokens ─────────────────────────────────────────────────
-    const tokens = await this.resolveTokens(firebaseUserIds);
+    const tokens = await this.resolveTokens(firebaseUserIds, options.targetApp);
 
     const startTime = Date.now();
     const notificationId = options.orderId ? `notif_${options.orderId}_${Date.now()}` : `notif_${Date.now()}`;
@@ -315,21 +317,38 @@ export class NotificationEngine {
 
   /**
    * Resolve active FCM tokens for a list of Firebase UIDs.
-   * Primary: Postgres fcm_tokens (is_active=TRUE)
+   * Primary: Postgres fcm_tokens (is_active=TRUE, optionally matching targetApp)
    * Fallback: Firestore users.fcmTokens[] (auto-synced back to Postgres)
    */
-  private async resolveTokens(firebaseUserIds: string[]): Promise<string[]> {
+  private async resolveTokens(firebaseUserIds: string[], targetApp?: string): Promise<string[]> {
     const client = await pgPool.connect();
     try {
-      const result = await client.query(
-        `SELECT user_id as firebase_uid, token
-         FROM fcm_tokens
-         WHERE user_id = ANY($1) AND is_active = TRUE`,
-        [firebaseUserIds]
-      );
+      let queryStr = `SELECT user_id as firebase_uid, token, app_name
+                      FROM fcm_tokens
+                      WHERE user_id = ANY($1) AND is_active = TRUE`;
+      const params: any[] = [firebaseUserIds];
 
-      const foundUids = new Set(result.rows.map((r: any) => r.firebase_uid));
-      let tokens: string[] = result.rows.map((r: any) => r.token);
+      const result = await client.query(queryStr, params).catch(async () => {
+        // Graceful fallback if app_name column is not yet present
+        return await client.query(
+          `SELECT user_id as firebase_uid, token
+           FROM fcm_tokens
+           WHERE user_id = ANY($1) AND is_active = TRUE`,
+          [firebaseUserIds]
+        );
+      });
+
+      let filteredRows = result.rows;
+      if (targetApp) {
+        // Filter rows matching targetApp, or rows where app_name is null/empty for backward compatibility
+        const exactMatches = result.rows.filter((r: any) => r.app_name === targetApp);
+        if (exactMatches.length > 0) {
+          filteredRows = exactMatches;
+        }
+      }
+
+      const foundUids = new Set(filteredRows.map((r: any) => r.firebase_uid));
+      let tokens: string[] = filteredRows.map((r: any) => r.token);
 
       // Firestore fallback for UIDs with no Postgres tokens
       const missingUids = firebaseUserIds.filter(uid => !foundUids.has(uid));
@@ -343,11 +362,11 @@ export class NotificationEngine {
                 tokens.push(t);
                 // Auto-sync to Postgres so future sends don't need the fallback
                 client.query(
-                  `INSERT INTO fcm_tokens (user_id, token, is_active, last_used_at)
-                   VALUES ($1, $2, TRUE, NOW())
+                  `INSERT INTO fcm_tokens (user_id, token, is_active, last_used_at, app_name)
+                   VALUES ($1, $2, TRUE, NOW(), $3)
                    ON CONFLICT (user_id, token)
                    DO UPDATE SET is_active = TRUE, last_used_at = NOW()`,
-                  [uid, t]
+                  [uid, t, targetApp || 'customer']
                 ).catch(() => {});
               }
             }

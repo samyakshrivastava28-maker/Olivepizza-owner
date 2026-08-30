@@ -341,12 +341,73 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
   };
 }
 
+// ─── iOS ActivityKit Live Activity Payload Builder ─────────────────────────
+export function buildLiveActivityPayload(
+  orderId: string,
+  state: {
+    event: 'start' | 'update' | 'end';
+    status: OrderStatus;
+    step: number;
+    orderNumber: string;
+    itemsSummary: string;
+    totalAmount: number;
+    etaMinutes?: number;
+    riderName?: string;
+    riderPhone?: string;
+    restaurantName?: string;
+    dismissalDate?: number; // Epoch timestamp in seconds for 'end'
+  }
+): NotificationPayload {
+  const isEnd = state.event === 'end';
+  return {
+    notification: undefined, // Live Activities do not use top-level notification alerts
+    data: {
+      orderId,
+      orderNumber: state.orderNumber,
+      status: state.status,
+      step: String(state.step),
+      etaMinutes: String(state.etaMinutes || 0),
+      totalAmount: String(state.totalAmount),
+      isLiveActivity: 'true',
+      activityEvent: state.event
+    },
+    apns: {
+      headers: {
+        'apns-push-type': 'liveactivity',
+        'apns-priority': '10',
+        'apns-topic': 'com.olivepizza.app.push-type.liveactivity'
+      },
+      payload: {
+        aps: {
+          timestamp: Math.floor(Date.now() / 1000),
+          event: state.event,
+          'dismissal-date': isEnd ? (state.dismissalDate || Math.floor(Date.now() / 1000) + 300) : undefined,
+          'content-state': {
+            orderNumber: state.orderNumber,
+            status: state.status,
+            step: state.step,
+            itemsSummary: state.itemsSummary,
+            totalAmount: state.totalAmount,
+            etaMinutes: state.etaMinutes || 0,
+            riderName: state.riderName || '',
+            riderPhone: state.riderPhone || '',
+            restaurantName: state.restaurantName || 'Olive Pizza',
+            updatedAt: new Date().toISOString()
+          }
+        }
+      }
+    }
+  };
+}
+
 // =============================================================================
 // RESTAURANT MANAGEMENT TEMPLATES (Actionable Push for Branch Managers)
 // =============================================================================
 export class RestaurantTemplates {
   /**
    * New Order for Restaurant Management — with REAL actionable buttons: [ ACCEPT ] [ REJECT ]
+   * Features: customer name, masked phone, product image thumbnail, item customizations,
+   * financial breakdown (subtotal, offers, taxes, total), payment method/status.
    */
   static newOrder(
     orderId: string,
@@ -354,23 +415,64 @@ export class RestaurantTemplates {
       customerName: string;
       orderNumber: string;
       totalAmount: number;
-      items: string[];
+      items: Array<{
+        name: string;
+        quantity: number;
+        size?: string;
+        crust?: string;
+        customizations?: string[];
+        image?: string;
+      }> | string[];
       paymentMethod: string;
+      paymentStatus?: string;
       deliveryAddress?: string;
       phone?: string;
       orderTime?: string;
       branchId?: string;
       version?: number;
+      productImageThumbnail?: string;
+      financials?: {
+        subtotal?: number;
+        discount?: number;
+        deliveryFee?: number;
+        gst?: number;
+        total?: number;
+      };
     }
   ): NotificationPayload {
-    const title = `🍕 NEW ORDER #${payload.orderNumber} (₹${payload.totalAmount})`;
-    const body = [
-      `Customer: ${payload.customerName}`,
-      payload.phone ? `Phone: ${payload.phone}` : '',
-      `Items: ${payload.items.slice(0, 3).join(', ')}${payload.items.length > 3 ? ` +${payload.items.length - 3} more` : ''}`,
-      `Payment: ${payload.paymentMethod}`,
-      payload.deliveryAddress ? `Address: ${payload.deliveryAddress}` : ''
-    ].filter(Boolean).join(' • ');
+    // Format item strings and extract first image
+    let itemStrings: string[] = [];
+    let firstImage = payload.productImageThumbnail || '';
+
+    if (Array.isArray(payload.items)) {
+      itemStrings = payload.items.map(item => {
+        if (typeof item === 'string') return item;
+        if (!firstImage && item.image) firstImage = item.image;
+        const customPart = item.customizations && item.customizations.length > 0 ? ` (+${item.customizations.join(', ')})` : '';
+        const crustPart = item.crust ? ` [${item.crust}]` : '';
+        const sizePart = item.size ? ` ${item.size}` : '';
+        return `${item.quantity}× ${item.name}${sizePart}${crustPart}${customPart}`;
+      });
+    }
+
+    // Mask phone number (e.g., 9179944445 -> ••••••••45)
+    let maskedPhone = payload.phone || '';
+    if (maskedPhone && maskedPhone.length >= 4) {
+      maskedPhone = '••••••••' + maskedPhone.slice(-2);
+    }
+
+    const title = `🍕 NEW ORDER #${payload.orderNumber} • ₹${payload.totalAmount}`;
+    const itemsPreview = itemStrings.slice(0, 3).join('\n• ');
+    const itemsMore = itemStrings.length > 3 ? `\n... and ${itemStrings.length - 3} more items` : '';
+
+    const bodyLines = [
+      `Customer: ${payload.customerName}${maskedPhone ? ` (${maskedPhone})` : ''}`,
+      `Items:\n• ${itemsPreview}${itemsMore}`,
+      `Payment: ${payload.paymentMethod?.toUpperCase()} (${payload.paymentStatus || 'PENDING'})`,
+      payload.deliveryAddress ? `📍 ${payload.deliveryAddress}` : ''
+    ].filter(Boolean);
+
+    const body = bodyLines.join('\n');
 
     return buildPayload(title, body, {
       tag: `order_restaurant_${orderId}`,

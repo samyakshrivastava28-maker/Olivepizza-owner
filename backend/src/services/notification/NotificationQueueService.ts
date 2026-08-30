@@ -229,7 +229,19 @@ export class NotificationQueueService {
   public async registerToken(
     firebaseUserId: string,
     token: string,
-    deviceInfo: { oldToken?: string; deviceId?: string; deviceName?: string; platform?: string; browser?: string; appVersion?: string }
+    deviceInfo: {
+      oldToken?: string;
+      deviceId?: string;
+      deviceName?: string;
+      platform?: string;
+      browser?: string;
+      appVersion?: string;
+      appName?: string;
+      role?: string;
+      franchiseId?: string;
+      branchId?: string;
+      terminalId?: string;
+    }
   ): Promise<void> {
     let client: any = null;
     try {
@@ -258,16 +270,28 @@ export class NotificationQueueService {
       // Ensure 1 Device Token = 1 User (deactivate token for any previous user)
       await client.query('UPDATE fcm_tokens SET is_active = FALSE WHERE token = $1 AND user_id != $2', [token, pgUserId]);
 
-      // Upsert token
+      // Upsert token with application metadata
       await client.query(
-        `INSERT INTO fcm_tokens (user_id, token, device_name, platform, browser, app_version, is_active, last_used_at)
-         VALUES ($1,$2,$3,$4,$5,$6,TRUE,NOW())
+        `INSERT INTO fcm_tokens (user_id, token, device_name, platform, browser, app_version, is_active, last_used_at, app_name)
+         VALUES ($1,$2,$3,$4,$5,$6,TRUE,NOW(),$7)
          ON CONFLICT (user_id, token)
          DO UPDATE SET is_active = TRUE, last_used_at = NOW(),
            device_name = EXCLUDED.device_name, platform = EXCLUDED.platform,
-           browser = EXCLUDED.browser, app_version = EXCLUDED.app_version`,
-        [pgUserId, token, deviceInfo.deviceName, deviceInfo.platform, deviceInfo.browser, deviceInfo.appVersion]
-      );
+           browser = EXCLUDED.browser, app_version = EXCLUDED.app_version,
+           app_name = COALESCE(EXCLUDED.app_name, fcm_tokens.app_name)`,
+        [pgUserId, token, deviceInfo.deviceName, deviceInfo.platform, deviceInfo.browser, deviceInfo.appVersion, deviceInfo.appName || 'customer']
+      ).catch(async () => {
+        // Fallback for older fcm_tokens schema
+        await client.query(
+          `INSERT INTO fcm_tokens (user_id, token, device_name, platform, browser, app_version, is_active, last_used_at)
+           VALUES ($1,$2,$3,$4,$5,$6,TRUE,NOW())
+           ON CONFLICT (user_id, token)
+           DO UPDATE SET is_active = TRUE, last_used_at = NOW(),
+             device_name = EXCLUDED.device_name, platform = EXCLUDED.platform,
+             browser = EXCLUDED.browser, app_version = EXCLUDED.app_version`,
+          [pgUserId, token, deviceInfo.deviceName, deviceInfo.platform, deviceInfo.browser, deviceInfo.appVersion]
+        );
+      });
 
       // Active Token Limit: Enforce MAX 5 active tokens per user
       const activeRes = await client.query(

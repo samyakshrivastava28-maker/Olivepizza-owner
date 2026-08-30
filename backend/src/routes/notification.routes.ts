@@ -742,7 +742,7 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
 // =============================================================================
 router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { token, oldToken, deviceId, deviceName, platform, browser, appVersion } = req.body;
+    const { token, oldToken, deviceId, deviceName, platform, browser, appVersion, appName, role, franchiseId, branchId, terminalId } = req.body;
     const userId = req.user!.uid;
 
     if (!token) {
@@ -750,7 +750,19 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       return;
     }
 
-    await notificationQueue.registerToken(userId, token, { oldToken, deviceId, deviceName, platform, browser, appVersion });
+    await notificationQueue.registerToken(userId, token, {
+      oldToken,
+      deviceId,
+      deviceName,
+      platform,
+      browser,
+      appVersion,
+      appName: appName || (req.user?.role === 'owner' ? 'owner' : 'customer'),
+      role: role || req.user?.role || 'customer',
+      franchiseId: franchiseId || (req.user as any)?.franchiseId,
+      branchId: branchId || (req.user as any)?.branchId,
+      terminalId
+    });
     res.json({ success: true });
   } catch (error: any) {
     console.error('[NotificationRoutes] Token registration error:', error);
