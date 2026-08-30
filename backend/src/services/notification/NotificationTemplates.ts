@@ -212,6 +212,7 @@ interface BuildOptions {
   actionUrlAccept?: string;
   actionUrlReject?: string;
   branchId?: string;
+  image?: string;
   // Sync fields from OrderEvent
   eventId?: string;
   previousStatus?: string;
@@ -301,25 +302,54 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
       ...(opts.alert === 'continuous' ? { notificationCount: 1 } : {}),
     };
 
+  // Determine iOS APNs Category for interactive action buttons
+  const apnsCategory =
+    opts.role === 'restaurant_manager' || (opts.actions && opts.actions.length > 0 && opts.role !== 'delivery')
+      ? 'ORDER_ACTION_CATEGORY'
+      : opts.role === 'delivery'
+        ? 'DELIVERY_ASSIGNMENT_CATEGORY'
+        : opts.category === 'marketing' || opts.category === 'coupon'
+          ? 'PROMO_CATEGORY'
+          : opts.category === 'system' || opts.role === 'owner'
+            ? 'SECURITY_ALERT_CATEGORY'
+            : 'ORDER_STATUS_CATEGORY';
+
+  const apnsSound = soundFile === 'default' ? 'default' : `${soundFile}.wav`;
+  const interruptionLevel =
+    opts.priority === 'critical' ? 'critical' : opts.priority === 'high' ? 'time-sensitive' : 'active';
+
   const apnsHeaders: Record<string, string> = {
     'apns-priority': isHigh ? '10' : '5',
+    'apns-push-type': 'alert',
   };
   if (opts.ongoing && opts.tag) {
     apnsHeaders['apns-collapse-id'] = String(opts.tag);
+  }
+
+  const apnsPayload: any = {
+    aps: {
+      alert: { title, body },
+      sound: apnsSound,
+      badge: 1,
+      'mutable-content': 1,
+      category: apnsCategory,
+      'interruption-level': interruptionLevel,
+    },
+    ...safeData,
+  };
+
+  const fcmOptions: any = {};
+  if (opts.image) {
+    fcmOptions.image = opts.image;
+    apnsPayload.image = opts.image;
   }
 
   return {
     ...basePayload,
     apns: {
       headers: apnsHeaders,
-      payload: {
-        aps: {
-          alert: { title, body },
-          sound: soundFile,
-          badge: 1,
-          'mutable-content': 1,
-        },
-      },
+      payload: apnsPayload,
+      ...(Object.keys(fcmOptions).length > 0 ? { fcmOptions } : {}),
     },
     webpush: {
       headers: { Urgency: isHigh ? 'high' : 'normal', TTL: '3600' },
@@ -335,6 +365,7 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
           orderId: opts.orderId,
           sound: soundFile,
         },
+        image: opts.image,
       },
       fcm_options: { link: opts.url || '/' },
     },
