@@ -157,33 +157,13 @@ jobs:
           path: artifact/OlivePizza-Owner-v1.0.apk
           retention-days: 90
 
-      # 15. Publish as a GitHub Release
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: android-latest
-          name: "Olive Pizza Owner Android App — Latest Build"
-          body: |
-            Latest automatic build of the **Olive Pizza Owner** Android APK.
-            Version Code: ${{ github.run_number }}
+      - name: Build Summary
+        run: |
+          echo "## 🤖 Olive Pizza Owner Android Build Succeeded" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ✅ ANDROID_APK_READY" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact:** OlivePizza-Owner-Android-APK (available under Actions > Artifacts)" >> $GITHUB_STEP_SUMMARY
+          echo "- **APK File:** \`artifact/OlivePizza-Owner-v1.0.apk\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Signing Keystore:** ${{ env.KEYSTORE_SOURCE }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Backend Endpoint:** https://olivepizza-owner.onrender.com" >> $GITHUB_STEP_SUMMARY
 
-            🍕 **Olive Pizza Owner Android App** — Native management APK built from source.
-
-            **Features included:**
-            - Real-time Order Audio Alarms & Emergency Overlays
-            - Menu, Products, Combos & Specials Management
-            - Cloudinary Media Library with AI Photo Generator
-            - Live Financial & Sales Reports with Google Sheets Sync
-            - Push Notification & SMS Diagnostic Center
-            - SDUI Visual Page Manager
-
-            **How to install:**
-            1. Download `OlivePizza-Owner-v1.0.apk` below.
-            2. On your Android device: **Settings → Security → Install unknown apps** → allow your browser/file manager.
-            3. Open the downloaded APK and tap **Install**.
-          files: artifact/OlivePizza-Owner-v1.0.apk
-          draft: false
-          prerelease: false
-          make_latest: true
-        env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
