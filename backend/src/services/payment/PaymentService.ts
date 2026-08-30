@@ -248,6 +248,64 @@ export class PaymentService {
     } catch (err) {}
 
     console.log(`✅ [Webhook] Verified webhook received from ${providerName}:`, payload.event || 'payment.success');
+
+    // Extract payment ID & Provider Transaction ID across standard gateway payloads
+    let paymentId = payload.paymentId || payload.orderId;
+    let providerTxId = payload.id;
+    let amount = payload.amount;
+
+    if (payload.payload?.payment?.entity) {
+      // Razorpay webhook format
+      const rzpPayment = payload.payload.payment.entity;
+      paymentId = rzpPayment.notes?.paymentId || rzpPayment.order_id || paymentId;
+      providerTxId = rzpPayment.id || providerTxId;
+      amount = rzpPayment.amount ? rzpPayment.amount / 100 : amount;
+    } else if (payload.data?.order) {
+      // Cashfree webhook format
+      const cfOrder = payload.data.order;
+      paymentId = cfOrder.order_id || cfOrder.order_tags?.paymentId || paymentId;
+      providerTxId = payload.data?.payment?.cf_payment_id || providerTxId;
+    }
+
+    if (paymentId) {
+      // 1. Update PostgreSQL Payment status
+      try {
+        await query(
+          "UPDATE payments SET status = 'PAYMENT_CAPTURED', provider_transaction_id = $1, verified_at = NOW(), updated_at = NOW() WHERE id = $2 OR provider_payment_id = $2",
+          [providerTxId || `tx_${Date.now()}`, paymentId]
+        );
+      } catch (dbErr) {
+        console.warn('[Webhook] Postgres payment update warning:', dbErr);
+      }
+
+      // 2. Update Firestore Order status atomically
+      try {
+        const orderSnap = await adminDb.collection('orders').doc(paymentId).get();
+        if (orderSnap.exists) {
+          await adminDb.collection('orders').doc(paymentId).update({
+            paymentStatus: 'PAID',
+            isPaid: true,
+            status: orderSnap.data()?.status === 'pending_payment' ? 'placed' : orderSnap.data()?.status,
+            paidAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            providerTransactionId: providerTxId || null
+          });
+          console.log(`[Webhook] Order ${paymentId} marked as PAID in Firestore`);
+        }
+      } catch (fsErr) {
+        console.warn('[Webhook] Firestore order update warning:', fsErr);
+      }
+
+      // 3. Log Payment Audit Event
+      await PaymentAuditLogger.log({
+        paymentId,
+        action: 'WEBHOOK_PAYMENT_CAPTURED',
+        actorId: `webhook_${providerName}`,
+        actorRole: 'system',
+        details: { provider: providerName, providerTxId, eventType: payload.event || 'payment.success' }
+      });
+    }
+
     return { success: true, eventType: payload.event || 'payment.success' };
   }
 

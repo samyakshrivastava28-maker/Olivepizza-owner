@@ -2064,5 +2064,225 @@ router.post('/:id/sync-sheets', requireRole(['owner', 'admin', 'developer', 'pla
   }
 });
 
+// ============================================================================
+// FRANCHISE STAFF MANAGEMENT (Role Assignment, Branch Binding, Deactivation)
+// ============================================================================
+
+// GET /api/franchises/:id/staff — List staff members scoped to this franchise
+router.get('/:id/staff', verifyToken, requireRole(['franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const scope = req.user?.scope;
+    if (scope) {
+      FranchiseScopeService.assertFranchiseAccess(scope, id);
+    }
+
+    const { role, branchId } = req.query;
+
+    let queryRef: any = adminDb.collection('users').where('franchiseId', '==', id);
+    if (role && typeof role === 'string') {
+      queryRef = queryRef.where('role', '==', role);
+    }
+    if (branchId && typeof branchId === 'string' && branchId !== 'all') {
+      queryRef = queryRef.where('branchId', '==', branchId);
+    }
+
+    const snap = await queryRef.get();
+    const staff = snap.docs.map((doc: any) => {
+      const d = doc.data();
+      return {
+        id: doc.id,
+        uid: doc.id,
+        name: d.name || d.displayName || 'Staff Member',
+        email: d.email || '',
+        phone: d.phone || '',
+        role: d.role || 'kitchen_staff',
+        franchiseId: d.franchiseId || id,
+        branchId: d.branchId || 'main_branch',
+        branchIds: d.branchIds || [d.branchId || 'main_branch'],
+        permissions: d.permissions || [],
+        isActive: d.isActive !== false,
+        terminalId: d.terminalId || null,
+        createdAt: d.createdAt || null,
+        updatedAt: d.updatedAt || null
+      };
+    });
+
+    res.json({
+      success: true,
+      franchiseId: id,
+      count: staff.length,
+      staff
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error listing staff:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/franchises/:id/staff — Provision new staff account in franchise
+router.post('/:id/staff', verifyToken, requireRole(['franchise_owner', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const scope = req.user?.scope;
+    if (scope) {
+      FranchiseScopeService.assertFranchiseAccess(scope, id);
+    }
+
+    const { uid, email, name, phone, role, branchId, permissions, terminalId } = req.body;
+    if (!name || !role) {
+      res.status(400).json({ success: false, error: 'name and role are required' });
+      return;
+    }
+
+    const ALLOWED_STAFF_ROLES = ['restaurant_manager', 'kitchen_staff', 'cashier', 'delivery_partner', 'franchise_manager'];
+    if (!ALLOWED_STAFF_ROLES.includes(role)) {
+      res.status(400).json({ success: false, error: `Invalid role. Allowed roles: ${ALLOWED_STAFF_ROLES.join(', ')}` });
+      return;
+    }
+
+    const targetBranchId = branchId || 'main_branch';
+    const staffUid = uid || ('staff_' + Date.now());
+    const nowIso = new Date().toISOString();
+
+    const staffPayload = {
+      uid: staffUid,
+      name: name.trim(),
+      displayName: name.trim(),
+      email: email ? email.trim().toLowerCase() : `${staffUid}@olivepizza.in`,
+      phone: phone || '',
+      role,
+      organizationId: 'org_olive_pizza',
+      franchiseId: id,
+      branchId: targetBranchId,
+      branchIds: [targetBranchId],
+      permissions: Array.isArray(permissions) ? permissions : [],
+      terminalId: terminalId || null,
+      isActive: true,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdBy: req.user?.email || 'franchise_owner'
+    };
+
+    await adminDb.collection('users').doc(staffUid).set(staffPayload, { merge: true });
+
+    await FranchiseScopeService.logFranchiseAudit({
+      franchiseId: id,
+      branchId: targetBranchId,
+      actorUid: req.user?.uid || 'unknown',
+      actorEmail: req.user?.email,
+      actionType: 'STAFF_CREATED',
+      entityType: 'USER',
+      entityId: staffUid,
+      details: { role, targetBranchId, name }
+    });
+
+    res.json({
+      success: true,
+      message: `Staff member "${name}" created successfully with role "${role}"`,
+      staff: staffPayload
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error creating staff:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+// PUT /api/franchises/:id/staff/:staffId — Update staff role, branch, permissions, or active status
+router.put('/:id/staff/:staffId', verifyToken, requireRole(['franchise_owner', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, staffId } = req.params;
+    const scope = req.user?.scope;
+    if (scope) {
+      FranchiseScopeService.assertFranchiseAccess(scope, id);
+    }
+
+    const staffDoc = await adminDb.collection('users').doc(staffId).get();
+    if (!staffDoc.exists) {
+      res.status(404).json({ success: false, error: 'Staff member not found' });
+      return;
+    }
+
+    const existingData = staffDoc.data()!;
+    if (existingData.franchiseId && existingData.franchiseId !== id && !scope?.isGlobalOwner) {
+      res.status(403).json({ success: false, error: 'Forbidden: Staff member belongs to another franchise' });
+      return;
+    }
+
+    const { name, phone, role, branchId, permissions, isActive, terminalId } = req.body;
+    const nowIso = new Date().toISOString();
+
+    const updatePayload: any = { updatedAt: nowIso, updatedBy: req.user?.email || 'franchise_owner' };
+    if (name) updatePayload.name = name.trim();
+    if (phone !== undefined) updatePayload.phone = phone;
+    if (role) updatePayload.role = role;
+    if (branchId) {
+      updatePayload.branchId = branchId;
+      updatePayload.branchIds = [branchId];
+    }
+    if (permissions && Array.isArray(permissions)) updatePayload.permissions = permissions;
+    if (isActive !== undefined) updatePayload.isActive = Boolean(isActive);
+    if (terminalId !== undefined) updatePayload.terminalId = terminalId;
+
+    await adminDb.collection('users').doc(staffId).set(updatePayload, { merge: true });
+
+    await FranchiseScopeService.logFranchiseAudit({
+      franchiseId: id,
+      branchId: updatePayload.branchId || existingData.branchId,
+      actorUid: req.user?.uid || 'unknown',
+      actorEmail: req.user?.email,
+      actionType: 'STAFF_UPDATED',
+      entityType: 'USER',
+      entityId: staffId,
+      details: updatePayload
+    });
+
+    res.json({
+      success: true,
+      message: `Staff member "${staffId}" updated successfully`,
+      staffId,
+      updates: updatePayload
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error updating staff:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+// DELETE /api/franchises/:id/staff/:staffId — Deactivate staff member
+router.delete('/:id/staff/:staffId', verifyToken, requireRole(['franchise_owner', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, staffId } = req.params;
+    const scope = req.user?.scope;
+    if (scope) {
+      FranchiseScopeService.assertFranchiseAccess(scope, id);
+    }
+
+    const nowIso = new Date().toISOString();
+    await adminDb.collection('users').doc(staffId).set({
+      isActive: false,
+      deactivatedAt: nowIso,
+      deactivatedBy: req.user?.email || 'franchise_owner'
+    }, { merge: true });
+
+    await FranchiseScopeService.logFranchiseAudit({
+      franchiseId: id,
+      actorUid: req.user?.uid || 'unknown',
+      actorEmail: req.user?.email,
+      actionType: 'STAFF_DEACTIVATED',
+      entityType: 'USER',
+      entityId: staffId
+    });
+
+    res.json({
+      success: true,
+      message: `Staff member "${staffId}" deactivated successfully`,
+      staffId
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error deactivating staff:', error);
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
 
 export default router;

@@ -105,7 +105,7 @@ class OliveWebSocketServer {
         } 
       });
 
-      ws.on('message', (data: Buffer) => {
+      ws.on('message', async (data: Buffer) => {
         try {
           const msg = JSON.parse(data.toString());
           
@@ -115,7 +115,47 @@ class OliveWebSocketServer {
             return;
           }
 
-          // 2. Subscribe to order tracking channel
+          // 2. Post-connect Message-Based Authentication (avoids passing tokens in URL query strings)
+          if (msg.type === 'auth' && msg.token) {
+            try {
+              let authUid = uid;
+              let authRole = role;
+
+              if (msg.token.startsWith('test-') || msg.token.startsWith('dev-')) {
+                if (process.env.NODE_ENV !== 'production') {
+                  if (msg.token.includes('cashier')) { authUid = 'test_cashier_uid'; authRole = 'cashier'; }
+                  else if (msg.token.includes('manager')) { authUid = 'test_manager_uid'; authRole = 'restaurant_manager'; }
+                  else if (msg.token.includes('rider')) { authUid = 'test_rider_uid'; authRole = 'delivery_partner'; }
+                  else { authUid = 'test_owner_uid'; authRole = 'owner'; }
+                }
+              } else {
+                const decoded = await adminAuth.verifyIdToken(msg.token);
+                authUid = decoded.uid;
+                authRole = (decoded.role as string) || 'customer';
+              }
+
+              // Update client registration with verified identity
+              const oldSet = this.clients.get(client.uid);
+              if (oldSet) oldSet.delete(client);
+
+              client.uid = authUid;
+              client.role = authRole;
+
+              if (!this.clients.has(authUid)) this.clients.set(authUid, new Set());
+              this.clients.get(authUid)!.add(client);
+
+              this.safeSend(ws, {
+                type: 'auth_success',
+                data: { uid: authUid, role: authRole, timestamp: new Date().toISOString() }
+              });
+              console.log(`[WebSocketServer] Client message-authenticated uid=${authUid} role=${authRole}`);
+            } catch (err: any) {
+              this.safeSend(ws, { type: 'auth_error', data: { message: 'Invalid token' } });
+            }
+            return;
+          }
+
+          // 3. Subscribe to order tracking channel
           if (msg.type === 'subscribe.order' && msg.data?.orderId) {
             const orderId = String(msg.data.orderId);
             client.subscribedOrders.add(orderId);
