@@ -1,23 +1,27 @@
-# Dependencies
+﻿# Dependencies
 node_modules/
 .pnp
 .pnp.js
 
-# Production & Build outputs
+# Build & Output
 dist/
-build/
 dist-ssr/
+build/
+coverage/
 *.local
 
 # Environment & Secrets (CRITICAL)
 .env
-.env*.local
+.env.*
+!.env.example
 *.pem
+*.key
+*.p12
+*.pfx
 credentials/
-serviceAccountKey.json
-
-# Keystores (Committed to allow seamless GitHub Actions builds)
-!*.keystore
+serviceAccountKey*.json
+service-account*.json
+*serviceAccount*.json
 
 # Logs
 logs/
@@ -36,18 +40,9 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 *.sw?
+scratch/
 
-# Android build outputs
-android/.gradle/
-android/app/build/
-android/build/
-*.apk
-*.aab
-
-# Temporary & Local Mocks
-backend/.r2_mock/
-backend/cloudflared/
 .r2_mock/
 cloudflared/
-coverage/
-scratch/
+*.mock
+
