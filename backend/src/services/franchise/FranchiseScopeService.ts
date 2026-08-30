@@ -159,6 +159,87 @@ export class FranchiseScopeService {
   }
 
   /**
+   * Asserts that a caller has access to a target branch. Throws an Error with 403 status if unauthorized.
+   */
+  public static assertBranchAccess(scope: ScopeContext, targetBranchId?: string): void {
+    if (!targetBranchId || targetBranchId === 'all') {
+      if (scope.isGlobalOwner || scope.isFranchiseOwner) return;
+      const error: any = new Error('Access denied: Multi-branch access requires franchise owner or global owner privilege');
+      error.status = 403;
+      throw error;
+    }
+    if (!this.isAuthorizedForBranch(scope, targetBranchId)) {
+      const error: any = new Error(`Forbidden: You are not authorized to access or modify branch "${targetBranchId}"`);
+      error.status = 403;
+      throw error;
+    }
+  }
+
+  /**
+   * Asserts that a caller has access to a target franchise. Throws an Error with 403 status if unauthorized.
+   */
+  public static assertFranchiseAccess(scope: ScopeContext, targetFranchiseId: string): void {
+    if (scope.isGlobalOwner) return;
+    if (scope.franchiseId !== targetFranchiseId) {
+      const error: any = new Error(`Forbidden: Cross-franchise access denied. Your scope is restricted to "${scope.franchiseId}"`);
+      error.status = 403;
+      throw error;
+    }
+  }
+
+  /**
+   * Asserts that a caller has access to a specific order.
+   */
+  public static assertOrderAccess(scope: ScopeContext, orderData: any, callerUid: string): void {
+    if (scope.isGlobalOwner) return;
+
+    // Customer can only access their own order
+    if (scope.role === 'customer') {
+      const orderCustomerUid = orderData.userId || orderData.firebaseUid || orderData.customerFirebaseUid;
+      if (orderCustomerUid && orderCustomerUid !== callerUid) {
+        const error: any = new Error('Forbidden: You do not own this order');
+        error.status = 403;
+        throw error;
+      }
+      return;
+    }
+
+    // Delivery partner can only access assigned order or ready unassigned order in their branch
+    if (scope.role === 'delivery_partner' || scope.role === 'delivery') {
+      const riderUid = orderData.deliveryPartnerId || orderData.deliveryPartnerFirebaseUid;
+      const orderBranch = orderData.branchId || this.DEFAULT_BRANCH_ID;
+      if (riderUid && riderUid !== callerUid && riderUid !== scope.terminalId) {
+        const error: any = new Error('Forbidden: This order is assigned to another delivery partner');
+        error.status = 403;
+        throw error;
+      }
+      if (!this.isAuthorizedForBranch(scope, orderBranch)) {
+        const error: any = new Error(`Forbidden: Order belongs to branch "${orderBranch}" outside your assigned territory`);
+        error.status = 403;
+        throw error;
+      }
+      return;
+    }
+
+    // Restaurant staff / Cashier can only access orders in their branch
+    if (scope.isBranchScoped) {
+      const orderBranch = orderData.branchId || this.DEFAULT_BRANCH_ID;
+      if (!this.isAuthorizedForBranch(scope, orderBranch)) {
+        const error: any = new Error(`Forbidden: Order belongs to branch "${orderBranch}" outside your branch scope`);
+        error.status = 403;
+        throw error;
+      }
+      return;
+    }
+
+    // Franchise owner can only access orders in their franchise
+    if (scope.isFranchiseOwner) {
+      const orderFranchise = orderData.franchiseId || this.DEFAULT_FRANCHISE_ID;
+      this.assertFranchiseAccess(scope, orderFranchise);
+    }
+  }
+
+  /**
    * Log an audited franchise action
    */
   public static async logFranchiseAudit(params: {

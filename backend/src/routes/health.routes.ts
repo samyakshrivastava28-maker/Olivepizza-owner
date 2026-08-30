@@ -36,7 +36,7 @@ router.get('/health/ping', (req, res) => {
 });
 
 // Liveness Probe: Process uptime & runtime version
-router.get('/health', (req, res) => {
+router.get(['/health', '/health/liveness'], (req, res) => {
   res.json({
     status: 'ok',
     service: 'Olive Pizza Standalone Owner Backend',
@@ -78,7 +78,7 @@ router.get('/version', (req, res) => {
  * Subsystems (Supabase live navigation, Google Sheets) are reported independently
  * and do NOT fail the core backend readiness.
  */
-router.get('/ready', async (req, res) => {
+router.get(['/ready', '/health/readiness'], async (req, res) => {
   const pgHealth = await checkPostgresHealth();
 
   let firestoreConnected = false;

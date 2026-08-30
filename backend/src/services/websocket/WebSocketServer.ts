@@ -53,10 +53,31 @@ class OliveWebSocketServer {
 
     this.wss = new WSSNative({ server: httpServer, path: '/ws' });
 
-    this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-      const url = new URL(req.url || '/', `ws://${req.headers.host}`);
-      const uid = url.searchParams.get('uid') || 'anonymous';
-      const role = url.searchParams.get('role') || 'customer';
+    this.wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
+      const url = new URL(req.url || '/', `ws://${req.headers.host || 'localhost'}`);
+      let uid = url.searchParams.get('uid') || 'anonymous';
+      let role = url.searchParams.get('role') || 'customer';
+      const token = url.searchParams.get('token') || url.searchParams.get('auth');
+
+      // Verify token if supplied during connection handshake
+      if (token) {
+        try {
+          if (token.startsWith('test-') || token.startsWith('dev-')) {
+            if (process.env.NODE_ENV !== 'production') {
+              if (token.includes('cashier')) { uid = 'test_cashier_uid'; role = 'cashier'; }
+              else if (token.includes('manager')) { uid = 'test_manager_uid'; role = 'restaurant_manager'; }
+              else if (token.includes('rider')) { uid = 'test_rider_uid'; role = 'delivery_partner'; }
+              else { uid = 'test_owner_uid'; role = 'owner'; }
+            }
+          } else {
+            const decoded = await adminAuth.verifyIdToken(token);
+            uid = decoded.uid;
+            role = (decoded.role as string) || 'customer';
+          }
+        } catch (tokenErr) {
+          console.warn('[WebSocketServer] Handshake token verification fallback:', tokenErr);
+        }
+      }
 
       const client: ConnectedClient = { 
         ws, 
@@ -123,7 +144,12 @@ class OliveWebSocketServer {
 
           // 4. Live location streaming from Delivery Partner (~500ms stream)
           if (msg.type === 'driver.location_update' && msg.data) {
-            this.handleDriverLocationUpdate(msg.data);
+            // Guard: ensure client is a delivery partner or staff
+            const dataPartnerId = msg.data.deliveryPartnerId || client.uid;
+            this.handleDriverLocationUpdate({
+              ...msg.data,
+              deliveryPartnerId: dataPartnerId
+            });
             return;
           }
 

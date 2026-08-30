@@ -48,7 +48,8 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
   const token = authHeader.split('Bearer ')[1];
   try {
     let decodedToken: any;
-    if (token.startsWith('test-') || token.startsWith('dev-')) {
+    const isProd = process.env.NODE_ENV === 'production';
+    if (!isProd && (token.startsWith('test-') || token.startsWith('dev-'))) {
       const isCashier = token.includes('cashier');
       const isManager = token.includes('manager');
       const isRider = token.includes('rider');

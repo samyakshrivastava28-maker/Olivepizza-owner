@@ -66,6 +66,8 @@ router.post('/verify-recaptcha', async (req: Request, res: Response) => {
 
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
+import { TOTPService } from '../services/auth/TOTPService.js';
+import { adminDb } from '../config/firebase.js';
 
 // POST /api/auth/context-session - Owner Authorized Context Switching for Standalone Apps
 router.post('/context-session', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
@@ -113,6 +115,190 @@ router.post('/context-session', verifyToken, async (req: AuthRequest, res: Respo
   } catch (error: any) {
     console.error('[Auth] Error generating context session:', error);
     res.status(500).json({ error: error?.message || 'Failed to generate context session' });
+  }
+});
+
+// ============================================================================
+// 2FA / MFA (RFC 6238 TOTP Authenticator Engine for Owner & Staff)
+// ============================================================================
+
+// GET /api/auth/2fa/status - Query 2FA status for authenticated user
+router.get('/2fa/status', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const snap = await adminDb.collection('user_2fa').doc(uid).get();
+    const data = snap.exists ? snap.data() : null;
+    res.json({
+      success: true,
+      enabled: Boolean(data?.enabled),
+      enrolledAt: data?.enrolledAt || null,
+      backupCodesRemaining: (data?.backupCodes || []).length
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/auth/2fa/enroll - Begin 2FA enrollment (Generates Secret + OtpAuth URI + Backup Codes)
+router.post('/2fa/enroll', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const secret = TOTPService.generateSecret();
+    const otpAuthUri = TOTPService.generateOtpAuthUri(secret, user.email || 'owner@olivepizza.in');
+    const backupCodes = TOTPService.generateBackupCodes(8);
+    const encryptedSecret = TOTPService.encryptSecret(secret);
+
+    // Save pending enrollment in Firestore
+    await adminDb.collection('user_2fa').doc(user.uid).set({
+      encryptedSecret,
+      backupCodes,
+      enabled: false,
+      pendingEnrollment: true,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    res.json({
+      success: true,
+      secret, // Sent once during enrollment for manual entry in Google Authenticator / Authy
+      otpAuthUri,
+      backupCodes
+    });
+  } catch (error: any) {
+    console.error('[Auth 2FA] Enroll error:', error);
+    res.status(500).json({ success: false, error: 'Failed to initiate 2FA enrollment' });
+  }
+});
+
+// POST /api/auth/2fa/verify - Verify first code to activate 2FA
+router.post('/2fa/verify', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    const { code } = req.body;
+    if (!user || !code) {
+      res.status(400).json({ error: 'Verification code is required' });
+      return;
+    }
+
+    const docRef = adminDb.collection('user_2fa').doc(user.uid);
+    const snap = await docRef.get();
+    if (!snap.exists) {
+      res.status(404).json({ error: '2FA enrollment not found' });
+      return;
+    }
+
+    const data = snap.data()!;
+    const decryptedSecret = TOTPService.decryptSecret(data.encryptedSecret);
+    const isValid = TOTPService.verifyTOTP(decryptedSecret, code);
+
+    if (!isValid) {
+      res.status(400).json({ success: false, error: 'Invalid 6-digit verification code. Ensure your device clock is synchronized.' });
+      return;
+    }
+
+    await docRef.update({
+      enabled: true,
+      pendingEnrollment: false,
+      enrolledAt: new Date().toISOString(),
+      lastVerifiedAt: new Date().toISOString()
+    });
+
+    res.json({
+      success: true,
+      message: 'Two-factor authentication successfully enabled'
+    });
+  } catch (error: any) {
+    console.error('[Auth 2FA] Verification error:', error);
+    res.status(500).json({ success: false, error: 'Failed to verify 2FA' });
+  }
+});
+
+// POST /api/auth/2fa/validate-session - Validate TOTP code or backup code during login session
+router.post('/2fa/validate-session', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    const { code, isBackupCode } = req.body;
+    if (!user || !code) {
+      res.status(400).json({ error: 'Code is required' });
+      return;
+    }
+
+    const docRef = adminDb.collection('user_2fa').doc(user.uid);
+    const snap = await docRef.get();
+    if (!snap.exists || !snap.data()?.enabled) {
+      res.json({ success: true, required: false, message: '2FA not enabled on this account' });
+      return;
+    }
+
+    if (isBackupCode) {
+      const backupValid = await TOTPService.verifyAndBurnBackupCode(user.uid, code);
+      if (!backupValid) {
+        res.status(400).json({ success: false, error: 'Invalid or already consumed backup recovery code' });
+        return;
+      }
+      res.json({ success: true, message: 'Authenticated via backup recovery code' });
+      return;
+    }
+
+    const data = snap.data()!;
+    const decryptedSecret = TOTPService.decryptSecret(data.encryptedSecret);
+    const isValid = TOTPService.verifyTOTP(decryptedSecret, code);
+
+    if (!isValid) {
+      res.status(400).json({ success: false, error: 'Invalid 6-digit authentication code' });
+      return;
+    }
+
+    await docRef.update({ lastVerifiedAt: new Date().toISOString() });
+
+    res.json({
+      success: true,
+      message: '2FA session validated successfully'
+    });
+  } catch (error: any) {
+    console.error('[Auth 2FA] Session validation error:', error);
+    res.status(500).json({ success: false, error: 'Failed to validate 2FA session' });
+  }
+});
+
+// POST /api/auth/2fa/disable - Disable 2FA with current code confirmation
+router.post('/2fa/disable', verifyToken, requireRole(['owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    const { code } = req.body;
+    if (!user || !code) {
+      res.status(400).json({ error: 'Current 2FA code is required to disable' });
+      return;
+    }
+
+    const docRef = adminDb.collection('user_2fa').doc(user.uid);
+    const snap = await docRef.get();
+    if (!snap.exists || !snap.data()?.enabled) {
+      res.json({ success: true, message: '2FA already disabled' });
+      return;
+    }
+
+    const data = snap.data()!;
+    const decryptedSecret = TOTPService.decryptSecret(data.encryptedSecret);
+    const isValid = TOTPService.verifyTOTP(decryptedSecret, code);
+
+    if (!isValid) {
+      res.status(400).json({ success: false, error: 'Invalid authentication code' });
+      return;
+    }
+
+    await docRef.delete();
+    res.json({ success: true, message: '2FA disabled successfully' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: 'Failed to disable 2FA' });
   }
 });
 
