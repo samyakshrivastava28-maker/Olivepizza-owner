@@ -37,6 +37,145 @@
             {
               "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
               "client_type": 3
+            },
+            {
+              "client_id": "1017239455106-2v45en5ih9trrlfcj8p7eq0rntn8kaar.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "in.olivepizza.owner"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1017239455106:android:ffd36179ea2ace9b007b9b",
+        "android_client_info": {
+          "package_name": "in.olivepizza.delivery"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1017239455106-r3cgipidok6c1j1mqcj8tbboqt0k9o03.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "in.olivepizza.delivery",
+            "certificate_hash": "4c6b4a1e7d43966d7482175f08d887e53bc4b57e"
+          }
+        },
+        {
+          "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyANBCVFXCLH6JB27yzpAIOshzjAm7qyVxw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "1017239455106-2v45en5ih9trrlfcj8p7eq0rntn8kaar.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "in.olivepizza.owner"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1017239455106:android:a32dabd7789739f4007b9b",
+        "android_client_info": {
+          "package_name": "in.olivepizza.franchise"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1017239455106-f70te0r863n4oial6a9tgua1vcd1l2f7.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "in.olivepizza.franchise",
+            "certificate_hash": "4c6b4a1e7d43966d7482175f08d887e53bc4b57e"
+          }
+        },
+        {
+          "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyANBCVFXCLH6JB27yzpAIOshzjAm7qyVxw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "1017239455106-2v45en5ih9trrlfcj8p7eq0rntn8kaar.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "in.olivepizza.owner"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1017239455106:android:bbde1f028b48d70b007b9b",
+        "android_client_info": {
+          "package_name": "in.olivepizza.manager"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1017239455106-qsrk7bc6slvgpjafb946dafaqa4rbehj.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "in.olivepizza.manager",
+            "certificate_hash": "4c6b4a1e7d43966d7482175f08d887e53bc4b57e"
+          }
+        },
+        {
+          "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyANBCVFXCLH6JB27yzpAIOshzjAm7qyVxw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "1017239455106-2v45en5ih9trrlfcj8p7eq0rntn8kaar.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "in.olivepizza.owner"
+              }
             }
           ]
         }
@@ -74,6 +213,57 @@
             {
               "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
               "client_type": 3
+            },
+            {
+              "client_id": "1017239455106-2v45en5ih9trrlfcj8p7eq0rntn8kaar.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "in.olivepizza.owner"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1017239455106:android:9ddb046a4f857863007b9b",
+        "android_client_info": {
+          "package_name": "in.olivepizza.pos"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1017239455106-59upou23omams1un5dc6e46dilbmocol.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "in.olivepizza.pos",
+            "certificate_hash": "4c6b4a1e7d43966d7482175f08d887e53bc4b57e"
+          }
+        },
+        {
+          "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyANBCVFXCLH6JB27yzpAIOshzjAm7qyVxw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "1017239455106-2v45en5ih9trrlfcj8p7eq0rntn8kaar.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "in.olivepizza.owner"
+              }
             }
           ]
         }
