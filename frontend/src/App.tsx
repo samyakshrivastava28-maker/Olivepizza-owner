@@ -1,3 +1,4 @@
+const AIOrderHistory = lazyWithRetry(() => import('./pages/AIOrderHistoryPage'));
 import React, { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router';
 import { HelmetProvider } from 'react-helmet-async';

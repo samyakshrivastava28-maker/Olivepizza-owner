@@ -11,6 +11,7 @@ import { collection, query, orderBy, limit, onSnapshot } from 'firebase/firestor
 import { Order } from '../../types/models';
 import { useAuthStore } from '../../lib/store';
 import {
+  Sparkles,
   BarChart3,
   Clock,
   Bike,
@@ -71,6 +72,7 @@ export const OwnerLayout: React.FC = () => {
   // Core Canonical Navigation Items including Home Page Manager
   const navItems = [
     { label: 'Analytics', path: '/analytics', icon: BarChart3 },
+    { label: 'AI Order Search', path: '/ai-order-history', icon: Sparkles },
     { label: 'Orders', path: '/orders', icon: Clock },
     { label: 'Delivery Fleet', path: '/delivery', icon: Bike },
     { label: 'Home Page Manager', path: '/home-manager', icon: LayoutTemplate },

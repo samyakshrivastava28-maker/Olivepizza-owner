@@ -199,6 +199,13 @@ export class OrderHistorySearchService {
         // Fallback
       }
 
+      if (!authoritativeData && !c.preview) {
+        const zillizRec = await ZillizOrderRepository.getOrder(c.orderId);
+        if (zillizRec) {
+          c.preview = zillizRec;
+        }
+      }
+
       if (authoritativeData) {
         verifiedList.push({
           orderId: authoritativeData.orderId || authoritativeData.id || c.orderId,
