@@ -86,10 +86,17 @@ router.post('/verify', optionalAuth, async (req: AuthRequest, res: Response) => 
   }
 });
 
+const ALLOWED_PROVIDERS = ['razorpay', 'phonepe', 'cashfree', 'mock'];
+
 // ─── 3. Provider Webhook Listener (HMAC Signature Verified) ───────────────────
 router.post('/webhook/:provider', async (req: Request, res: Response) => {
   try {
-    const providerName = req.params.provider;
+    const providerName = (req.params.provider || '').toLowerCase().trim();
+    if (!ALLOWED_PROVIDERS.includes(providerName)) {
+      res.status(400).json({ error: `Unsupported payment provider: ${providerName}` });
+      return;
+    }
+
     const signature = (req.headers['x-razorpay-signature'] ||
       req.headers['x-verify'] ||
       req.headers['x-cashfree-signature'] ||
@@ -133,25 +140,35 @@ router.get('/history', verifyToken, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// ─── 5. Invoice Generator HTML/PDF ────────────────────────────────────────────
-router.get('/invoice/:orderId', async (req: Request, res: Response) => {
+// ─── 5. Invoice Generator HTML/PDF (Protected: Customer Owner or Staff) ────────
+router.get('/invoice/:orderId', verifyToken, async (req: AuthRequest, res: Response) => {
   try {
     const orderId = req.params.orderId;
-    let orderData: any = null;
+    const user = req.user!;
 
     const docSnap = await adminDb.collection('orders').doc(orderId).get();
-    if (docSnap.exists) {
-      orderData = docSnap.data();
+    if (!docSnap.exists) {
+      res.status(404).json({ error: 'Order not found' });
+      return;
+    }
+
+    const orderData = docSnap.data()!;
+    const isOwnerOrStaff = ['owner', 'admin', 'restaurant_manager', 'franchise_owner', 'cashier', 'kitchen_staff', 'developer', 'platform_owner'].includes(user.role || '');
+    const isCustomerOwner = (orderData.userId === user.uid || orderData.customerUid === user.uid);
+
+    if (!isOwnerOrStaff && !isCustomerOwner) {
+      res.status(403).json({ error: 'Access denied to this invoice' });
+      return;
     }
 
     const html = InvoiceEngine.generateInvoiceHtml({
       orderId,
       paymentId: orderData?.paymentId || `pay_${orderId.slice(0, 8)}`,
-      customerName: orderData?.contactName || 'Gourmet Customer',
-      customerPhone: orderData?.contactPhone || '',
-      customerAddress: orderData?.deliveryAddress?.addressLine || orderData?.deliveryAddress || 'Rajnandgaon, CG',
-      items: orderData?.items || [{ name: 'Artisan Pizza Special', quantity: 1, price: orderData?.totalAmount || 299 }],
-      totalAmount: Number(orderData?.totalAmount || 299),
+      customerName: orderData?.contactName || orderData?.customerName || 'Gourmet Customer',
+      customerPhone: orderData?.contactPhone || orderData?.phone || '',
+      customerAddress: orderData?.deliveryAddress?.addressLine || (typeof orderData?.deliveryAddress === 'string' ? orderData.deliveryAddress : 'Rajnandgaon, CG'),
+      items: orderData?.items || [],
+      totalAmount: Number(orderData?.totalAmount || 0),
       paymentMethod: orderData?.paymentMethod || 'cod',
       createdAt: orderData?.createdAt ? new Date(orderData.createdAt).toISOString() : new Date().toISOString(),
     });

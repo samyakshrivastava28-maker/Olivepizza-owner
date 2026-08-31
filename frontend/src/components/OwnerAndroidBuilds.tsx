@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Play, Download, Clock, GitBranch, Terminal, RefreshCw, CheckCircle, XCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { auth } from '../lib/firebase';
 
 export default function OwnerAndroidBuilds() {
   const [status, setStatus] = useState<any>(null);
@@ -16,9 +17,13 @@ export default function OwnerAndroidBuilds() {
 
   const fetchData = async () => {
     try {
+      const token = await auth.currentUser?.getIdToken();
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
       const [statusRes, releaseRes] = await Promise.all([
-        fetch('/api/github/build-status').then(r => r.json()),
-        fetch('/api/github/latest-release').then(r => r.json())
+        fetch('/api/github/build-status', { headers }).then(r => r.json()),
+        fetch('/api/github/latest-release', { headers }).then(r => r.json())
       ]);
       
       if (!statusRes.error) setStatus(statusRes);
@@ -34,7 +39,11 @@ export default function OwnerAndroidBuilds() {
     setIsTriggering(true);
     const toastId = toast.loading('Triggering new APK build...');
     try {
-      const res = await fetch('/api/github/build-apk', { method: 'POST' });
+      const token = await auth.currentUser?.getIdToken();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch('/api/github/build-apk', { method: 'POST', headers });
       const data = await res.json();
       
       if (res.ok) {

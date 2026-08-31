@@ -34,7 +34,17 @@ export type OrderStatus =
   | 'completed'
   | 'cancelled';
 
-export type NotificationRole = 'customer' | 'owner' | 'delivery';
+export type NotificationRole =
+  | 'customer'
+  | 'owner'
+  | 'delivery'
+  | 'restaurant_manager'
+  | 'cashier'
+  | 'kitchen_staff'
+  | 'franchise_owner'
+  | 'admin'
+  | 'developer'
+  | 'platform_owner';
 export type NotificationPriority = 'critical' | 'high' | 'normal';
 export type NotificationCategory =
   | 'order'
@@ -161,7 +171,7 @@ export interface NotificationPayload {
     };
   };
   apns?: {
-    headers?: { 'apns-priority'?: string; 'apns-collapse-id'?: string };
+    headers?: Record<string, string>;
     payload?: {
       aps: {
         alert?: { title?: string; body?: string };
@@ -169,8 +179,11 @@ export interface NotificationPayload {
         badge?: number;
         'mutable-content'?: number;
         'content-available'?: number;
+        [key: string]: any;
       };
+      [key: string]: any;
     };
+    [key: string]: any;
   };
   webpush?: {
     headers?: { Urgency?: string; TTL?: string };

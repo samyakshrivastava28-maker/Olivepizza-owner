@@ -1,3 +1,4 @@
+import ownerOrderHistoryRoutes from './routes/ownerOrderHistory.routes.js';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -157,7 +158,8 @@ app.use(cors({
     ) {
       callback(null, true);
     } else {
-      callback(null, true);
+      // SECURITY: Reject all origins not in the allowlist in production.
+      callback(new Error(`CORS: Origin '${origin}' is not permitted.`));
     }
   },
   credentials: true
@@ -287,6 +289,8 @@ app.use('/api/navigation', navigationRoutes);
 
 app.use('/users', userRoutes);
 app.use('/api/users', userRoutes);
+app.use('/user', userRoutes);
+app.use('/api/user', userRoutes);
 
 app.use('/auth', authRoutes);
 app.use('/api/auth', authRoutes);
@@ -405,6 +409,11 @@ app.use('/v1/app-config', appConfigRoutes);
 
 app.use('/tts', ttsRoutes);
 app.use('/api/tts', ttsRoutes);
+
+
+app.use('/owner/order-history', ownerOrderHistoryRoutes);
+app.use('/api/owner/order-history', ownerOrderHistoryRoutes);
+app.use('/api/owner/orders/history', ownerOrderHistoryRoutes);
 
 // 404 Handler - MUST return JSON to prevent HTML fallback for API routes
 app.use((req: express.Request, res: express.Response) => {

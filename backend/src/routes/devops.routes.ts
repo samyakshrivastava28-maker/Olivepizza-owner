@@ -361,8 +361,17 @@ router.post('/ai/qdrant/search-test', async (req: DevRequest, res: Response) => 
   }
 });
 
-router.post('/ai/qdrant/rebuild', async (_req: DevRequest, res: Response) => {
+router.post('/ai/qdrant/rebuild', async (req: DevRequest, res: Response) => {
   try {
+    const { confirm, confirmation } = req.body || {};
+    if (confirm !== 'CONFIRM_REBUILD' && confirmation !== 'CONFIRM_REBUILD') {
+      res.status(400).json({
+        success: false,
+        error: 'Confirmation required: Provide body payload { confirm: "CONFIRM_REBUILD" } to clear and rebuild vector index'
+      });
+      return;
+    }
+
     await pineconeService.clearAll();
     const { knowledgeSync } = await import('../services/ai/KnowledgeSync.js');
     const result = await knowledgeSync.syncAll();

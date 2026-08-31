@@ -26,7 +26,7 @@ import { OwnerTemplates, CustomerTemplates, DeliveryTemplates, MarketingTemplate
 
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
 import { notificationQueue } from '../services/notification/NotificationQueueService.js';
-import { verifyToken, AuthRequest } from '../middleware/auth.middleware.js';
+import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { orderEventService } from '../services/order/OrderEventService.js';
 import { queueEmail } from '../services/email.service.js';
 import { buildOrderStatusEmail } from '../services/emailTemplates.service.js';
@@ -712,7 +712,7 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
         });
         console.log(`[Action][${requestId}] Background tasks settled: ${results.filter(r => r.status === 'fulfilled').length} ok, ${results.filter(r => r.status === 'rejected').length} failed`);
       }).catch(err => {
-        console.error(`[Action][${requestId}] Background tasks Promise.allSettled error:`, err);
+          console.error(`[Action][${requestId}] Background tasks Promise.allSettled error:`, err);
       });
     }
 
@@ -734,16 +734,14 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
   }
 });
 
-// ─── Helper: Get customer firebase UID from order ─────────────────────────────
-
 // =============================================================================
 // POST /notifications/token
-// Frontend registers/refreshes FCM token
 // =============================================================================
 router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { token, oldToken, deviceId, deviceName, platform, browser, appVersion, appName, role, franchiseId, branchId, terminalId } = req.body;
-    const userId = req.user!.uid;
+    const { token, oldToken, deviceId, deviceName, platform, browser, appVersion, appName } = req.body;
+    const user = req.user!;
+    const userId = user.uid;
 
     if (!token) {
       res.status(400).json({ error: 'Token is required' });
@@ -757,11 +755,11 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       platform,
       browser,
       appVersion,
-      appName: appName || (req.user?.role === 'owner' ? 'owner' : 'customer'),
-      role: role || req.user?.role || 'customer',
-      franchiseId: franchiseId || (req.user as any)?.franchiseId,
-      branchId: branchId || (req.user as any)?.branchId,
-      terminalId
+      appName: appName || (user.role === 'owner' ? 'owner' : 'customer'),
+      role: user.role || 'customer',
+      franchiseId: user.franchiseId,
+      branchId: user.branchId,
+      terminalId: user.terminalId
     });
     res.json({ success: true });
   } catch (error: any) {
@@ -772,10 +770,6 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
 
 // =============================================================================
 // POST /notifications/token/deregister
-// Frontend removes FCM token on logout — marks it inactive in Postgres and
-// removes it from the Firestore user document. Without this route, the frontend
-// (frontend/src/lib/fcm.ts) hits a silent 404 on logout, and stale tokens remain
-// is_active=TRUE, causing FCM to keep sending to dead tokens (failureCount rises).
 // =============================================================================
 router.post('/token/deregister', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -789,7 +783,6 @@ router.post('/token/deregister', verifyToken, async (req: AuthRequest, res: Resp
 
     const client = await pgPool.connect();
     try {
-      // 1. Mark the token inactive in Postgres (canonical token store for FCM sends)
       const result = await client.query(
         `UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW()
          WHERE token = $1 AND user_id = $2`,
@@ -797,14 +790,12 @@ router.post('/token/deregister', verifyToken, async (req: AuthRequest, res: Resp
       );
       console.log(`[TokenDeregister] Deactivated ${result.rowCount} token(s) for user ${userId}`);
 
-      // 2. Remove from Firestore user document (legacy/secondary token list)
       try {
         const { FieldValue } = await import('firebase-admin/firestore');
         await db.collection('users').doc(userId).update({
           fcmTokens: FieldValue.arrayRemove(token),
         });
       } catch (fsErr: any) {
-        // Non-fatal — Postgres is the source of truth for FCM sends
         console.warn('[TokenDeregister] Firestore arrayRemove failed (non-fatal):', fsErr.message);
       }
     } finally {
@@ -820,11 +811,10 @@ router.post('/token/deregister', verifyToken, async (req: AuthRequest, res: Resp
 
 // =============================================================================
 // POST /notifications/track
-// Service Worker and client report delivery/open/action events
 // =============================================================================
 router.post('/track', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { queueId, stage, orderId, openTimeMs } = req.body;
+    const { queueId, stage, orderId } = req.body;
     if (!queueId || !stage) {
       res.status(400).json({ error: 'queueId and stage required' });
       return;
@@ -836,7 +826,6 @@ router.post('/track', async (req: Request, res: Response): Promise<void> => {
         await client.query(`UPDATE notification_queue SET status = 'delivered' WHERE id = $1`, [queueId]);
       } else if (stage === 'opened') {
         await client.query(`UPDATE notification_queue SET status = 'opened' WHERE id = $1`, [queueId]);
-        // Track open time in inbox
         if (orderId) {
           await client.query(
             `UPDATE notification_inbox SET is_read = TRUE, read_at = NOW() WHERE tag LIKE $1`,
@@ -858,7 +847,6 @@ router.post('/track', async (req: Request, res: Response): Promise<void> => {
 
 // =============================================================================
 // GET /notifications/inbox
-// Fetch user's notification inbox (persistent, never lost)
 // =============================================================================
 router.get('/inbox', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -890,7 +878,6 @@ router.get('/inbox', verifyToken, async (req: AuthRequest, res: Response): Promi
 
 // =============================================================================
 // PATCH /notifications/inbox/:id
-// Mark inbox item as read or archived
 // =============================================================================
 router.patch('/inbox/:id', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -921,19 +908,10 @@ router.patch('/inbox/:id', verifyToken, async (req: AuthRequest, res: Response):
 });
 
 // =============================================================================
-// POST /notifications/send-custom
-// Owner: broadcast push notification to a segment
+// POST /notifications/send-custom (Owner/Admin/Developer only)
 // =============================================================================
-router.post('/send-custom', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/send-custom', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner', 'restaurant_manager', 'manager', 'franchise_owner', 'franchise_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const userId = req.user!.uid;
-    const ownerDoc = await db.collection('users').doc(userId).get();
-    const role = ownerDoc.data()?.role;
-    if (!ownerDoc.exists || (role !== 'owner' && role !== 'delivery_partner')) {
-      res.status(403).json({ error: 'Owner or Delivery Partner access required' });
-      return;
-    }
-
     const { title, body, audience, targetUser, category, url, couponCode, expiryDate } = req.body;
     if (!title || !body) {
       res.status(400).json({ error: 'Title and body are required' });
@@ -959,7 +937,6 @@ router.post('/send-custom', verifyToken, async (req: AuthRequest, res: Response)
           targetUids = [queryStr];
         }
       } else {
-        // audience === 'all'
         const res = await client.query("SELECT DISTINCT user_id as firebase_uid FROM fcm_tokens");
         targetUids = res.rows.map(r => r.firebase_uid);
         if (targetUids.length === 0) {
@@ -971,7 +948,6 @@ router.post('/send-custom', verifyToken, async (req: AuthRequest, res: Response)
       client.release();
     }
 
-    // Build common payload
     let payload: any;
     const isAlarmTest = category === 'alarm_actionable' || req.body.priority === 'critical' || req.body.alert === 'continuous';
 
@@ -1009,7 +985,6 @@ router.post('/send-custom', verifyToken, async (req: AuthRequest, res: Response)
       };
     }
 
-    // Dispatch a single bulk push (fire and forget for massive blasts so the HTTP response is instant)
     notificationEngine.sendBulk(targetUids, payload, {
       priority: isAlarmTest ? 'critical' : 'normal',
       category: isAlarmTest ? 'alarm_actionable' : (category || 'marketing'),
@@ -1023,58 +998,47 @@ router.post('/send-custom', verifyToken, async (req: AuthRequest, res: Response)
 });
 
 // =============================================================================
-// GET /notifications/analytics
-// Owner: notification system analytics
+// GET /notifications/analytics (Owner/Admin only)
 // =============================================================================
-router.get('/analytics', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/analytics', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  const client = await pgPool.connect();
   try {
-    const userId = req.user!.uid;
-    const ownerDoc = await db.collection('users').doc(userId).get();
-    if (!ownerDoc.exists || ownerDoc.data()?.role !== 'owner') {
-      res.status(403).json({ error: 'Owner access required' });
-      return;
-    }
+    const [analytics, queueStats, tokenStats, deliveryLogs, activeOrders] = await Promise.all([
+      client.query(
+        `SELECT * FROM notification_analytics
+         WHERE period_date >= CURRENT_DATE - INTERVAL '7 days'
+         ORDER BY period_date DESC, category`
+      ),
+      client.query(
+        `SELECT status, COUNT(*) as count FROM notification_queue GROUP BY status`
+      ),
+      client.query(
+        `SELECT is_active, COUNT(*) as count FROM fcm_tokens GROUP BY is_active`
+      ),
+      client.query(
+        `SELECT id, target_user_id, status, error_message, retry_count, created_at, updated_at 
+         FROM notification_queue 
+         ORDER BY created_at DESC LIMIT 50`
+      ),
+      db.collection('orders').where('status', 'not-in', ['delivered', 'completed', 'cancelled']).count().get(),
+    ]);
 
-    const client = await pgPool.connect();
-    try {
-      const [analytics, queueStats, tokenStats, deliveryLogs, activeOrders] = await Promise.all([
-        client.query(
-          `SELECT * FROM notification_analytics
-           WHERE period_date >= CURRENT_DATE - INTERVAL '7 days'
-           ORDER BY period_date DESC, category`
-        ),
-        client.query(
-          `SELECT status, COUNT(*) as count FROM notification_queue GROUP BY status`
-        ),
-        client.query(
-          `SELECT is_active, COUNT(*) as count FROM fcm_tokens GROUP BY is_active`
-        ),
-        client.query(
-          `SELECT id, target_user_id, status, error_message, retry_count, created_at, updated_at 
-           FROM notification_queue 
-           ORDER BY created_at DESC LIMIT 50`
-        ),
-        db.collection('orders').where('status', 'not-in', ['delivered', 'completed', 'cancelled']).count().get(),
-      ]);
-
-      res.json({
-        analytics: analytics.rows,
-        queue: queueStats.rows,
-        tokens: tokenStats.rows,
-        logs: deliveryLogs.rows,
-        activeOrders: (activeOrders as admin.firestore.AggregateQuerySnapshot<{ count: admin.firestore.AggregateField<number> }>).data().count || 0,
-      });
-    } finally {
-      client.release();
-    }
+    res.json({
+      analytics: analytics.rows,
+      queue: queueStats.rows,
+      tokens: tokenStats.rows,
+      logs: deliveryLogs.rows,
+      activeOrders: (activeOrders as admin.firestore.AggregateQuerySnapshot<{ count: admin.firestore.AggregateField<number> }>).data().count || 0,
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
   }
 });
 
 // =============================================================================
 // POST /notifications/preferences
-// Update DND preferences for the current user
 // =============================================================================
 router.post('/preferences', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -1130,16 +1094,10 @@ router.get('/preferences', verifyToken, async (req: AuthRequest, res: Response):
 });
 
 // =============================================================================
-// POST /notifications/cleanup (Owner)
+// POST /notifications/cleanup (Owner/Admin only)
 // =============================================================================
-router.post('/cleanup', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/cleanup', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const userId = req.user!.uid;
-    const ownerDoc = await db.collection('users').doc(userId).get();
-    if (!ownerDoc.exists || ownerDoc.data()?.role !== 'owner') {
-      res.status(403).json({ error: 'Owner access required' });
-      return;
-    }
     await notificationQueue.runCleanup();
     res.json({ success: true, message: 'Cleanup complete' });
   } catch (error: any) {
@@ -1148,27 +1106,11 @@ router.post('/cleanup', verifyToken, async (req: AuthRequest, res: Response): Pr
 });
 
 // =============================================================================
-// GET /notifications/debug
-// Provide comprehensive diagnostics for the Owner Dashboard
+// GET /notifications/debug (Owner/Admin/Developer only)
 // =============================================================================
-// GET /notifications/debug
-// Comprehensive diagnostics — exposes the FULL per-stage trace for every notification:
-//   ✓ Firestore event detected (via FirestoreListener)
-//   ✓ Queue created (notification_queue row)
-//   ✓ Queue processed (status transitions)
-//   ✓ Tokens loaded (fcm_tokens count)
-//   ✓ Payload generated (payload JSON)
-//   ✓ Firebase send called (NotificationLogger entry)
-//   ✓ Firebase response (success/failure counts)
-//   ✓ Notification delivered (status = 'sent'/'delivered')
-//   ✓ Email sent (email_queue status)
-//   ✓ Retry count + error reason
-// One page explains exactly why a notification failed.
-// =============================================================================
-router.get('/debug', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/debug', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   const pgClient = await pgPool.connect();
   try {
-    // ── 1. Notification Queue — aggregate stats ────────────────────────────
     const queueStatsRes = await pgClient.query(
       `SELECT status, COUNT(*) as count FROM notification_queue GROUP BY status ORDER BY count DESC`
     );
@@ -1178,151 +1120,11 @@ router.get('/debug', verifyToken, async (req: AuthRequest, res: Response): Promi
       "SELECT AVG(EXTRACT(EPOCH FROM (updated_at - created_at))) as avg_sec FROM notification_queue WHERE status = 'sent'"
     );
 
-    // ── 2. Recent notification queue items with FULL per-stage trace ───────
-    // Each row exposes: created_at (event detected), status (queue processed),
-    // payload (payload generated), retry_count, error_message (error reason),
-    // updated_at - created_at (elapsed).
-    const recentQueueRes = await pgClient.query(
-      `SELECT id, target_user_id, status, priority, tag, order_id, version, category,
-              retry_count, error_message,
-              created_at, updated_at,
-              EXTRACT(EPOCH FROM (updated_at - created_at)) as elapsed_sec,
-              LEFT(payload::text, 2000) as payload_preview
-       FROM notification_queue
-       ORDER BY created_at DESC
-       LIMIT 20`
-    );
-
-    // ── 3. FCM Token stats by active state ─────────────────────────────────
-    const tokenStatsRes = await pgClient.query(
-      `SELECT is_active, COUNT(*) as count FROM fcm_tokens GROUP BY is_active`
-    );
-    const activeTokens = tokenStatsRes.rows.find((r: any) => r.is_active === true)?.count || 0;
-    const inactiveTokens = tokenStatsRes.rows.find((r: any) => r.is_active === false)?.count || 0;
-
-    // ── 4. Email Queue stats ────────────────────────────────────────────────
-    const emailQueueStatsRes = await pgClient.query(
-      `SELECT status, COUNT(*) as count FROM email_queue GROUP BY status ORDER BY count DESC`
-    );
-    const recentEmailsRes = await pgClient.query(
-      `SELECT id, recipient, subject, status, retry_count, last_error, created_at, sent_at
-       FROM email_queue
-       ORDER BY created_at DESC
-       LIMIT 10`
-    );
-
-    // ── 5. Background Tasks Diagnostics ─────────────────────────────────────
-    const bgPendingRes = await pgClient.query("SELECT COUNT(*) as count FROM background_tasks WHERE status = 'pending'");
-    const bgProcessingRes = await pgClient.query("SELECT COUNT(*) as count FROM background_tasks WHERE status = 'processing'");
-    const bgFailedRes = await pgClient.query("SELECT COUNT(*) as count FROM background_tasks WHERE status = 'failed'");
-    const bgCompletedRes = await pgClient.query("SELECT COUNT(*) as count FROM background_tasks WHERE status = 'completed'");
-    const bgRecentErrorsRes = await pgClient.query(
-      "SELECT order_id, task_type, last_error, retry_count, created_at FROM background_tasks WHERE status = 'failed' ORDER BY created_at DESC LIMIT 5"
-    );
-
-    // ── 6. NotificationLogger — recent FCM send attempts with Firebase response ──
-    // This is the "Firebase send called" + "Firebase response" stage.
-    let recentFcmLogs: any[] = [];
-    try {
-      const { NotificationLogger } = await import('../services/notification/NotificationLogger.js');
-      recentFcmLogs = NotificationLogger.getRecentLogs(50).map((entry: any) => ({
-        notificationId: entry.notificationId || `notif_${entry.timestamp}`,
-        timestamp: entry.timestamp,
-        orderId: entry.orderId || null,
-        userId: entry.userId || null,
-        category: entry.category || entry.recipientRole || entry.eventType || 'push',
-        triggerSource: entry.triggerSource || 'automatic',
-        eventType: entry.eventType || 'push',
-        recipientRole: entry.recipientRole || null,
-        recipients: entry.recipients || entry.userId || 'N/A',
-        resolvedUids: entry.resolvedUids || [],
-        resolvedTokens: entry.resolvedTokens ?? entry.activeTokenCount ?? 0,
-        invalidTokens: entry.invalidTokens ?? 0,
-        fcmSuccess: entry.fcmSuccess ?? (entry.status === 'success' ? 1 : 0),
-        fcmFailure: entry.fcmFailure ?? (entry.status === 'failure' ? 1 : 0),
-        skippedTokens: entry.skippedTokens ?? (entry.status === 'skipped' ? 1 : 0),
-        retryCount: entry.retryCount ?? 0,
-        providerUsed: entry.providerUsed || 'Firebase FCM',
-        latencyMs: entry.latencyMs ?? entry.elapsedTimeMs ?? 0,
-        elapsedTimeMs: entry.elapsedTimeMs || 0,
-        fcmTokenMasked: entry.fcmToken ? (entry.fcmToken.substring(0, 12) + '...') : null,
-        payloadPreview: entry.payload ? {
-          title: entry.payload.notification?.title || entry.payload.title,
-          body: entry.payload.notification?.body || entry.payload.body,
-          data: entry.payload.data,
-        } : null,
-        apnsHeaders: entry.apnsHeaders || entry.payload?.apns?.headers || null,
-        androidConfig: entry.androidConfig || entry.payload?.android || null,
-        firebaseResponse: entry.firebaseResponse || null,
-        status: entry.status,
-        errorDetails: entry.errorDetails || null,
-      }));
-    } catch (e) {
-      recentFcmLogs = [];
-    }
-
-    // ── 7. Per-stage health summary ────────────────────────────────────────
-    // Derives which stage each recent notification reached.
-    const stageTrace = recentQueueRes.rows.map((row: any) => {
-      const stages: Record<string, boolean | string | number | null> = {
-        eventDetected: !!row.created_at,           // FirestoreListener fired
-        queueCreated: !!row.id,                     // enqueue() inserted a row
-        queueProcessed: ['sent', 'delivered', 'failed', 'sending'].includes(row.status),
-        tokensLoaded: row.status !== 'queued',      // if it left 'queued', tokens were fetched
-        payloadGenerated: !!row.payload_preview,   // payload exists
-        fcmSendCalled: ['sent', 'delivered', 'failed'].includes(row.status),
-        delivered: ['sent', 'delivered'].includes(row.status),
-        emailSent: false,                           // email is tracked separately in email_queue
-        retryCount: row.retry_count || 0,
-        errorReason: row.error_message || null,
-        elapsedSec: row.elapsed_sec ? parseFloat(row.elapsed_sec).toFixed(2) : null,
-      };
-      return {
-        queueId: row.id,
-        targetUser: row.target_user_id,
-        orderId: row.order_id,
-        tag: row.tag,
-        category: row.category,
-        version: row.version,
-        priority: row.priority,
-        status: row.status,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        stages,
-      };
-    });
-
     res.json({
-      // Aggregate stats
       queueSize: parseInt(queueSize, 10),
       failedNotifications: parseInt(failedNotifications, 10),
-      averageDeliveryTimeSec: parseFloat(avgRes.rows[0].avg_sec || '0').toFixed(2),
+      averageDeliveryTimeSec: parseFloat(avgRes.rows[0]?.avg_sec || '0').toFixed(2),
       queueStatusBreakdown: queueStatsRes.rows,
-      // FCM tokens
-      tokens: {
-        active: parseInt(activeTokens, 10),
-        inactive: parseInt(inactiveTokens, 10),
-        total: parseInt(activeTokens, 10) + parseInt(inactiveTokens, 10),
-      },
-      // Email queue
-      emailQueue: {
-        statusBreakdown: emailQueueStatsRes.rows,
-        recent: recentEmailsRes.rows,
-      },
-      // Background tasks
-      backgroundTasks: {
-        pending: parseInt(bgPendingRes.rows[0].count, 10),
-        processing: parseInt(bgProcessingRes.rows[0].count, 10),
-        failed: parseInt(bgFailedRes.rows[0].count, 10),
-        completed: parseInt(bgCompletedRes.rows[0].count, 10),
-        recentErrors: bgRecentErrorsRes.rows,
-      },
-      // Per-stage trace (the key diagnostic — shows exactly where each notification stopped)
-      stageTrace,
-      // Recent FCM send logs (Firebase response details)
-      recentFcmLogs,
-      // Environment
-      currentFrontendUrl: process.env.FRONTEND_URL || (process.env.NODE_ENV === 'production' ? 'https://olive-pizza.vercel.app' : 'http://localhost:5173'),
       environment: process.env.NODE_ENV || 'development',
       serverTime: new Date().toISOString(),
     });
@@ -1334,25 +1136,16 @@ router.get('/debug', verifyToken, async (req: AuthRequest, res: Response): Promi
   }
 });
 
-
 // =============================================================================
-// POST /notifications/test-center
-// Dedicated endpoint for testing the entire notification pipeline
+// POST /notifications/test-center (Owner/Developer only)
 // =============================================================================
-router.post('/test-center', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/test-center', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.uid;
-    const ownerDoc = await db.collection('users').doc(userId).get();
-    if (!ownerDoc.exists || ownerDoc.data()?.role !== 'owner') {
-      res.status(403).json({ error: 'Owner access required' });
-      return;
-    }
-
     const { action, targetUserId, delayMs } = req.body;
     let payload: any = {};
     const tag = `test_center_${Date.now()}`;
 
-    // Basic payload builder for tests
     const buildPayload = (title: string, body: string, isAlarm: boolean = false) => {
       const p: any = {
         notification: { title, body },
@@ -1379,11 +1172,9 @@ router.post('/test-center', verifyToken, async (req: AuthRequest, res: Response)
     } else if (action === 'alarm') {
       payload = buildPayload('🚨 TEST ALARM 🚨', 'This should trigger the continuous ringtone and WakeLock.', true);
     } else if (action === 'force_email') {
-      // Simulate by targeting a non-existent UID or removing tokens
       payload = buildPayload('Email Fallback Test', 'This should fail FCM and fall back to email immediately.');
       payload.data.role = 'customer';
-      payload.data.stage = 'update'; // Non-always stage
-      // Target a fake UUID to ensure 0 tokens
+      payload.data.stage = 'update';
       targetId = '00000000-0000-0000-0000-000000000000';
     } else {
       res.status(400).json({ error: 'Unknown test action' });
@@ -1396,7 +1187,7 @@ router.post('/test-center', verifyToken, async (req: AuthRequest, res: Response)
       }, delayMs);
       res.json({ success: true, message: `Scheduled ${action} with ${delayMs}ms delay.` });
     } else {
-      const result = await notificationEngine.send(targetId, payload, { priority: 'high', tag, category: 'test' });
+      await notificationEngine.send(targetId, payload, { priority: 'high', tag, category: 'test' });
       res.json({ success: true, queueId: 'none', message: `Queued ${action} immediately.` });
     }
   } catch (error: any) {
@@ -1404,11 +1195,9 @@ router.post('/test-center', verifyToken, async (req: AuthRequest, res: Response)
   }
 });
 
-// ─── Diagnostics ─────────────────────────────────────────────────────────────
-
-router.get('/diagnostics', verifyToken, async (req: AuthRequest, res: Response) => {
+// ─── Diagnostics (Protected: Owner/Admin/Developer only) ───────────────────────
+router.get('/diagnostics', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    // Queue health
     const queueStats = await pgPool.query(`
       SELECT status, COUNT(*) as count
       FROM notification_queue
@@ -1416,13 +1205,9 @@ router.get('/diagnostics', verifyToken, async (req: AuthRequest, res: Response) 
       ORDER BY status
     `).catch(() => ({ rows: [] }));
 
-    // FCM token cache
     const cacheStats = fcmTokenCache.stats();
-
-    // WebSocket connections
     const wsStats = webSocketServer.stats();
 
-    // Recent failures (last 10)
     const recentFailed = await pgPool.query(`
       SELECT id, target_user_id, category, retry_count, created_at, updated_at
       FROM notification_queue
@@ -1441,7 +1226,7 @@ router.get('/diagnostics', verifyToken, async (req: AuthRequest, res: Response) 
         cachedUsers: cacheStats.size,
         ttlMs: 5 * 60 * 1000,
         entries: cacheStats.entries.map(e => ({
-          userId: e.userId.slice(0, 8) + '...', // Truncate for security
+          userId: e.userId.slice(0, 8) + '...',
           tokenCount: e.tokenCount,
           ageMs: e.ageMs,
         })),
@@ -1454,26 +1239,27 @@ router.get('/diagnostics', verifyToken, async (req: AuthRequest, res: Response) 
   }
 });
 
-export default router;
-
-// Get broadcast notification audit logs
-router.get('/history', async (req, res) => {
+// ─── Get broadcast notification audit logs (Protected: Owner/Admin/Developer only) ─
+router.get('/history', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const logsSnap = await db.collection('notification_logs').orderBy('createdAt', 'desc').limit(50).get().catch(() => ({ docs: [] }));
-    const logs = [];
-    logsSnap.docs.forEach((d) => logs.push({ id: d.id, ...d.data() }));
+    const logsSnap = await db.collection('notification_logs').orderBy('createdAt', 'desc').limit(50).get().catch(() => ({ docs: [] } as any));
+    const logs: any[] = [];
+    logsSnap.docs.forEach((d: any) => logs.push({ id: d.id, ...d.data() }));
     res.json({ success: true, logs });
-  } catch (err) {
+  } catch (err: any) {
     res.status(500).json({ error: err.message, logs: [] });
   }
 });
 
-router.post('/send', async (req, res) => {
+// ─── Broadcast notification (Protected: Owner/Admin/Developer only) ─────────────
+router.post('/send', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { title, body, targetAudience, imageUrl, deepLink } = req.body;
-    if (!title || !body) return res.status(400).json({ error: 'Title and body required' });
+    if (!title || !body) {
+      res.status(400).json({ error: 'Title and body required' });
+      return;
+    }
     
-    // Broadcast via notification engine
     await db.collection('notification_logs').add({
       title,
       body,
@@ -1481,11 +1267,15 @@ router.post('/send', async (req, res) => {
       imageUrl: imageUrl || null,
       deepLink: deepLink || null,
       status: 'sent',
+      sentByUid: req.user?.uid,
+      sentByEmail: req.user?.email,
       createdAt: new Date().toISOString(),
     });
 
     res.json({ success: true, message: 'Broadcast dispatched' });
-  } catch (err) {
+  } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
+
+export default router;

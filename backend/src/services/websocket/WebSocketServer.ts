@@ -15,6 +15,7 @@
 import { WebSocketServer as WSSNative, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { appEventBus, OrderStatusChangedEvent, OrderCreatedEvent } from '../eventBus/AppEventBus.js';
+import { adminAuth } from '../../config/firebase.js';
 
 export interface ConnectedClient {
   ws: WebSocket;
@@ -55,28 +56,25 @@ class OliveWebSocketServer {
 
     this.wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
       const url = new URL(req.url || '/', `ws://${req.headers.host || 'localhost'}`);
-      let uid = url.searchParams.get('uid') || 'anonymous';
-      let role = url.searchParams.get('role') || 'customer';
-      const token = url.searchParams.get('token') || url.searchParams.get('auth');
+      const token = url.searchParams.get('token');
+      let uid = 'anonymous';
+      let role = 'customer';
 
       // Verify token if supplied during connection handshake
       if (token) {
         try {
-          if (token.startsWith('test-') || token.startsWith('dev-')) {
-            if (process.env.NODE_ENV !== 'production') {
-              if (token.includes('cashier')) { uid = 'test_cashier_uid'; role = 'cashier'; }
-              else if (token.includes('manager')) { uid = 'test_manager_uid'; role = 'restaurant_manager'; }
-              else if (token.includes('rider')) { uid = 'test_rider_uid'; role = 'delivery_partner'; }
-              else { uid = 'test_owner_uid'; role = 'owner'; }
-            }
-          } else {
-            const decoded = await adminAuth.verifyIdToken(token);
-            uid = decoded.uid;
-            role = (decoded.role as string) || 'customer';
-          }
+          const decoded = await adminAuth.verifyIdToken(token);
+          uid = decoded.uid;
+          role = (decoded.role as string) || 'customer';
         } catch (tokenErr) {
-          console.warn('[WebSocketServer] Handshake token verification fallback:', tokenErr);
+          console.warn('[WebSocketServer] Handshake token verification failed:', tokenErr);
+          uid = 'anonymous';
+          role = 'customer';
         }
+      } else {
+        // If unauthenticated, default to anonymous customer.
+        uid = 'anonymous';
+        role = 'customer';
       }
 
       const client: ConnectedClient = { 
@@ -118,21 +116,12 @@ class OliveWebSocketServer {
           // 2. Post-connect Message-Based Authentication (avoids passing tokens in URL query strings)
           if (msg.type === 'auth' && msg.token) {
             try {
-              let authUid = uid;
-              let authRole = role;
+              let authUid = client.uid;
+              let authRole = client.role || 'customer';
 
-              if (msg.token.startsWith('test-') || msg.token.startsWith('dev-')) {
-                if (process.env.NODE_ENV !== 'production') {
-                  if (msg.token.includes('cashier')) { authUid = 'test_cashier_uid'; authRole = 'cashier'; }
-                  else if (msg.token.includes('manager')) { authUid = 'test_manager_uid'; authRole = 'restaurant_manager'; }
-                  else if (msg.token.includes('rider')) { authUid = 'test_rider_uid'; authRole = 'delivery_partner'; }
-                  else { authUid = 'test_owner_uid'; authRole = 'owner'; }
-                }
-              } else {
-                const decoded = await adminAuth.verifyIdToken(msg.token);
-                authUid = decoded.uid;
-                authRole = (decoded.role as string) || 'customer';
-              }
+              const decoded = await adminAuth.verifyIdToken(msg.token);
+              authUid = decoded.uid;
+              authRole = (decoded.role as string) || 'customer';
 
               // Update client registration with verified identity
               const oldSet = this.clients.get(client.uid);
@@ -144,51 +133,65 @@ class OliveWebSocketServer {
               if (!this.clients.has(authUid)) this.clients.set(authUid, new Set());
               this.clients.get(authUid)!.add(client);
 
+              console.log(`[WebSocketServer] Client authenticated via message: uid=${authUid} role=${authRole}`);
               this.safeSend(ws, {
                 type: 'auth_success',
                 data: { uid: authUid, role: authRole, timestamp: new Date().toISOString() }
               });
-              console.log(`[WebSocketServer] Client message-authenticated uid=${authUid} role=${authRole}`);
             } catch (err: any) {
+              console.warn('[WebSocketServer] Message auth failed:', err.message);
               this.safeSend(ws, { type: 'auth_error', data: { message: 'Invalid token' } });
             }
             return;
           }
 
-          // 3. Subscribe to order tracking channel
-          if (msg.type === 'subscribe.order' && msg.data?.orderId) {
-            const orderId = String(msg.data.orderId);
-            client.subscribedOrders.add(orderId);
-            if (!this.orderSubscribers.has(orderId)) {
-              this.orderSubscribers.set(orderId, new Set());
+          // 3. Subscribe to specific order updates
+          if (msg.type === 'subscribe_order' && msg.orderId) {
+            client.subscribedOrders.add(msg.orderId);
+            if (!this.orderSubscribers.has(msg.orderId)) {
+              this.orderSubscribers.set(msg.orderId, new Set());
             }
-            this.orderSubscribers.get(orderId)!.add(client);
-            
-            // Immediately send current driver location if available for this order
-            for (const loc of this.driverLocations.values()) {
-              if (loc.orderId === orderId) {
-                this.safeSend(ws, { type: 'driver.location_update', data: loc });
-                break;
-              }
+            this.orderSubscribers.get(msg.orderId)!.add(client);
+            this.safeSend(ws, { type: 'subscribed', data: { orderId: msg.orderId } });
+            return;
+          }
+
+          // 4. Unsubscribe from order
+          if (msg.type === 'unsubscribe_order' && msg.orderId) {
+            client.subscribedOrders.delete(msg.orderId);
+            const set = this.orderSubscribers.get(msg.orderId);
+            if (set) {
+              set.delete(client);
+              if (set.size === 0) this.orderSubscribers.delete(msg.orderId);
             }
             return;
           }
 
-          // 3. Unsubscribe from order tracking channel
-          if (msg.type === 'unsubscribe.order' && msg.data?.orderId) {
-            const orderId = String(msg.data.orderId);
-            client.subscribedOrders.delete(orderId);
-            this.orderSubscribers.get(orderId)?.delete(client);
-            return;
-          }
-
-          // 4. Live location streaming from Delivery Partner (~500ms stream)
-          if (msg.type === 'driver.location_update' && msg.data) {
-            // Guard: ensure client is a delivery partner or staff
-            const dataPartnerId = msg.data.deliveryPartnerId || client.uid;
-            this.handleDriverLocationUpdate({
+          // 5. Driver GPS location update (500ms streaming from delivery app)
+          if (msg.type === 'driver_location' && msg.data) {
+            const loc: DriverLocationData = {
               ...msg.data,
-              deliveryPartnerId: dataPartnerId
+              deliveryPartnerId: client.uid,
+              timestamp: Date.now()
+            };
+            this.driverLocations.set(client.uid, loc);
+
+            // Broadcast to any clients watching this driver's order
+            if (loc.orderId) {
+              this.broadcastToOrder(loc.orderId, {
+                type: 'driver_location',
+                data: loc
+              });
+            }
+
+            // Also broadcast to fleet watchers (owners/managers)
+            this.broadcastToRole('owner', {
+              type: 'fleet_location_update',
+              data: loc
+            });
+            this.broadcastToRole('restaurant_manager', {
+              type: 'fleet_location_update',
+              data: loc
             });
             return;
           }
@@ -202,10 +205,10 @@ class OliveWebSocketServer {
         this.totalConnections = Math.max(0, this.totalConnections - 1);
         
         // Remove from user client map
-        const userSet = this.clients.get(uid);
+        const userSet = this.clients.get(client.uid);
         if (userSet) {
           userSet.delete(client);
-          if (userSet.size === 0) this.clients.delete(uid);
+          if (userSet.size === 0) this.clients.delete(client.uid);
         }
 
         // Remove from order subscriptions
@@ -217,11 +220,11 @@ class OliveWebSocketServer {
           }
         }
 
-        console.log(`[WebSocketServer] Client disconnected uid=${uid} total=${this.totalConnections}`);
+        console.log(`[WebSocketServer] Client disconnected uid=${client.uid} total=${this.totalConnections}`);
       });
 
       ws.on('error', (err) => {
-        console.error(`[WebSocketServer] WS error uid=${uid}:`, err.message);
+        console.error(`[WebSocketServer] WS error uid=${client.uid}:`, err.message);
       });
     });
 

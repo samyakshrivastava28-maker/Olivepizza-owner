@@ -3,6 +3,7 @@ import { auth, db } from '../../../lib/firebase';
 import { collection, query, where, getDocs, doc, updateDoc } from 'firebase/firestore';
 import { Laptop, Smartphone, Monitor, Globe, ShieldAlert, LogOut, Loader2 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { fetchApi } from '../../../lib/config';
 
 interface Session {
   id: string;
@@ -66,7 +67,7 @@ export default function MyDevices() {
     setRevokingAll(true);
     try {
       const token = await auth.currentUser?.getIdToken();
-      const res = await fetch('/api/user/revoke-all-sessions', {
+      const res = await fetchApi('/api/users/revoke-all-sessions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` }
       });

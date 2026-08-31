@@ -496,7 +496,7 @@ router.get('/history', verifyToken, requirePOSRole, async (req: AuthRequest, res
       .limit(limitCount)
       .get()
       .catch(async () => {
-        return await adminDb.collection('orders').limit(limitCount).get();
+        return await adminDb.collection('orders').where('branchId', '==', branchId).limit(limitCount).get();
       });
 
     let bills: any[] = snap.docs.map(doc => {
@@ -615,6 +615,22 @@ router.post('/hold', verifyToken, requirePOSRole, async (req: AuthRequest, res: 
 
 router.delete('/held-bills/:id', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    const user = req.user!;
+    const branchId = user.branchId || 'main_branch';
+    const isGlobal = ['owner', 'admin', 'developer', 'platform_owner'].includes(user.role || '');
+
+    const heldDoc = await adminDb.collection('pos_held_bills').doc(req.params.id).get();
+    if (!heldDoc.exists) {
+      res.status(404).json({ success: false, error: 'Held bill not found' });
+      return;
+    }
+
+    const heldData = heldDoc.data()!;
+    if (!isGlobal && heldData.branchId && heldData.branchId !== branchId) {
+      res.status(403).json({ success: false, error: 'Access denied: Cannot delete held bill from another branch' });
+      return;
+    }
+
     const success = await POSService.deleteHeldBill(req.params.id);
     res.json({ success });
   } catch (error: any) {
@@ -640,15 +656,15 @@ router.get('/shifts/current', verifyToken, requirePOSRole, async (req: AuthReque
 router.post('/shifts/open', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const { openingCash, notes } = req.body;
-    const terminalId = user.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01';
     const branchId = user.branchId || 'main_branch';
     const franchiseId = user.franchiseId || 'fra_primary';
+    const terminalId = user.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01';
+    const { openingCash, notes } = req.body;
 
     const shift = await POSService.openShift({
-      terminalId,
       branchId,
       franchiseId,
+      terminalId,
       cashierUid: user.uid,
       cashierName: user.email?.split('@')[0] || 'Cashier',
       openingCash: Number(openingCash || 0),
@@ -667,6 +683,19 @@ router.post('/shifts/close', verifyToken, requirePOSRole, async (req: AuthReques
     if (!shiftId) {
       res.status(400).json({ success: false, error: 'shiftId is required' });
       return;
+    }
+
+    const user = req.user!;
+    const branchId = user.branchId || 'main_branch';
+    const isGlobal = ['owner', 'admin', 'developer', 'platform_owner'].includes(user.role || '');
+
+    const shiftDoc = await adminDb.collection('pos_shifts').doc(shiftId).get();
+    if (shiftDoc.exists) {
+      const shiftData = shiftDoc.data()!;
+      if (!isGlobal && shiftData.branchId && shiftData.branchId !== branchId) {
+        res.status(403).json({ success: false, error: 'Access denied: Shift belongs to another branch' });
+        return;
+      }
     }
 
     const shift = await POSService.closeShift(shiftId, Number(closingCash || 0), notes);
@@ -701,6 +730,15 @@ router.get('/receipt/:orderId', verifyToken, requirePOSRole, async (req: AuthReq
     }
 
     const d = doc.data()!;
+    const user = req.user!;
+    const branchId = user.branchId || 'main_branch';
+    const isGlobal = ['owner', 'admin', 'developer', 'platform_owner'].includes(user.role || '');
+
+    if (!isGlobal && d.branchId && d.branchId !== branchId) {
+      res.status(403).json({ success: false, error: 'Access denied: Receipt belongs to another branch' });
+      return;
+    }
+
     const receiptData: ReceiptData = {
       orderNumber: d.dailyOrderNumber ? `#${d.dailyOrderNumber}` : (d.orderNumber || `#${doc.id.slice(0, 6)}`),
       billId: doc.id,
@@ -764,8 +802,9 @@ router.post('/terminals/register', verifyToken, requireRole(['franchise_owner', 
 
     const franchiseId = user.franchiseId || 'fra_primary';
     const effectiveBranchId = branchId || user.branchId || 'main_branch';
-    const terminalId = `POS-${effectiveBranchId.toUpperCase().slice(0, 4)}-${Math.floor(1000 + Math.random() * 9000)}`;
-    const activationCode = String(Math.floor(100000 + Math.random() * 900000)); // 6-digit PIN
+    const terminalId = `POS-${effectiveBranchId.toUpperCase().slice(0, 4)}-${crypto.randomInt(1000, 10000)}`;
+    const activationCode = String(crypto.randomInt(100000, 1000000)); // Cryptographically secure 6-digit PIN
+    const activationCodeExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24hr expiration
 
     const terminalDoc = {
       terminalId,
@@ -775,6 +814,7 @@ router.post('/terminals/register', verifyToken, requireRole(['franchise_owner', 
       registeredByUid: user.uid,
       registeredByEmail: user.email,
       activationCode,
+      activationCodeExpiresAt,
       status: 'PENDING_ACTIVATION', // 'PENDING_ACTIVATION' | 'ACTIVE' | 'REVOKED'
       createdAt: new Date().toISOString(),
       lastActiveAt: null
@@ -782,16 +822,19 @@ router.post('/terminals/register', verifyToken, requireRole(['franchise_owner', 
 
     await adminDb.collection('pos_terminals').doc(terminalId).set(terminalDoc);
 
+    const publicApiUrl = process.env.VITE_API_BASE_URL || 'https://olivepizza-owner.onrender.com';
+
     res.json({
       success: true,
       terminal: terminalDoc,
       activationCode,
+      activationCodeExpiresAt,
       qrPayload: JSON.stringify({
         terminalId,
         activationCode,
         franchiseId,
         branchId: effectiveBranchId,
-        backendUrl: 'http://localhost:3000/api/pos'
+        backendUrl: `${publicApiUrl}/api/pos`
       })
     });
   } catch (error: any) {
@@ -799,17 +842,18 @@ router.post('/terminals/register', verifyToken, requireRole(['franchise_owner', 
   }
 });
 
-// POS client activates with 6-digit code
-router.post('/terminals/activate', async (req, res: Response): Promise<void> => {
+// POS client activates with 6-digit code (Strictly authenticated and single-use)
+router.post('/terminals/activate', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { activationCode, deviceFingerprint } = req.body;
-    if (!activationCode) {
-      res.status(400).json({ success: false, error: 'Activation code is required' });
+    if (!activationCode || typeof activationCode !== 'string') {
+      res.status(400).json({ success: false, error: 'Valid activation code is required' });
       return;
     }
 
+    const cleanCode = String(activationCode).trim();
     const snap = await adminDb.collection('pos_terminals')
-      .where('activationCode', '==', String(activationCode).trim())
+      .where('activationCode', '==', cleanCode)
       .limit(1)
       .get();
 
@@ -826,8 +870,24 @@ router.post('/terminals/activate', async (req, res: Response): Promise<void> => 
       return;
     }
 
+    if (data.status === 'ACTIVE') {
+      res.status(400).json({ success: false, error: 'This POS terminal has already been activated' });
+      return;
+    }
+
+    // Expiration check
+    if (data.activationCodeExpiresAt && new Date(data.activationCodeExpiresAt).getTime() < Date.now()) {
+      res.status(400).json({ success: false, error: 'This activation code has expired. Please generate a new code from management portal.' });
+      return;
+    }
+
+    // Single-use: invalidate activationCode upon successful activation
     await doc.ref.update({
       status: 'ACTIVE',
+      activationCode: null,
+      activationCodeExpiresAt: null,
+      activatedByUid: req.user?.uid || 'authenticated_cashier',
+      activatedByEmail: req.user?.email || '',
       deviceFingerprint: deviceFingerprint || 'DESKTOP-WIN-POS',
       activatedAt: new Date().toISOString(),
       lastActiveAt: new Date().toISOString()
@@ -1009,71 +1069,15 @@ router.get('/all-terminals', verifyToken, requireRole(['owner', 'admin', 'develo
 
     // Fetch all POS terminals
     const posSnap = await adminDb.collection('pos_terminals').get();
-    let terminals = posSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    let terminals = posSnap.docs.map(d => {
+      const data = d.data() as any;
+      // Redact sensitive activation codes from general listing
+      const { activationCode, ...safeData } = data;
+      return { id: d.id, ...safeData };
+    });
 
     if (terminals.length === 0) {
-      terminals = [
-        {
-          id: 'pos_main_branch_1',
-          terminalName: 'Front Counter #1 — Dine-In',
-          branchId: 'main_branch',
-          franchiseId: 'fra_rajnandgaon',
-          activationCode: '741852',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: true,
-          assignedUserName: 'Amit Verma (Cashier)',
-          currentShift: 'Morning Shift (09:00 - 17:00)',
-          todaySales: 18420,
-          todayOrders: 47,
-          lastSeenAt: new Date(Date.now() - 2 * 60 * 1000).toISOString()
-        },
-        {
-          id: 'pos_main_branch_2',
-          terminalName: 'Express Kiosk #2 — Takeaway',
-          branchId: 'main_branch',
-          franchiseId: 'fra_rajnandgaon',
-          activationCode: '184920',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: false,
-          assignedUserName: 'Unassigned',
-          currentShift: 'Evening Shift',
-          todaySales: 12210,
-          todayOrders: 29,
-          lastSeenAt: new Date(Date.now() - 45 * 60 * 1000).toISOString()
-        },
-        {
-          id: 'pos_durg_branch_1',
-          terminalName: 'Durg Counter #1',
-          branchId: 'durg_branch',
-          franchiseId: 'fra_durg',
-          activationCode: '582910',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: true,
-          assignedUserName: 'Rahul Singh (Cashier)',
-          currentShift: 'All-Day Shift',
-          todaySales: 21800,
-          todayOrders: 54,
-          lastSeenAt: new Date(Date.now() - 1 * 60 * 1000).toISOString()
-        },
-        {
-          id: 'pos_bhilai_branch_1',
-          terminalName: 'Bhilai Counter #1',
-          branchId: 'bhilai_branch',
-          franchiseId: 'fra_bhilai',
-          activationCode: '918274',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: true,
-          assignedUserName: 'Suresh Kumar',
-          currentShift: 'Day Shift',
-          todaySales: 16950,
-          todayOrders: 38,
-          lastSeenAt: new Date(Date.now() - 3 * 60 * 1000).toISOString()
-        }
-      ];
+      terminals = [];
     }
 
     if (!isGlobalOwner && userFranchiseId) {

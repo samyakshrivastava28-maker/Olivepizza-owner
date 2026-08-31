@@ -301,7 +301,7 @@ router.get('/branch/:branchId', async (req: Request, res: Response): Promise<voi
   }
 });
 
-router.get('/branch/:branchId/management', async (req: Request, res: Response): Promise<void> => {
+router.get('/branch/:branchId/management', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { branchId } = req.params;
     const pSnap = await adminDb.collection('products').get();

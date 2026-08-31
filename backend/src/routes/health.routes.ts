@@ -51,86 +51,34 @@ router.get(['/health', '/health/liveness'], (req, res) => {
 
 // Version info
 router.get('/version', (req, res) => {
-  if (!cachedCommitHash) {
-    try {
-      cachedCommitHash = execSync('git rev-parse HEAD').toString().trim();
-    } catch {
-      cachedCommitHash = 'unknown';
-    }
-  }
-  if (!cachedBuildTimestamp) {
-    cachedBuildTimestamp = process.env.VITE_APP_BUILD_TIMESTAMP || new Date().toISOString();
-  }
-
   res.json({
     status: 'ok',
-    api_version: 'v2.1.0',
-    build_hash: process.env.VITE_APP_BUILD_HASH || cachedCommitHash,
-    git_commit: cachedCommitHash,
-    build_timestamp: cachedBuildTimestamp,
-    environment: process.env.NODE_ENV || 'production'
+    api_version: 'v2.1.0'
   });
 });
 
 /**
  * Readiness Probe:
- * CORE READY requires PostgreSQL + Firestore.
- * Subsystems (Supabase live navigation, Google Sheets) are reported independently
- * and do NOT fail the core backend readiness.
+ * Returns simple pass/fail status without exposing internal infrastructure topology or connection metrics.
  */
 router.get(['/ready', '/health/readiness'], async (req, res) => {
-  const pgHealth = await checkPostgresHealth();
-
-  let firestoreConnected = false;
-  let firestoreLatency = 0;
-  const fsStart = Date.now();
   try {
+    const pgHealth = await checkPostgresHealth();
+    let firestoreConnected = false;
+
     if (adminDb) {
-      // Light ping to Firestore
       await adminDb.collection('settings').limit(1).get();
       firestoreConnected = true;
-      firestoreLatency = Date.now() - fsStart;
     }
-  } catch {
-    firestoreConnected = false;
+
+    const isCoreReady = pgHealth.connected && firestoreConnected;
+
+    res.status(isCoreReady ? 200 : 503).json({
+      status: isCoreReady ? 'ready' : 'unready'
+    });
+  } catch (err: any) {
+    res.status(503).json({ status: 'unready' });
   }
-
-  // Non-blocking subsystem check (Supabase GPS navigation)
-  const supabaseHealth = await checkSupabaseHealth();
-
-  const isCoreReady = pgHealth.connected && firestoreConnected;
-
-  res.status(isCoreReady ? 200 : 503).json({
-    status: isCoreReady ? 'ready' : 'degraded',
-    core: {
-      ready: isCoreReady,
-      postgres: {
-        status: pgHealth.connected ? 'connected' : 'disconnected',
-        latencyMs: pgHealth.latencyMs,
-        pool: pgHealth.poolStatus,
-      },
-      firestore: {
-        status: firestoreConnected ? 'connected' : 'disconnected',
-        latencyMs: firestoreLatency,
-      }
-    },
-    subsystems: {
-      supabaseNavigation: {
-        status: supabaseHealth.connected ? 'active' : 'degraded',
-        latencyMs: supabaseHealth.latencyMs,
-        role: 'live_gps_telemetry_only',
-      },
-      googleSheets: {
-        status: process.env.GOOGLE_SHEET_SPREADSHEET_ID ? 'configured' : 'optional',
-        role: 'asynchronous_monthly_reporting',
-      },
-      lookerStudio: {
-        status: 'active_downstream',
-        role: 'business_analytics',
-      }
-    },
-    timestamp: new Date().toISOString(),
-  });
 });
 
 // Admin metrics endpoint

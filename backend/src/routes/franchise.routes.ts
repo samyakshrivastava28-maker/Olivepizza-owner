@@ -236,7 +236,7 @@ async function ensureFranchiseDefaults() {
 }
 
 // ─── 1. LIST ALL FRANCHISES (FOR GLOBAL OWNER OR FRANCHISE OWNER) ───────────
-router.get('/list', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/list', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await ensureFranchiseDefaults();
     const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
@@ -291,7 +291,7 @@ router.get('/list', async (req: AuthRequest, res: Response): Promise<void> => {
 });
 
 // ─── 2. RESOLVE FRANCHISE BY SLUG (AUTHORITATIVE SERVER SCOPING) ───────────
-router.get('/by-slug/:slug', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/by-slug/:slug', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await ensureFranchiseDefaults();
     const { slug } = req.params;
@@ -339,7 +339,7 @@ router.get('/by-slug/:slug', async (req: AuthRequest, res: Response): Promise<vo
 });
 
 // ─── 3. FRANCHISE DASHBOARD METRICS ─────────────────────────────────────────
-router.get('/:id/dashboard', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/dashboard', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const branchFilter = req.query.branchId as string;
@@ -457,7 +457,7 @@ router.get('/:id/dashboard', async (req: AuthRequest, res: Response): Promise<vo
 });
 
 // ─── 4. FRANCHISE-SCOPED BRANCHES (GET / POST / PATCH) ───────────────────────
-router.get('/:id/branches', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/branches', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const bSnap = await adminDb.collection('franchises').get();
@@ -533,7 +533,7 @@ router.post('/:id/branches', requireRole(['owner', 'admin', 'developer', 'platfo
 });
 
 // ─── 5. RESTAURANT MANAGERS SCOPED TO FRANCHISE ─────────────────────────────
-router.get('/:id/managers', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const bSnap = await adminDb.collection('franchises').get();
@@ -622,7 +622,7 @@ router.post('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platfo
 });
 
 // ─── 6. DELIVERY PARTNERS SCOPED TO FRANCHISE ───────────────────────────────
-router.get('/:id/riders', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const riderSnap = await adminDb.collection('delivery_partners').get();
@@ -719,7 +719,7 @@ router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform
 });
 
 // ─── 7. POS TERMINAL MANAGEMENT (REGISTER / GENERATE CODE / REVOKE) ────────
-router.get('/:id/pos-terminals', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/pos-terminals', requireRole(['owner', 'admin', 'developer', 'franchise_owner', 'manager', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const bSnap = await adminDb.collection('franchises').get();
@@ -730,45 +730,12 @@ router.get('/:id/pos-terminals', async (req: AuthRequest, res: Response): Promis
 
     const posSnap = await adminDb.collection('pos_terminals').get();
     let terminals: any[] = posSnap.docs
-      .map(d => ({ id: d.id, ...(d.data() as any) }))
+      .map(d => {
+        const data = d.data() as any;
+        const { activationCode, ...safeData } = data;
+        return { id: d.id, ...safeData };
+      })
       .filter(t => t.franchiseId === id || branchIds.includes(t.branchId));
-
-    if (terminals.length === 0) {
-      terminals = [
-        {
-          id: `pos_${branchIds[0] || 'main_branch'}_1`,
-          terminalName: 'Front Billing Counter 1',
-          organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
-          franchiseId: id,
-          branchId: branchIds[0] || 'main_branch',
-          branchName: 'Main Restaurant',
-          activationCode: '741852',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: true,
-          lastHeartbeat: new Date().toISOString(),
-          lastSync: new Date().toISOString(),
-          appVersion: '1.4.0-pos',
-          createdAt: new Date().toISOString()
-        },
-        {
-          id: `pos_${branchIds[0] || 'main_branch'}_2`,
-          terminalName: 'Express Takeaway Counter 2',
-          organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
-          franchiseId: id,
-          branchId: branchIds[0] || 'main_branch',
-          branchName: 'Main Restaurant',
-          activationCode: '963258',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: true,
-          lastHeartbeat: new Date().toISOString(),
-          lastSync: new Date().toISOString(),
-          appVersion: '1.4.0-pos',
-          createdAt: new Date().toISOString()
-        }
-      ];
-    }
 
     res.json({ success: true, franchiseId: id, terminals });
   } catch (error: any) {
@@ -854,7 +821,7 @@ router.post('/:id/pos-terminals/:termId/revoke', requireRole(['owner', 'admin', 
 });
 
 // ─── 8. LIVE & HISTORICAL ORDERS FOR THIS FRANCHISE ─────────────────────────
-router.get('/:id/orders/live', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/orders/live', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const bSnap = await adminDb.collection('franchises').get();
@@ -881,7 +848,7 @@ router.get('/:id/orders/live', async (req: AuthRequest, res: Response): Promise<
 });
 
 // ─── 9. FRANCHISE REPORTS & MONTHLY ACCOUNTING ──────────────────────────────
-router.get('/:id/reports', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/reports', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
@@ -917,7 +884,7 @@ router.get('/:id/reports', async (req: AuthRequest, res: Response): Promise<void
 });
 
 // ─── 10. FRANCHISE AUDIT LOGS ───────────────────────────────────────────────
-router.get('/:id/audit-logs', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/audit-logs', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const snap = await adminDb.collection('franchise_audit_logs').limit(50).get().catch(() => ({ docs: [] } as any));
@@ -1343,7 +1310,7 @@ router.patch('/:id/permissions', requireRole(['owner', 'admin', 'developer', 'pl
 
 
 // ─── 16. OWNER ACCESS ACCOUNTS LISTING (GET /:id/access-accounts) ─────────────
-router.get('/:id/access-accounts', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/access-accounts', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
 
@@ -1853,7 +1820,7 @@ router.post('/pos/owner-context/switch', requireRole(['owner', 'admin', 'develop
 
 
 // ─── ALIAS ROUTE: /:id/telemetry (Maps to franchise dashboard telemetry) ───
-router.get('/:id/telemetry', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/telemetry', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     res.json({
@@ -1878,7 +1845,7 @@ router.get('/:id/telemetry', async (req: AuthRequest, res: Response): Promise<vo
 });
 
 // ─── ALIAS ROUTE: /:id/restaurants (Maps to /:id/branches) ───
-router.get('/:id/restaurants', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/restaurants', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const bSnap = await adminDb.collection('franchises').get();
@@ -1918,7 +1885,7 @@ router.get('/:id/restaurants', async (req: AuthRequest, res: Response): Promise<
 });
 
 // ─── ALIAS ROUTE: /:id/live-orders (Maps to /:id/orders/live) ───
-router.get('/:id/live-orders', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/live-orders', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const orderSnap = await adminDb.collection('orders').limit(100).get().catch(() => ({ docs: [] } as any));
@@ -1984,7 +1951,7 @@ router.get('/:id/live-orders', async (req: AuthRequest, res: Response): Promise<
 // ============================================================================
 
 // GET /api/franchises/:id/sheets-status — Get dedicated Google Spreadsheet status for this franchise
-router.get('/:id/sheets-status', async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/sheets-status', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const status = await FranchiseGoogleSheetsService.getFranchiseSheetsStatus(id);

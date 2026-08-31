@@ -47,20 +47,10 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
 
   const token = authHeader.split('Bearer ')[1];
   try {
-    let decodedToken: any;
-    const isProd = process.env.NODE_ENV === 'production';
-    if (!isProd && (token.startsWith('test-') || token.startsWith('dev-'))) {
-      const isCashier = token.includes('cashier');
-      const isManager = token.includes('manager');
-      const isRider = token.includes('rider');
-      decodedToken = {
-        uid: isCashier ? 'test_cashier_uid' : (isManager ? 'test_manager_uid' : 'test_owner_uid'),
-        email: isCashier ? 'cashier.test@olivepizza.in' : (isManager ? 'manager.test@olivepizza.in' : (isRider ? 'rider.test@olivepizza.in' : 'olivepizzarjn@gmail.com')),
-        role: isCashier ? 'cashier' : (isManager ? 'restaurant_manager' : (isRider ? 'delivery_partner' : 'owner'))
-      };
-    } else {
-      decodedToken = await adminAuth.verifyIdToken(token);
-    }
+    // SECURITY: Always verify through Firebase Admin SDK.
+    // No test-token or dev-token bypass exists in any environment.
+    // Use the Firebase Emulator (FIREBASE_AUTH_EMULATOR_HOST) for local testing.
+    const decodedToken: any = await adminAuth.verifyIdToken(token);
     const uid = decodedToken.uid;
     
     let role = (decodedToken.role as string) || 'customer';

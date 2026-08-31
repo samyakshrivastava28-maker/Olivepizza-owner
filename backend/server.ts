@@ -1,3 +1,5 @@
+import { OrderArchiveIndexer } from './src/services/order-history/OrderArchiveIndexer.js';
+import { ZillizOrderRepository } from './src/services/order-history/ZillizOrderRepository.js';
 import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -37,7 +39,7 @@ validateEnvironmentVariables();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.get('/health', (req, res) => {
+app.get(['/health', '/api/health', '/api/health/ping', '/ping'], (req, res) => {
   res.json({
     status: 'ok',
     uptime: process.uptime(),
@@ -124,6 +126,8 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
 
     pineconeService.getStatus().catch((err: any) => console.warn('[Pinecone] Non-fatal init error:', err.message));
     FirestoreListener.init();
+    OrderArchiveIndexer.initialize();
+    ZillizOrderRepository.initialize().catch((err: any) => console.warn('[Zilliz] Init warning:', err.message));
   })();
 });
 

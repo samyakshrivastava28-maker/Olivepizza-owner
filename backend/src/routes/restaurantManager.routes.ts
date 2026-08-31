@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import crypto from 'crypto';
 import { adminDb, adminAuth } from '../config/firebase.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 
@@ -184,9 +185,10 @@ router.post('/', requireRole(['owner', 'admin', 'developer']), async (req: AuthR
       }).catch(() => {});
     } catch (err: any) {
       if (err.code === 'auth/user-not-found') {
+        const secureRandomPassword = password || `${crypto.randomBytes(12).toString('base64url')}!OP9`;
         const createPayload: any = {
           email: normalizedEmail,
-          password: password || 'OlivePizza@2026',
+          password: secureRandomPassword,
           displayName: name.trim()
         };
         if (validE164Phone) {

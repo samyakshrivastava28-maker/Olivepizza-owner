@@ -102,12 +102,21 @@ async function logAudit(
 // PROTECTED ROUTES: Require authentication + manager, owner, or admin role
 // ============================================================================
 router.use(verifyToken);
-router.use(requireRole(['owner', 'admin', 'manager', 'developer']));
+router.use(requireRole(['owner', 'admin', 'manager', 'restaurant_manager', 'developer', 'platform_owner']));
+
+function resolveBranchId(req: AuthRequest, bodyBranchId?: string, queryBranchId?: string): string {
+  const userRole = req.user?.role || '';
+  const isGlobal = ['owner', 'admin', 'developer', 'platform_owner'].includes(userRole);
+  if (isGlobal) {
+    return bodyBranchId || queryBranchId || (req.user as any)?.branchId || 'main_branch';
+  }
+  return (req.user as any)?.branchId || (req.user as any)?.scope?.branchId || 'main_branch';
+}
 
 // 1. UPDATE OPERATIONAL STATUS (Open/Close, Accepting Orders, Reason)
 router.put('/status', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.body.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, req.body.branchId);
     const { isOpen, acceptingOrders, closeReason, currentPrepTime } = req.body;
     
     const docRef = adminDb.collection('restaurant_settings').doc(branchId);
@@ -148,7 +157,7 @@ router.put('/status', async (req: AuthRequest, res: Response) => {
 // 2. RESTAURANT PROFILE (Profile info, Address, Location, Contact)
 router.get('/profile', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.query.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, undefined, req.query.branchId as string);
     const snap = await adminDb.collection('restaurant_profiles').doc(branchId).get();
     
     if (!snap.exists) {
@@ -182,9 +191,10 @@ router.get('/profile', async (req: AuthRequest, res: Response) => {
 
 router.put('/profile', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.body.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, req.body.branchId);
     const profileData = {
       ...req.body,
+      branchId,
       updatedAt: new Date().toISOString(),
       updatedBy: req.user?.uid || 'manager'
     };
@@ -210,7 +220,7 @@ router.put('/profile', async (req: AuthRequest, res: Response) => {
 // 3. OPERATING HOURS
 router.put('/hours', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.body.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, req.body.branchId);
     const { operatingHours } = req.body;
     
     if (!operatingHours) {
@@ -242,7 +252,7 @@ router.put('/hours', async (req: AuthRequest, res: Response) => {
 // 4. SPECIAL / HOLIDAY HOURS
 router.post('/special-hours', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.body.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, req.body.branchId);
     const { date, name, isClosed, openTime, closeTime } = req.body;
 
     const specialEntry = {
@@ -281,7 +291,7 @@ router.post('/special-hours', async (req: AuthRequest, res: Response) => {
 
 router.delete('/special-hours/:id', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.query.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, undefined, req.query.branchId as string);
     const docRef = adminDb.collection('restaurant_settings').doc(branchId);
     const snap = await docRef.get();
     const existing = snap.data()?.specialHours || [];
@@ -298,7 +308,7 @@ router.delete('/special-hours/:id', async (req: AuthRequest, res: Response) => {
 // 5. SERVICE AVAILABILITY (Delivery, Takeaway, Dine-In)
 router.put('/services', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.body.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, req.body.branchId);
     const { services, currentPrepTime } = req.body;
 
     const updates: Record<string, any> = {
@@ -330,7 +340,7 @@ router.put('/services', async (req: AuthRequest, res: Response) => {
 // 6. DELIVERY SETTINGS
 router.put('/delivery-settings', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.body.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, req.body.branchId);
     const { deliverySettings } = req.body;
 
     if (!deliverySettings) return res.status(400).json({ success: false, error: 'deliverySettings required' });
@@ -360,7 +370,7 @@ router.put('/delivery-settings', async (req: AuthRequest, res: Response) => {
 // 7. PAYMENT SETTINGS
 router.put('/payment-settings', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.body.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, req.body.branchId);
     const { paymentSettings } = req.body;
 
     if (!paymentSettings) return res.status(400).json({ success: false, error: 'paymentSettings required' });
@@ -390,7 +400,7 @@ router.put('/payment-settings', async (req: AuthRequest, res: Response) => {
 // 8. TAX & CHARGES
 router.put('/tax-charges', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.body.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, req.body.branchId);
     const { taxAndCharges } = req.body;
 
     if (!taxAndCharges) return res.status(400).json({ success: false, error: 'taxAndCharges required' });
@@ -420,7 +430,7 @@ router.put('/tax-charges', async (req: AuthRequest, res: Response) => {
 // 9. STAFF & ROLES DIRECTORY
 router.get('/staff', async (req: AuthRequest, res: Response) => {
   try {
-    const branchId = (req.query.branchId as string) || 'main_branch';
+    const branchId = resolveBranchId(req, undefined, req.query.branchId as string);
     const snap = await adminDb.collection('users')
       .where('role', 'in', ['owner', 'admin', 'manager', 'kitchen', 'cashier', 'delivery', 'staff'])
       .get()
@@ -447,10 +457,54 @@ router.get('/staff', async (req: AuthRequest, res: Response) => {
   }
 });
 
-router.put('/staff/:id/role', async (req: AuthRequest, res: Response) => {
+const VALID_ROLES = ['customer', 'delivery_partner', 'cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'];
+const MANAGER_ASSIGNABLE_ROLES = ['cashier', 'kitchen_staff'];
+const FRANCHISE_ASSIGNABLE_ROLES = ['cashier', 'kitchen_staff', 'restaurant_manager', 'delivery_partner'];
+
+router.put('/staff/:id/role', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { role, isActive, branchId } = req.body;
     const targetUid = req.params.id;
+    const caller = req.user;
+
+    if (!caller) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const callerRole = (caller.role || '').toLowerCase();
+    const isGlobalOwner = caller.scope?.isGlobalOwner || callerRole === 'owner' || callerRole === 'admin';
+    const isFranchiseOwner = callerRole === 'franchise_owner';
+    const isManager = callerRole === 'restaurant_manager' || callerRole === 'manager';
+
+    if (role) {
+      if (!VALID_ROLES.includes(role)) {
+        res.status(400).json({ success: false, error: `Invalid role '${role}'. Allowed roles: ${VALID_ROLES.join(', ')}` });
+        return;
+      }
+
+      // Hierarchy validation
+      if (!isGlobalOwner) {
+        if (isFranchiseOwner && !FRANCHISE_ASSIGNABLE_ROLES.includes(role)) {
+          res.status(403).json({ success: false, error: `Franchise owners can only assign: ${FRANCHISE_ASSIGNABLE_ROLES.join(', ')}` });
+          return;
+        }
+        if (isManager && !MANAGER_ASSIGNABLE_ROLES.includes(role)) {
+          res.status(403).json({ success: false, error: `Restaurant managers can only assign: ${MANAGER_ASSIGNABLE_ROLES.join(', ')}` });
+          return;
+        }
+        if (!isFranchiseOwner && !isManager) {
+          res.status(403).json({ success: false, error: 'Forbidden: Insufficient privileges to change roles' });
+          return;
+        }
+      }
+
+      // Prevent self-role modification for non-global-owners
+      if (!isGlobalOwner && caller.uid === targetUid) {
+        res.status(403).json({ success: false, error: 'Cannot modify your own role' });
+        return;
+      }
+    }
 
     const updates: Record<string, any> = { updatedAt: new Date().toISOString() };
     if (role) updates.role = role;
@@ -464,9 +518,9 @@ router.put('/staff/:id/role', async (req: AuthRequest, res: Response) => {
     }
 
     await logAudit(
-      branchId || 'main_branch',
-      req.user?.uid || 'manager',
-      req.user?.email || 'manager',
+      branchId || caller.branchId || 'main_branch',
+      caller.uid,
+      caller.email || 'staff',
       'STAFF_ROLE_CHANGE',
       'role',
       null,

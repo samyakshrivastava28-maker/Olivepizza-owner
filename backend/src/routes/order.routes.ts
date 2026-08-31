@@ -2,7 +2,7 @@ import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { Router, Request, Response } from 'express';
 import { query } from '../lib/db.js';
-import { verifyToken, AuthRequest } from '../middleware/auth.middleware.js';
+import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { adminDb } from '../config/firebase.js';
 import { OwnerTemplates, CustomerTemplates, RestaurantTemplates } from '../services/notification/NotificationTemplates.js';
 
@@ -147,8 +147,8 @@ router.get('/', verifyToken, async (req: AuthRequest, res: Response): Promise<vo
   }
 });
 
-// 2. GET /live - Dedicated live orders endpoint for Restaurant Managers & KDS
-router.get('/live', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+// 2. GET /live - Dedicated live orders endpoint for Restaurant Managers & KDS (Staff/Owner only)
+router.get('/live', verifyToken, requireRole(['restaurant_manager', 'owner', 'kitchen_staff', 'cashier', 'manager', 'admin', 'franchise_owner', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user;
     if (!user) {
@@ -518,7 +518,15 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     // Human-readable daily number (#14) or fallback OP-XXXXXX
     const orderNumber = dailyOrderNumber > 0 ? '#' + dailyOrderNumber : 'OP-' + shortId;
 
-    const resolvedBranchId = req.body.session?.branchId || req.body.branchId || (req.headers['x-branch-id'] as string) || 'main_branch';
+    const userRole = req.user?.role || 'customer';
+    const isStaff = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(userRole);
+
+    // Enforce server-side scope derivation: Never trust client-supplied branchId/franchiseId/terminalId
+    const resolvedBranchId = isStaff ? (req.user?.branchId || 'main_branch') : 'main_branch';
+    const resolvedFranchiseId = isStaff ? (req.user?.franchiseId || 'fra_primary') : 'fra_primary';
+    const resolvedOrgId = isStaff ? (req.user?.organizationId || 'org_olive_pizza') : 'org_olive_pizza';
+    const resolvedTerminalId = isStaff ? (req.user?.terminalId || null) : null;
+    const resolvedCashierName = isStaff ? ((req.user as any)?.name || req.user?.email || null) : null;
 
     try {
       await adminDb.collection('orders').doc(newOrderId).set({
@@ -556,14 +564,14 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         scheduledFor: scheduledFor || null,
         appliedCouponCode: appliedCouponCode || null,
         couponRejectReason: couponRejectReason || null,
-        // POS & Multi-Tenant Terminal Metadata
+        // POS & Multi-Tenant Terminal Metadata (Server-derived)
         tableNumber: req.body.tableNumber || null,
-        cashierName: req.body.session?.cashierName || req.body.cashierName || null,
-        terminalId: req.body.session?.terminalId || req.body.terminalId || (req.headers['x-terminal-id'] as string) || null,
+        cashierName: resolvedCashierName,
+        terminalId: resolvedTerminalId,
         branchId: resolvedBranchId,
-        branchName: req.body.session?.branchName || req.body.branchName || 'Olive Pizza — Rajnandgaon HQ',
-        franchiseId: req.body.session?.franchiseId || req.body.franchiseId || 'fra_primary',
-        organizationId: req.body.session?.organizationId || req.body.organizationId || 'org_olive_pizza',
+        branchName: 'Olive Pizza — Rajnandgaon HQ',
+        franchiseId: resolvedFranchiseId,
+        organizationId: resolvedOrgId,
         paymentDetails: req.body.paymentDetails || null,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -702,13 +710,13 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
   }
 });
 
-// Universal Order Status Update (Owner, Admin, Delivery Partner)
-router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+// Universal Order Status Update (Staff, Delivery Partner, Owner, Admin only)
+router.all(['/:id/status'], verifyToken, requireRole(['owner', 'admin', 'restaurant_manager', 'manager', 'kitchen_staff', 'cashier', 'delivery_partner', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const { status, cancellationReason, deliveryPartnerId, deliveryPartnerName, deliveryPartnerPhone } = req.body;
-    const uid = req.user?.uid || 'system';
-    const role = req.user?.role || 'restaurant_manager';
+    const uid = req.user!.uid;
+    const role = req.user!.role || 'staff';
     const name = (req.user as any)?.name || (req.user as any)?.displayName || req.user?.email || 'Staff';
 
     if (!status) {
@@ -1012,6 +1020,14 @@ router.post('/:id/reorder', verifyToken, async (req: AuthRequest, res: Response)
     }
 
     const oldOrder = snap.data()!;
+    const isOwnerOrStaff = ['owner', 'admin', 'restaurant_manager', 'franchise_owner', 'cashier', 'kitchen_staff', 'developer', 'platform_owner'].includes(req.user?.role || '');
+    const isCustomerOwner = (oldOrder.userId === userId || oldOrder.customerUid === userId);
+
+    if (!isOwnerOrStaff && !isCustomerOwner) {
+      res.status(403).json({ error: 'Access denied: You can only reorder your own orders' });
+      return;
+    }
+
     const items = oldOrder.items || [];
     if (!items || items.length === 0) {
       res.status(400).json({ error: 'No items in original order to reorder' });

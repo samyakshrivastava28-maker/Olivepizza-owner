@@ -38,6 +38,18 @@ router.use(verifyToken);
 router.get('/orders/:id/location', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
+    const user = req.user!;
+    const isStaff = ['owner', 'admin', 'restaurant_manager', 'delivery', 'delivery_partner', 'developer', 'platform_owner'].includes(user.role || '');
+
+    const orderDoc = await adminDb.collection('orders').doc(id).get();
+    if (orderDoc.exists) {
+      const orderData = orderDoc.data()!;
+      if (!isStaff && orderData.userId && orderData.userId !== user.uid) {
+        res.status(403).json({ error: 'Access denied: You do not have permission to track this order' });
+        return;
+      }
+    }
+
     const doc = await adminDb.collection('active_deliveries').doc(id).get();
     
     if (!doc.exists) {
