@@ -282,14 +282,35 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
         ]
       };
 
-      const response = await axios.post(
-        `${baseUrl}/sms/2/text/advanced`,
-        smsPayload,
-        {
-          headers: this.getAuthHeaders(),
-          timeout: 10000
-        }
-      );
+      let response;
+      try {
+        response = await axios.post(
+          `${baseUrl}/sms/2/text/advanced`,
+          smsPayload,
+          {
+            headers: this.getAuthHeaders(),
+            timeout: 10000
+          }
+        );
+      } catch (postErr: any) {
+        // Fallback for trial accounts where custom alphanumeric sender might not be registered
+        console.warn('[Infobip] Notice: Custom sender rejected, retrying with default shared pool sender...');
+        response = await axios.post(
+          `${baseUrl}/sms/2/text/advanced`,
+          {
+            messages: [
+              {
+                destinations: [{ to: infobipDestination }],
+                text: `Your Olive Pizza verification code is: ${otpCode}. Valid for 10 minutes. Do not share this OTP with anyone.`
+              }
+            ]
+          },
+          {
+            headers: this.getAuthHeaders(),
+            timeout: 10000
+          }
+        );
+      }
 
       const msgStatus = response.data?.messages?.[0]?.status?.groupName;
       console.log(`[Infobip] ✅ SMS response status: ${msgStatus || 'SENT'}`);
