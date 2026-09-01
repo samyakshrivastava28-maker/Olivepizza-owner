@@ -20,7 +20,7 @@ async function runTests() {
     }
   }
 
-  const provider = new InfobipPhoneVerificationProvider();
+  const provider = new InfobipPhoneVerificationProvider(true);
 
   // Test 1: Phone Normalization
   console.log('--- 1. Phone Normalization Tests ---');
@@ -90,6 +90,7 @@ async function runTests() {
   if (failed > 0) {
     process.exit(1);
   }
+  process.exit(0);
 }
 
 runTests().catch(err => {

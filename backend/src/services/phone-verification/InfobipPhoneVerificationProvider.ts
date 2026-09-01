@@ -21,14 +21,16 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
   private applicationId?: string;
   private messageId?: string;
   private senderId: string;
+  private isMock: boolean;
   private inMemoryCache: Map<string, CachedVerification> = new Map();
 
-  constructor() {
+  constructor(isMock: boolean = false) {
     this.apiKey = process.env.INFOBIP_API_KEY || '';
     this.rawBaseUrl = process.env.INFOBIP_BASE_URL || 'api.infobip.com';
     this.applicationId = process.env.INFOBIP_2FA_APPLICATION_ID || undefined;
     this.messageId = process.env.INFOBIP_2FA_MESSAGE_ID || undefined;
     this.senderId = process.env.INFOBIP_SENDER_ID || 'OlivePizza';
+    this.isMock = isMock;
 
     // Periodic cleanup for in-memory cache
     setInterval(() => {
@@ -170,10 +172,14 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
     }
 
     // 2. Dispatch via Infobip 2FA API or Infobip SMS API
-    const isConfigured = Boolean(this.apiKey && this.apiKey.length > 5);
+    const isConfigured = !this.isMock && Boolean(this.apiKey && this.apiKey.length > 5);
 
     if (!isConfigured) {
-      console.warn('[InfobipProvider] ⚠️ INFOBIP_API_KEY is not set. Simulating sandbox OTP for development.');
+      if (this.isMock) {
+        console.log('[InfobipProvider] 🧪 Mock / Unit Test Mode: Simulating secure sandbox OTP without consuming API quota.');
+      } else {
+        console.warn('[InfobipProvider] ⚠️ INFOBIP_API_KEY is not set. Simulating sandbox OTP for development.');
+      }
       const testOtp = '123456';
       const salt = crypto.randomBytes(8).toString('hex');
       const hashedOtp = crypto.createHash('sha256').update(`${testOtp}:${salt}`).digest('hex');
