@@ -432,9 +432,8 @@ router.post('/sms/test', async (req: DevRequest, res: Response) => {
   try {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ success: false, error: 'Phone number is required' });
-    const { Fast2SMSProvider } = await import('../services/phone-verification/Fast2SMSProvider.js');
-    const fast2sms = new Fast2SMSProvider();
-    const result = await fast2sms.sendOtp(phone, 'devops-test-runner');
+    const { phoneVerificationService } = await import('../services/phone-verification/PhoneVerificationService.js');
+    const result = await phoneVerificationService.sendOtp(phone, 'devops-test-runner');
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });

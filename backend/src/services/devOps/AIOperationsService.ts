@@ -222,14 +222,14 @@ class AIOperationsStore {
     const llmOnline = aiProviderStats.nvidia.ok || aiProviderStats.openrouter.ok || aiProviderStats.gemini.ok || aiProviderStats.activeProvider !== 'none';
     const sttOnline = true; // Whisper / Canary route active
     const ttsOnline = true; // Multilingual TTS / WebSpeech active
-    const fast2smsOnline = Boolean(process.env.FAST2SMS_API_KEY && process.env.FAST2SMS_API_KEY.length > 5);
+    const infobipOnline = Boolean(process.env.INFOBIP_API_KEY && process.env.INFOBIP_API_KEY.length > 5);
 
     return {
       stt: { status: sttOnline ? 'GREEN' : 'RED', label: 'ASR Transcription Engine (Canary/Whisper)' },
       llm: { status: llmOnline ? 'GREEN' : 'YELLOW', label: 'LLM Multi-Provider Failover Engine', activeProvider: aiProviderStats.activeProvider },
       pinecone: { status: pineconeOnline ? 'GREEN' : 'RED', label: 'Pinecone Vector Database', indexName: PINECONE_INDEX_NAME, ...pineconeDetails },
       tts: { status: ttsOnline ? 'GREEN' : 'RED', label: 'NVIDIA Chatterbox & WebSpeech TTS' },
-      sms: { status: fast2smsOnline ? 'GREEN' : 'YELLOW', label: 'Fast2SMS Production OTP Gateway', configured: fast2smsOnline },
+      sms: { status: infobipOnline ? 'GREEN' : 'YELLOW', label: 'Infobip 2FA & SMS OTP Gateway', configured: infobipOnline },
       imageGen: { status: 'GREEN', label: 'AI Image Engine (FLUX / Pollinations / Cloudinary)' }
     };
   }

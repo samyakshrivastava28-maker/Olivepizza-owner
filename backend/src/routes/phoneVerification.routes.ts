@@ -1,12 +1,10 @@
 import express, { Request, Response } from 'express';
 import { adminDb, adminAuth } from '../config/firebase.js';
-import { Fast2SMSProvider } from '../services/phone-verification/Fast2SMSProvider.js';
-import { TruecallerProvider } from '../services/phone-verification/TruecallerProvider.js';
+import { phoneVerificationService } from '../services/phone-verification/PhoneVerificationService.js';
 import { authLimiter } from '../config/security.config.js';
 
 const router = express.Router();
-const fast2sms = new Fast2SMSProvider();
-export const truecaller = new TruecallerProvider();
+const truecaller = phoneVerificationService.getTruecallerProvider();
 
 // Authentication Middleware with fallback to body/header UID
 const authenticateUser = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -85,12 +83,13 @@ router.post('/send-otp', authLimiter, async (req: Request, res: Response) => {
   try {
     const { phoneNumber } = req.body;
     const uid = (req as any).user?.uid || req.body?.userId || 'anonymous';
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
 
     if (!phoneNumber) {
       return res.status(400).json({ success: false, error: 'Phone number is required.' });
     }
 
-    const result = await fast2sms.sendOtp(phoneNumber, uid);
+    const result = await phoneVerificationService.sendOtp(phoneNumber, uid, clientIp);
     if (!result.success) {
       return res.status(400).json(result);
     }
@@ -104,14 +103,14 @@ router.post('/send-otp', authLimiter, async (req: Request, res: Response) => {
 
 router.post('/verify-otp', authLimiter, async (req: Request, res: Response) => {
   try {
-    const { phoneNumber, otp, userId } = req.body;
+    const { phoneNumber, otp, pinId, userId } = req.body;
     const uid = userId || (req as any).user?.uid;
 
     if (!phoneNumber || !otp) {
       return res.status(400).json({ success: false, error: 'Phone number and OTP code are required.' });
     }
 
-    const result = await fast2sms.verifyOtp(phoneNumber, otp, uid);
+    const result = await phoneVerificationService.verifyOtp(phoneNumber, otp, uid, pinId);
     
     if (!result.success) {
       return res.status(400).json(result);
@@ -123,8 +122,8 @@ router.post('/verify-otp', authLimiter, async (req: Request, res: Response) => {
         await userRef.set({
           phone: result.phone,
           phoneVerified: true,
-          verificationMethod: result.provider || 'fast2sms',
-          verifiedAt: Date.now(),
+          verificationMethod: result.provider || 'infobip',
+          verifiedAt: result.verifiedAt || Date.now(),
           phoneSetupCompleted: true
         }, { merge: true });
         
@@ -150,7 +149,6 @@ router.post('/truecaller', authLimiter, async (req: Request, res: Response) => {
   const uid = (req as any).user?.uid;
   
   try {
-    // If request has structured payload or requestId
     const verifyInput = payload ? (typeof payload === 'string' && signature ? { payload, signature, signatureAlgorithm } : payload) : { requestId };
     const result = await truecaller.verifyProfile(verifyInput, uid, expectedPhone);
     
@@ -185,14 +183,12 @@ router.post('/truecaller', authLimiter, async (req: Request, res: Response) => {
 });
 
 router.get('/status', async (_req: Request, res: Response) => {
-  const hasKey = Boolean(process.env.FAST2SMS_API_KEY && process.env.FAST2SMS_API_KEY.length > 5);
-  const authMode = process.env.PHONE_AUTH_MODE || 'development';
+  const health = await phoneVerificationService.getHealthStatus();
   res.json({
     success: true,
-    service: 'Fast2SMS Production OTP Service & Truecaller SDK',
-    configured: hasKey,
-    truecallerConfigured: true,
-    mode: authMode.toUpperCase()
+    service: 'Infobip 2FA OTP & Truecaller Verification Service',
+    infobip: health.infobip,
+    truecaller: health.truecaller
   });
 });
 
