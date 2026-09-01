@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 54" width="320" height="54" fill="none">
+  <defs>
+    <linearGradient id="op-bg-full" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="op-crust-full" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+    <linearGradient id="op-cheese-full" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047"/>
+      <stop offset="100%" stop-color="#EAB308"/>
+    </linearGradient>
+    <linearGradient id="op-olive-full" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#65A30D"/>
+      <stop offset="100%" stop-color="#3F6212"/>
+    </linearGradient>
+    <linearGradient id="op-pep-full" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#EA580C"/>
+      <stop offset="100%" stop-color="#C2410C"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Symbol Icon (48x48) -->
+  <g transform="translate(3, 3)">
+    <rect width="48" height="48" rx="12" fill="url(#op-bg-full)" stroke="#334155" stroke-width="1.5"/>
+    <path d="M10 16 C18 10, 30 10, 38 16 L35 20 C28 15, 20 15, 13 20 Z" fill="url(#op-crust-full)"/>
+    <path d="M12.5 19.5 C20 14.5, 28 14.5, 35.5 19.5 L24 40 Z" fill="url(#op-cheese-full)"/>
+    <circle cx="21" cy="23" r="3" fill="url(#op-pep-full)"/>
+    <circle cx="28" cy="27" r="2.6" fill="url(#op-pep-full)"/>
+    <circle cx="23" cy="32" r="2" fill="url(#op-pep-full)"/>
+    <ellipse cx="28" cy="19.5" rx="3.2" ry="2.5" fill="url(#op-olive-full)" stroke="#166534" stroke-width="0.8"/>
+    <circle cx="28" cy="19.5" r="1" fill="#DC2626"/>
+    <ellipse cx="17" cy="27.5" rx="2.8" ry="2.2" fill="url(#op-olive-full)" stroke="#166534" stroke-width="0.8"/>
+    <circle cx="17" cy="27.5" r="0.9" fill="#DC2626"/>
+  </g>
+
+  <!-- Typography: Master Brand -->
+  <text x="62" y="24" font-family="system-ui, -apple-system, sans-serif" font-size="17" font-weight="900" fill="#FFFFFF" letter-spacing="0.5">OLIVE PIZZA</text>
+
+  <!-- Secondary Designation Badge / Subtitle -->
+  <g transform="translate(62, 30)">
+    <rect width="250" height="18" rx="4" fill="rgba(249, 115, 22, 0.15)" stroke="rgba(249, 115, 22, 0.35)" stroke-width="1"/>
+    <text x="7" y="13" font-family="system-ui, -apple-system, sans-serif" font-size="10.5" font-weight="800" fill="#FB923C" letter-spacing="0.8">DELIVERY PARTNER FLEET</text>
+  </g>
+</svg>

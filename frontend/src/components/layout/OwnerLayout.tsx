@@ -23,10 +23,13 @@ import {
   Store,
   Users,
   Building2,
+  Settings,
+  Shield,
   LayoutTemplate,
   X,
   Menu,
 } from 'lucide-react';
+import { AppLogo } from '../common/AppLogo';
 
 export const OwnerLayout: React.FC = () => {
   const user = useAuthStore((s) => s.user);
@@ -93,20 +96,14 @@ export const OwnerLayout: React.FC = () => {
         }`}
       >
         {/* Brand Header */}
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-2.5 overflow-hidden">
-            <div className="w-8 h-8 rounded-xl bg-orange-500/10 border border-orange-500/20 text-orange-400 flex items-center justify-center font-bold text-sm shrink-0">
-              ðŸ•
+        <div className="p-4 border-b border-slate-800 flex items-center justify-between min-h-[64px]">
+          {isSidebarCollapsed ? (
+            <div className="mx-auto">
+              <AppLogo variant="icon" size="sm" />
             </div>
-            {!isSidebarCollapsed && (
-              <div>
-                <h1 className="text-sm font-extrabold text-white leading-tight">OLIVE PIZZA</h1>
-                <span className="text-[10px] font-black text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded border border-orange-500/30 uppercase tracking-wider">
-                  OWNER OPS
-                </span>
-              </div>
-            )}
-          </div>
+          ) : (
+            <AppLogo variant="full" size="md" subtitle="Owner Operations" />
+          )}
         </div>
 
         {/* Navigation Links */}

@@ -4,6 +4,7 @@ import { auth, googleProvider } from '../lib/firebase';
 import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, GoogleAuthProvider } from 'firebase/auth';
 import { useAuthStore, isAuthorizedOwnerEmail } from '../lib/store';
 import { Lock, Mail, AlertCircle, ArrowRight, ShieldCheck } from 'lucide-react';
+import { AppLogo } from '../components/common/AppLogo';
 import { Capacitor } from '@capacitor/core';
 import toast from 'react-hot-toast';
 
@@ -106,13 +107,9 @@ export default function Login() {
   return (
     <div className="min-h-screen bg-[#0B0F17] flex items-center justify-center p-4">
       <div className="w-full max-w-md bg-[#131B2B] border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl relative overflow-hidden">
-        <div className="text-center mb-6">
-          <div className="w-14 h-14 rounded-2xl bg-orange-500/10 border border-orange-500/20 text-orange-400 flex items-center justify-center mx-auto mb-3 text-2xl">
-            🍕
-          </div>
-          <h1 className="text-xl sm:text-2xl font-extrabold text-white">OLIVE PIZZA</h1>
-          <p className="text-xs font-bold text-orange-400 uppercase tracking-widest mt-0.5">Owner Management System</p>
-          <p className="text-xs text-slate-400 mt-2">Sign in to manage orders, catalog, fleet, and store operations.</p>
+        <div className="flex flex-col items-center text-center mb-6">
+          <AppLogo variant="full" size="xl" subtitle="Owner Control Operations" />
+          <p className="text-xs text-slate-400 mt-2 max-w-sm">Sign in to manage orders, catalog, fleet, and store operations.</p>
         </div>
 
         {error && (
