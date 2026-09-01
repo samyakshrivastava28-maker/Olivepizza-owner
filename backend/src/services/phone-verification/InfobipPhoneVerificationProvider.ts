@@ -186,7 +186,7 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
         salt,
         userId,
         createdAt: now,
-        expiresAt: now + 5 * 60 * 1000,
+        expiresAt: now + 10 * 60 * 1000,
         attempts: 0,
         verified: false
       };
@@ -200,9 +200,9 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
 
       return {
         success: true,
-        message: 'Verification OTP dispatched (Sandbox Mode)',
+        message: 'Verification OTP dispatched (valid for 10 minutes)',
         pinId: mockPinId,
-        expiresInSeconds: 300,
+        expiresInSeconds: 600,
         cooldownSeconds: 60,
         provider: 'infobip_sandbox'
       };
@@ -240,7 +240,7 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
           pinId,
           userId,
           createdAt: now,
-          expiresAt: now + 5 * 60 * 1000,
+          expiresAt: now + 10 * 60 * 1000,
           attempts: 0,
           verified: false
         };
@@ -256,9 +256,9 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
 
         return {
           success: true,
-          message: 'OTP sent successfully to your phone number.',
+          message: 'OTP sent successfully to your phone number (valid for 10 minutes).',
           pinId,
-          expiresInSeconds: 300,
+          expiresInSeconds: 600,
           cooldownSeconds: 60,
           provider: 'infobip'
         };
@@ -277,7 +277,7 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
           {
             destinations: [{ to: infobipDestination }],
             from: this.senderId,
-            text: `Your Olive Pizza verification code is: ${otpCode}. Valid for 5 minutes. Do not share this OTP with anyone.`
+            text: `Your Olive Pizza verification code is: ${otpCode}. Valid for 10 minutes. Do not share this OTP with anyone.`
           }
         ]
       };
@@ -301,7 +301,7 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
         salt,
         userId,
         createdAt: now,
-        expiresAt: now + 5 * 60 * 1000,
+        expiresAt: now + 10 * 60 * 1000,
         attempts: 0,
         verified: false
       };
@@ -315,9 +315,9 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
 
       return {
         success: true,
-        message: 'OTP sent successfully to your phone number.',
+        message: 'OTP sent successfully to your phone number (valid for 10 minutes).',
         pinId,
-        expiresInSeconds: 300,
+        expiresInSeconds: 600,
         cooldownSeconds: 60,
         provider: 'infobip'
       };
