@@ -13,20 +13,13 @@
     "!node_modules/**/*"
   ],
   "win": {
-    "target": [
-      {
-        "target": "nsis",
-        "arch": ["x64"]
-      }
-    ],
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "artifactName": "OlivePizzaOwner-Setup.${ext}",
     "icon": "electron/resources/icon.ico"
   },
   "nsis": {
     "oneClick": false,
     "allowToChangeInstallationDirectory": true,
-    "installerIcon": "electron/resources/icon.ico",
-    "uninstallerIcon": "electron/resources/icon.ico",
-    "installerHeaderIcon": "electron/resources/icon.ico",
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
     "shortcutName": "Olive Pizza Owner"
