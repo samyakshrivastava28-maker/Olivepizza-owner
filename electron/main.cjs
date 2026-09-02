@@ -22,7 +22,10 @@ function createWindow() {
   if (isDev) {
     mainWindow.loadURL('http://localhost:5174');
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../frontend/dist/index.html'));
+    const fs = require('fs');
+    const p1 = path.join(__dirname, '../dist/index.html');
+    const p2 = path.join(__dirname, '../frontend/dist/index.html');
+    mainWindow.loadFile(fs.existsSync(p1) ? p1 : p2);
   }
 
   mainWindow.on('closed', () => {
