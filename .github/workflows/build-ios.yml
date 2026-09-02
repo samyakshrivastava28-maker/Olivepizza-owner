@@ -28,7 +28,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install --legacy-peer-deps
 
       - name: Build frontend (bundled into app)
         run: cd frontend && npm ci && npm run build
@@ -41,11 +41,14 @@ jobs:
       - name: Capacitor Sync iOS
         run: npx cap sync ios
 
-      - name: Install CocoaPods
+      - name: Install CocoaPods (if Podfile exists)
         run: |
-          sudo gem install cocoapods
           cd ios/App
-          pod install --repo-update
+          if [ -f "Podfile" ]; then
+            pod install --repo-update
+          else
+            echo "Swift Package Manager project detected — skipping CocoaPods"
+          fi
 
       - name: Select Xcode version
         run: sudo xcode-select -switch /Applications/Xcode.app
@@ -53,8 +56,13 @@ jobs:
       - name: Build and Archive iOS
         run: |
           cd ios/App
+          if [ -d "App.xcworkspace" ]; then
+            TARGET="-workspace App.xcworkspace"
+          else
+            TARGET="-project App.xcodeproj"
+          fi
           xcodebuild \
-            -workspace App.xcworkspace \
+            $TARGET \
             -scheme App \
             -configuration Release \
             -destination "generic/platform=iOS" \
