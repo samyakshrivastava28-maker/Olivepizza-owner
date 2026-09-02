@@ -232,6 +232,7 @@ export class FirestoreListener {
                     orderId: orderData.id,
                     category: ['delivered', 'cancelled'].includes(currentStatus) ? 'simple_informational' : 'pinned_live',
                     tag: `order_${orderData.id}`,
+                    targetApp: 'customer',
                   });
                 }
 
@@ -252,6 +253,7 @@ export class FirestoreListener {
                     orderId: orderData.id,
                     category: 'alarm_actionable',
                     tag: `order_delivery_${orderData.id}`,
+                    targetApp: 'delivery',
                   });
                 }
               } catch (notifErr: any) {

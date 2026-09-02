@@ -4,6 +4,81 @@ import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middle
 
 const router = Router();
 
+// Helper to compute effective operating status combining Owner Schedule + Manager Manual Override
+export function computeEffectiveStatus(data: any): { 
+  isScheduleOpen: boolean; 
+  isManagerOpen: boolean; 
+  effectiveOpen: boolean; 
+  effectiveReason: string;
+  scheduleText: string;
+} {
+  const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const todayKey = days[new Date().getDay()];
+  const todayHours = data.operatingHours?.[todayKey] || { open: '10:00', close: '23:00', isOpen: true };
+  
+  let isScheduleOpen = Boolean(todayHours.isOpen !== false);
+  const now = new Date();
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+  if (todayHours.open && todayHours.close) {
+    const [openH, openM] = todayHours.open.split(':').map(Number);
+    const [closeH, closeM] = todayHours.close.split(':').map(Number);
+    const openMinutes = openH * 60 + (openM || 0);
+    const closeMinutes = closeH * 60 + (closeM || 0);
+
+    if (openMinutes <= closeMinutes) {
+      isScheduleOpen = isScheduleOpen && currentMinutes >= openMinutes && currentMinutes < closeMinutes;
+    } else {
+      // Overnight span (e.g. 18:00 to 02:00)
+      isScheduleOpen = isScheduleOpen && (currentMinutes >= openMinutes || currentMinutes < closeMinutes);
+    }
+  }
+
+  // Manager Manual Override Precedence:
+  // If Manager manually closed (isOpen === false or isManualClose === true): strictly CLOSED.
+  // If Manager explicitly opened: OPEN only if schedule permits or manager override is active.
+  const isManagerOpen = data.isOpen !== false && data.acceptingOrders !== false;
+  
+  let effectiveOpen = false;
+  let effectiveReason = '';
+
+  if (!isManagerOpen) {
+    effectiveOpen = false;
+    effectiveReason = data.closeReason || 'Restaurant was temporarily closed by manager.';
+  } else if (!isScheduleOpen) {
+    effectiveOpen = false;
+    effectiveReason = `Outside operating hours (${todayHours.open || '10:00'} - ${todayHours.close || '23:00'}).`;
+  } else {
+    effectiveOpen = true;
+    effectiveReason = 'Restaurant is open and accepting orders.';
+  }
+
+  const scheduleText = `${todayHours.open || '10:00'} - ${todayHours.close || '23:00'}`;
+
+  return {
+    isScheduleOpen,
+    isManagerOpen,
+    effectiveOpen,
+    effectiveReason,
+    scheduleText
+  };
+}
+
+const statusUpdateTimestamps = new Map<string, number[]>();
+
+function checkStatusRateLimit(branchId: string): boolean {
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const maxUpdates = 10;
+  const timestamps = (statusUpdateTimestamps.get(branchId) || []).filter(t => now - t < windowMs);
+  if (timestamps.length >= maxUpdates) {
+    return false;
+  }
+  timestamps.push(now);
+  statusUpdateTimestamps.set(branchId, timestamps);
+  return true;
+}
+
 // ============================================================================
 // PUBLIC & PROTECTED GET: Restaurant Operational Status & Settings
 // ============================================================================
@@ -61,10 +136,13 @@ router.get('/status', async (req: Request, res: Response) => {
       };
 
       await docRef.set(defaultState);
-      return res.json({ success: true, data: defaultState });
+      const effective = computeEffectiveStatus(defaultState);
+      return res.json({ success: true, data: { ...defaultState, effective } });
     }
 
-    res.json({ success: true, data: snap.data() });
+    const data = snap.data() || {};
+    const effective = computeEffectiveStatus(data);
+    res.json({ success: true, data: { ...data, effective } });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -116,7 +194,24 @@ function resolveBranchId(req: AuthRequest, bodyBranchId?: string, queryBranchId?
 // 1. UPDATE OPERATIONAL STATUS (Open/Close, Accepting Orders, Reason)
 router.put('/status', async (req: AuthRequest, res: Response) => {
   try {
+    const userRole = req.user?.role || '';
+    const isGlobal = ['owner', 'admin', 'developer', 'platform_owner'].includes(userRole);
+    const userBranch = (req.user as any)?.branchId || 'main_branch';
+
+    // Strict branch isolation: Managers can only modify their assigned branch
+    if (!isGlobal && req.body.branchId && req.body.branchId !== userBranch) {
+      res.status(403).json({ success: false, error: 'Forbidden: You are not authorized to modify another branch.' });
+      return;
+    }
+
     const branchId = resolveBranchId(req, req.body.branchId);
+
+    // Rate-limiting check (max 10 updates per minute per branch)
+    if (!checkStatusRateLimit(branchId)) {
+      res.status(429).json({ success: false, error: 'Too many status updates. Please wait a minute before updating again.' });
+      return;
+    }
+
     const { isOpen, acceptingOrders, closeReason, currentPrepTime } = req.body;
     
     const docRef = adminDb.collection('restaurant_settings').doc(branchId);
@@ -147,6 +242,12 @@ router.put('/status', async (req: AuthRequest, res: Response) => {
       { isOpen: updates.isOpen, acceptingOrders: updates.acceptingOrders, closeReason: updates.closeReason },
       updates.closeReason ? `Reason: ${updates.closeReason}` : 'Status toggle'
     );
+
+    // Realtime notification / EventBus
+    try {
+      const { appEventBus } = await import('../services/eventBus/AppEventBus.js');
+      appEventBus.emit('restaurant:status_changed', { branchId, updates });
+    } catch {}
 
     res.json({ success: true, message: 'Operational status updated successfully' });
   } catch (error: any) {

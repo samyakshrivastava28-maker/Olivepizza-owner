@@ -146,7 +146,8 @@ export class RiderDispatchEngine {
     await notificationEngine.send(bestRider.uid, riderPayload, {
       category: 'alarm_actionable',
       priority: 'critical',
-      orderId
+      orderId,
+      targetApp: 'delivery'
     });
 
     return { success: true, rider: bestRider };

@@ -260,6 +260,28 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
       return;
     }
 
+    // 0.4. Check Restaurant Operational Status (Open/Closed & Accepting Orders)
+    const callerRole = req.user?.role || '';
+    const isStaffMember = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(callerRole);
+    const branchToCheck = isStaffMember ? (req.user?.branchId || 'main_branch') : 'main_branch';
+    try {
+      const restDoc = await adminDb.collection('restaurant_settings').doc(branchToCheck).get();
+      if (restDoc.exists) {
+        const restData = restDoc.data() || {};
+        if (restData.isOpen === false || restData.acceptingOrders === false) {
+          res.status(400).json({
+            error: restData.closeReason || 'The restaurant is currently closed and not accepting orders.',
+            code: 'RESTAURANT_CLOSED',
+            canAcceptOrders: false,
+            isOpen: false
+          });
+          return;
+        }
+      }
+    } catch (restErr) {
+      console.warn('[Orders] Restaurant status read notice:', restErr);
+    }
+
     // 0.5. Check Delivery Availability if delivery requested
     const deliveryType = req.body.deliveryType || 'delivery';
     if (deliveryType === 'delivery') {
@@ -528,6 +550,9 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     const resolvedTerminalId = isStaff ? (req.user?.terminalId || null) : null;
     const resolvedCashierName = isStaff ? ((req.user as any)?.name || req.user?.email || null) : null;
 
+    const timeoutMinutes = Number(process.env.ORDER_ACCEPT_TIMEOUT_MINUTES || 10);
+    const acceptanceDeadline = new Date(Date.now() + timeoutMinutes * 60 * 1000).toISOString();
+
     try {
       await adminDb.collection('orders').doc(newOrderId).set({
         id: newOrderId,
@@ -540,6 +565,9 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         discountAmount,
         status: 'pending',
         notification_version: 1,
+        acceptanceDeadline,
+        cancellationAcknowledged: false,
+        cancellationAcknowledgedAt: null,
         deliveryAddress: { 
           addressLine: userAddress || 'Pickup', 
           lat: location?.lat || userData.lat || userData.location?.lat || 0, 
@@ -647,11 +675,29 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
           await notificationEngine.sendBulk(branchStaffUids, restaurantPayload, {
             category: 'alarm_actionable',
             priority: 'critical',
-            orderId: newOrderId
+            orderId: newOrderId,
+            targetApp: 'restaurant'
           });
         }
       } catch (notifErr: any) {
         console.error('[Orders] Async Restaurant Notification dispatch error:', notifErr.message);
+      }
+
+      // Initial Customer Order Placed Notification (pinned live card)
+      try {
+        const customerPlacedPayload = CustomerTemplates.orderUpdate(newOrderId, {
+          orderNumber,
+          status: 'pending',
+          totalAmount: finalOrderTotal,
+          version: 1
+        });
+        await notificationEngine.send(userId, customerPlacedPayload, {
+          category: 'pinned_live',
+          orderId: newOrderId,
+          targetApp: 'customer'
+        });
+      } catch (custErr: any) {
+        console.warn('[Orders] Customer initial order placed push error:', custErr.message);
       }
 
       // Transactional order email removed in favor of real-time push / in-app notification system (Section 5)
@@ -1078,6 +1124,38 @@ router.post('/:id/reorder', verifyToken, async (req: AuthRequest, res: Response)
   } catch (err: any) {
     console.error('[Orders] Reorder error:', err);
     res.status(500).json({ error: 'Failed to prepare reorder' });
+  }
+});
+
+// ─── POST /:id/acknowledge-cancellation — Customer Views/Acknowledges Cancelled Order ───
+router.post('/:id/acknowledge-cancellation', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.uid;
+    const orderRef = adminDb.collection('orders').doc(id);
+    const snap = await orderRef.get();
+
+    if (!snap.exists) {
+      res.status(404).json({ success: false, error: 'Order not found' });
+      return;
+    }
+
+    const orderData = snap.data()!;
+    // Ownership check: only the customer who placed the order (or admin/owner) can acknowledge
+    if (orderData.userId !== userId && !['owner', 'admin', 'developer'].includes(req.user?.role || '')) {
+      res.status(403).json({ success: false, error: 'Forbidden: You do not own this order' });
+      return;
+    }
+
+    await orderRef.update({
+      cancellationAcknowledged: true,
+      cancellationAcknowledgedAt: new Date().toISOString()
+    });
+
+    res.json({ success: true, message: 'Cancellation acknowledged successfully' });
+  } catch (err: any) {
+    console.error('[Orders] Acknowledge cancellation error:', err);
+    res.status(500).json({ success: false, error: err.message || 'Failed to acknowledge cancellation' });
   }
 });
 

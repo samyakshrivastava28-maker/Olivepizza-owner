@@ -218,7 +218,25 @@ export class OrderStateMachine {
         updates.deliveredAt = nowIso;
       } else if (toState === 'cancelled') {
         updates.cancelledAt = nowIso;
-        if (metadata.cancellationReason) updates.cancellationReason = metadata.cancellationReason;
+        updates.cancellationReason = metadata.cancellationReason || 'CUSTOMER_CANCELLED';
+        updates.cancellationSource = metadata.cancellationSource || actor.role || 'system';
+        updates.cancellationExplanation = metadata.cancellationExplanation || (
+          metadata.cancellationReason === 'RESTAURANT_ACCEPT_TIMEOUT'
+            ? 'The restaurant was unable to accept your order within the required time.'
+            : 'Order was cancelled.'
+        );
+        updates.cancellationAcknowledged = false;
+        updates.cancellationAcknowledgedAt = null;
+
+        // Authoritative payment/refund status
+        const isPaid = (orderData.paymentStatus || '').toLowerCase() === 'paid' || orderData.paymentCaptured === true;
+        const isCod = (orderData.paymentMethod || '').toLowerCase() === 'cod';
+        if (!isPaid || isCod) {
+          updates.refundStatus = 'not_applicable';
+        } else {
+          // Trigger payment reconciliation/refund queue without falsely claiming refund completed
+          updates.refundStatus = 'pending_review';
+        }
       }
 
       await orderRef.update(updates);
@@ -325,13 +343,28 @@ export class OrderStateMachine {
           body = 'Enjoy your delicious meal! Tap to rate your food and delivery experience.';
         } else if (toState === 'cancelled') {
           title = 'Order Cancelled';
-          body = `Your order was cancelled. ${order.cancellationReason || ''}`;
+          if (order.cancellationReason === 'RESTAURANT_ACCEPT_TIMEOUT') {
+            body = `Sorry, your Olive Pizza order ${orderNumber} was cancelled because the restaurant could not accept it in time.`;
+          } else {
+            body = `Your order ${orderNumber} was cancelled. ${order.cancellationExplanation || order.cancellationReason || ''}`;
+          }
         }
 
         await notificationEngine.send(customerUid, {
           notification: { title, body },
-          data: { orderId, status: toState, orderNumber }
-        }, { category: 'pinned_live', orderId });
+          data: { 
+            orderId, 
+            status: toState, 
+            orderNumber,
+            cancellationReason: order.cancellationReason || '',
+            deepLink: toState === 'cancelled' ? `/order-cancelled/${orderId}` : `/order-tracking/${orderId}`,
+            screen: toState === 'cancelled' ? 'OrderCancelled' : 'OrderTracking'
+          }
+        }, { 
+          category: (toState === 'cancelled' || toState === 'delivered') ? 'simple_informational' : 'pinned_live', 
+          orderId, 
+          targetApp: 'customer' 
+        });
       }
 
       // 2. Rider Notification
@@ -341,7 +374,7 @@ export class OrderStateMachine {
         await notificationEngine.send(order.deliveryPartnerId, {
           notification: { title, body },
           data: { orderId, status: toState }
-        }, { category: 'alarm_actionable', priority: 'high', orderId });
+        }, { category: 'alarm_actionable', priority: 'high', orderId, targetApp: 'delivery' });
       }
 
     } catch (notifErr: any) {

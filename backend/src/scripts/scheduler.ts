@@ -2,8 +2,12 @@ import cron from 'node-cron';
 import { weeklyReportService } from '../lib/services/WeeklyReportService.js';
 import { WeeklyReportJob } from '../jobs/WeeklyReportJob.js';
 import { DataExpiryJob } from '../jobs/DataExpiryJob.js';
+import { OrderTimeoutWorker } from '../services/order/OrderTimeoutWorker.js';
 
 export function initScheduler() {
+  // Initialize 10-minute unaccepted order auto-cancellation worker
+  OrderTimeoutWorker.init();
+
   // Initialize weekly report cron (Runs every Monday at 00:05 AM)
   WeeklyReportJob.initCronJob();
 

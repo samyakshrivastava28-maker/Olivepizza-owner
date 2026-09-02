@@ -899,12 +899,14 @@ export class CustomerTemplates {
         ongoing: true,
       },
       cancelled: {
-        title: `❌ Order Cancelled — #${payload.orderNumber}`,
-        body: payload.cancellationReason
-          ? `Your order was cancelled: ${payload.cancellationReason}. Contact us if you need help.`
-          : `Your order has been cancelled. Contact us if you need help.`,
+        title: `Order Cancelled`,
+        body: payload.cancellationReason === 'RESTAURANT_ACCEPT_TIMEOUT' || (payload as any).cancellationSource === 'SYSTEM_TIMEOUT'
+          ? `Sorry, your Olive Pizza order was cancelled because the restaurant could not accept it in time.`
+          : payload.cancellationReason
+            ? `Your order was cancelled: ${payload.cancellationReason}. Contact us if you need help.`
+            : `Your order has been cancelled. Contact us if you need help.`,
         sound: 'cancelled',
-        ongoing: true,
+        ongoing: false, // Ended on cancellation — no longer ongoing
       },
     };
 
@@ -918,15 +920,13 @@ export class CustomerTemplates {
         ? [{ action: 'track', title: '📍 Track Order' }, { action: 'call_partner', title: '📞 Call Partner' }]
         : isDelivered
           ? [{ action: 'rate', title: '⭐ Rate Order' }, { action: 'reorder', title: '🔄 Reorder' }]
-          : [{ action: 'open', title: '📍 Track Order' }];
+          : isCancelled
+            ? [{ action: 'view_cancelled', title: 'Details' }, { action: 'reorder', title: 'Order Again' }]
+            : [{ action: 'open', title: '📍 Track Order' }];
 
-    // Generate a signed expiring tracking token so the push notification
-    // deep-link URL works for unauthenticated/background-closed-app scenarios.
-    // The OrderTracking page accepts EITHER a valid token OR an authenticated
-    // user session (customer/owner/delivery_partner) — so logged-in users are
-    // never broken and unauthenticated deep links remain secure.
     const trackingToken = generateTrackingToken(orderId);
     const trackingUrl = `/order-tracking/${orderId}?trackingToken=${trackingToken}`;
+    const destinationUrl = isCancelled ? `/order-cancelled/${orderId}` : trackingUrl;
 
     return buildPayload(cfg.title, cfg.body, {
       tag: `order_customer_${orderId}`,      // Same tag throughout — updates in place
@@ -934,7 +934,7 @@ export class CustomerTemplates {
         : isCancelled ? ANDROID_CHANNELS.ORDER_COMPLETED
           : ANDROID_CHANNELS.ORDER_STATUS,
       orderId,
-      url: trackingUrl,
+      url: destinationUrl,
       sound: cfg.sound,
       category: (isTerminal ? 'simple_informational' : 'pinned_live') as any,
       priority: isTerminal ? 'high' : 'normal',

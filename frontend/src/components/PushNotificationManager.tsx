@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Olive Pizza Ã¢â‚¬” Enterprise Push Notification Manager (Production v3)
  *
  * Production Responsibilities:
@@ -236,6 +236,7 @@ export default function PushNotificationManager() {
           platform: Capacitor.isNativePlatform() ? 'android' : navigator.platform,
           browser: Capacitor.isNativePlatform() ? 'capacitor' : getBrowserName(),
           appVersion: import.meta.env.VITE_APP_VERSION || '1.0',
+          appName: 'owner',
         }),
       });
 
