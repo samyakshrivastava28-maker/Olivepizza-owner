@@ -1,6 +1,7 @@
 {
   "appId": "in.olivepizza.owner",
   "productName": "Olive Pizza Owner",
+  "npmRebuild": false,
   "directories": {
     "buildResources": "electron/resources",
     "output": "dist-electron"
