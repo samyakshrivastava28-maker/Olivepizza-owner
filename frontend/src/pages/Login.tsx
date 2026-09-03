@@ -64,11 +64,9 @@ export default function Login() {
   };
 
   const handleQuickOwnerBypass = (selectedEmail: string, name: string) => {
-    validateAndAuthenticate({
-      uid: selectedEmail === 'olivepizzarjn@gmail.com' ? 'ZzMmHLa6fBeDYY7clYNjP70fbiE2' : '6tLLR6q7aTYqzTG2blRx3TU5sA42',
-      email: selectedEmail,
-      name,
-      displayName: name,
+    setEmail(selectedEmail);
+    toast(`Selected ${name} (${selectedEmail}). Sign in with password or Google to establish your secure session.`, {
+      icon: '🔐',
     });
   };
 

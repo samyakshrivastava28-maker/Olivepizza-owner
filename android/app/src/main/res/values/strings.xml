@@ -4,4 +4,5 @@
     <string name="title_activity_main">Olive Pizza Owner</string>
     <string name="package_name">in.olivepizza.owner</string>
     <string name="custom_url_scheme">in.olivepizza.owner</string>
+    <string name="default_web_client_id">1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com</string>
 </resources>

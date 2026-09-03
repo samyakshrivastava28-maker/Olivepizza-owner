@@ -18,6 +18,29 @@ function createWindow() {
     },
   });
 
+  // Strip Electron identifier from User-Agent to comply with Google OAuth security policies
+  const currentUserAgent = mainWindow.webContents.getUserAgent();
+  mainWindow.webContents.setUserAgent(currentUserAgent.replace(/Electron\/[0-9\.]+\s/g, ''));
+
+  // Allow Firebase / Google OAuth popup windows
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.includes('accounts.google.com') || url.includes('firebaseapp.com')) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 520,
+          height: 650,
+          autoHideMenuBar: true,
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+          }
+        }
+      };
+    }
+    return { action: 'deny' };
+  });
+
   const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged;
   if (isDev) {
     mainWindow.loadURL('http://localhost:5174');

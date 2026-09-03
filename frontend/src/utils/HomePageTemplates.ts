@@ -9,7 +9,7 @@ export const PREDEFINED_TEMPLATES: BuiltInPageSchema[] = [
     templateId: 'default',
     metadata: {
       name: 'Default Flagship Home',
-      description: 'The standard premium wood-fired artisan experience with live ordering urgency and 20-min delivery guarantee.',
+      description: 'The standard premium wood-fired artisan experience handcrafted fresh to order in Rajnandgaon.',
       publishedBy: 'system',
       publishedAt: new Date().toISOString()
     },
@@ -19,8 +19,8 @@ export const PREDEFINED_TEMPLATES: BuiltInPageSchema[] = [
         type: 'COUNTDOWN',
         isHidden: false,
         config: {
-          headline: '⚡ FLASH SALE: Free Artisanal Garlic Bread on all orders above ₹399 • 20 Min Delivery Guarantee',
-          subtitle: 'Limited Time Deal • Ends Tonight',
+          headline: '⚡ ARTISAN SPECIAL: Fresh Wood-Fired Preparation • 100% Pure Veg Gourmet Delights',
+          subtitle: 'Handcrafted With Love in Rajnandgaon',
           animationType: 'Fade Down',
           styleOverrides: { backgroundColor: '#EA580C', textColor: '#FFFFFF' }
         }
@@ -32,7 +32,7 @@ export const PREDEFINED_TEMPLATES: BuiltInPageSchema[] = [
         config: {
           headline: 'Wood-Fired Gourmet Perfection 🍕',
           subtitle: 'Artisan hand-stretched sourdough, rich San Marzano sauce, and 100% pure Fior di Latte mozzarella melted over flaming beechwood.',
-          mediaUrl: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?q=80&w=1200&auto=format&fit=crop',
+          mediaUrl: 'https://res.cloudinary.com/dxmlvkff1/image/upload/f_auto,q_auto:best,w_1920/v1783008946/olive-pizza-hero-background_d9rbzc.webp',
           animationType: 'Fade Up',
           buttonText: 'EXPLORE LIVE MENU',
           buttonAction: { type: 'OPEN_MENU' },
@@ -53,8 +53,8 @@ export const PREDEFINED_TEMPLATES: BuiltInPageSchema[] = [
         type: 'FEATURED',
         isHidden: false,
         config: {
-          headline: '🔥 Best Sellers & Chef Recommendations',
-          subtitle: 'Over 10,000+ orders delivered with 4.9★ rating'
+          headline: '🔥 Signature Pizzas & Chef Selections',
+          subtitle: 'Handcrafted fresh to order with pure mozzarella'
         }
       },
       {
