@@ -3,6 +3,7 @@ import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../../lib/firebase';
 import { doc, getDoc } from 'firebase/firestore';
 import { useAuthStore, isAuthorizedOwnerEmail } from '../../lib/store';
+import { UserRole } from '../../types/auth';
 import { initFCMNotifications } from '../../lib/fcm';
 
 export default function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -21,7 +22,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
           if (firebaseUser) {
             try {
               const isOwnerEmail = isAuthorizedOwnerEmail(firebaseUser.email);
-              let resolvedRole = isOwnerEmail ? 'owner' : 'customer';
+              let resolvedRole: UserRole = isOwnerEmail ? 'owner' : 'customer';
               let name = firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Owner';
               let phone = firebaseUser.phoneNumber;
 
@@ -31,7 +32,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
                 if (userDoc.exists()) {
                   const data = userDoc.data();
                   if (data.role) {
-                    resolvedRole = data.role;
+                    resolvedRole = data.role as UserRole;
                   }
                   if (data.name) name = data.name;
                   if (data.phone) phone = data.phone;

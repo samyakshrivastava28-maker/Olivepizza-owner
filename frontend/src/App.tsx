@@ -1,4 +1,3 @@
-const AIOrderHistory = lazyWithRetry(() => import('./pages/AIOrderHistoryPage'));
 import React, { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router';
 import { HelmetProvider } from 'react-helmet-async';
@@ -9,6 +8,7 @@ import { PizzaLoader } from './components/ui/PizzaLoader';
 import { GlobalErrorBoundary } from './components/GlobalErrorBoundary';
 import { RouteErrorBoundary } from './components/RouteErrorBoundary';
 import AuthProvider from './components/auth/AuthProvider';
+import PushNotificationManager from './components/PushNotificationManager';
 
 // Safe lazy importer with automatic retry for transient chunk loading
 function lazyWithRetry<T extends React.ComponentType<any>>(
@@ -60,6 +60,7 @@ export default function App() {
           }}
         />
         <AuthProvider>
+          <PushNotificationManager />
           <Suspense fallback={<PizzaLoader text="Initializing Olive Pizza Owner Platform..." />}>
             <Routes>
               {/* Public Login Route */}

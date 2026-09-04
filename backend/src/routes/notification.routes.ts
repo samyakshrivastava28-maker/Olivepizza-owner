@@ -768,6 +768,38 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
   }
 });
 
+// Alias for frontend compatibility
+router.post('/register-token', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { token, oldToken, deviceId, deviceName, platform, browser, appVersion, appName } = req.body;
+    const user = req.user!;
+    const userId = user.uid;
+
+    if (!token) {
+      res.status(400).json({ error: 'Token is required' });
+      return;
+    }
+
+    await notificationQueue.registerToken(userId, token, {
+      oldToken,
+      deviceId,
+      deviceName,
+      platform,
+      browser,
+      appVersion,
+      appName: appName || (user.role === 'owner' ? 'owner' : 'customer'),
+      role: user.role || 'customer',
+      franchiseId: user.franchiseId,
+      branchId: user.branchId,
+      terminalId: user.terminalId
+    });
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('[NotificationRoutes] Register-token error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // =============================================================================
 // POST /notifications/token/deregister
 // =============================================================================

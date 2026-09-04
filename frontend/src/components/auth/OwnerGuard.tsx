@@ -18,7 +18,6 @@ export const OwnerGuard: React.FC = () => {
     role === 'owner' || 
     role === 'admin' || 
     role === 'developer' || 
-    role === 'manager' ||
     role === 'restaurant_manager' ||
     role === 'franchise_owner' ||
     isEmailApproved

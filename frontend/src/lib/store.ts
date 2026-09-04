@@ -164,8 +164,10 @@ export const useCartStore = create<CartState>((set) => ({
 interface OwnerSettingsState {
   soundEnabled: boolean;
   volume: number;
+  repeatAlarmIntervalSeconds: number;
   setSoundEnabled: (enabled: boolean) => void;
   setVolume: (volume: number) => void;
+  setRepeatAlarmIntervalSeconds: (seconds: number) => void;
 }
 
 export const useOwnerSettingsStore = create<OwnerSettingsState>()(
@@ -173,11 +175,14 @@ export const useOwnerSettingsStore = create<OwnerSettingsState>()(
     (set) => ({
       soundEnabled: true,
       volume: 1.0,
+      repeatAlarmIntervalSeconds: 30,
       setSoundEnabled: (soundEnabled) => set({ soundEnabled }),
       setVolume: (volume) => set({ volume }),
+      setRepeatAlarmIntervalSeconds: (repeatAlarmIntervalSeconds) => set({ repeatAlarmIntervalSeconds }),
     }),
     {
       name: 'olive-owner-settings-store',
     }
   )
 );
+
