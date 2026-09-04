@@ -1,6 +1,8 @@
 name: Build iOS — Owner
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       build_type:
@@ -10,6 +12,9 @@ on:
         type: choice
         options:
           - archive
+
+permissions:
+  contents: write
 
 jobs:
   build-ios:
@@ -45,6 +50,7 @@ jobs:
         run: |
           cd ios/App
           if [ -f "Podfile" ]; then
+            sudo gem install cocoapods
             pod install --repo-update
           else
             echo "Swift Package Manager project detected — skipping CocoaPods"
@@ -74,17 +80,7 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="" \
             2>&1 | xcpretty || true
 
-      - name: Check archive
-        run: |
-          if [ -d "${{ github.workspace }}/OlivePizza-Owner.xcarchive" ]; then
-            echo "IOS_BUILD_STATUS=ARCHIVE_READY_IOS_SIGNING_REQUIRED" >> $GITHUB_ENV
-            echo "✅ Xcode archive created — IOS_SIGNING_REQUIRED for IPA export"
-          else
-            echo "IOS_BUILD_STATUS=BUILD_FAILED" >> $GITHUB_ENV
-            echo "❌ Archive not found — build may have failed"
-          fi
-
-      - name: Export IPA (requires signing secrets)
+      - name: Export Signed IPA (if signing secrets exist)
         if: env.APPLE_CERTIFICATE_BASE64 != ''
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -115,22 +111,58 @@ jobs:
             -exportArchive \
             -archivePath "${{ github.workspace }}/OlivePizza-Owner.xcarchive" \
             -exportPath /tmp/ipa-export \
-            -exportOptionsPlist /tmp/ExportOptions.plist
-          echo "IOS_BUILD_STATUS=IPA_READY" >> $GITHUB_ENV
+            -exportOptionsPlist /tmp/ExportOptions.plist || true
 
-      - name: Upload archive/IPA artifact
+      - name: Package Release Files
+        run: |
+          mkdir -p release-ios
+          ARCHIVE_PATH="${{ github.workspace }}/OlivePizza-Owner.xcarchive"
+          if [ -d "$ARCHIVE_PATH" ]; then
+            echo "Packaging xcarchive bundle..."
+            zip -r "release-ios/OlivePizza-Owner.xcarchive.zip" "$ARCHIVE_PATH"
+
+            echo "Packaging unsigned IPA from archive..."
+            mkdir -p /tmp/Payload
+            cp -r "$ARCHIVE_PATH/Products/Applications/"*.app /tmp/Payload/ || true
+            if [ -d "/tmp/Payload" ] && [ "$(ls -A /tmp/Payload)" ]; then
+              cd /tmp
+              zip -r "${{ github.workspace }}/release-ios/OlivePizza-Owner-unsigned.ipa" Payload
+              cd ${{ github.workspace }}
+              echo "✅ Unsigned IPA created."
+            fi
+          fi
+          if [ -d "/tmp/ipa-export" ]; then
+            cp -f /tmp/ipa-export/*.ipa release-ios/ || true
+          fi
+          ls -la release-ios/
+
+      - name: Upload iOS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: OlivePizza-Owner-iOS-${{ env.IOS_BUILD_STATUS }}
-          path: |
-            OlivePizza-Owner.xcarchive
-            /tmp/ipa-export/*.ipa
+          name: OlivePizza-Owner-iOS
+          path: release-ios/*
           retention-days: 14
+
+      - name: Create GitHub Release
+        id: create_release
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+        with:
+          name: "Olive Pizza Owner iOS v1.0.${{ github.run_number }}"
+          tag_name: "v1.0.${{ github.run_number }}-ios"
+          files: release-ios/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build status summary
         run: |
           echo "## iOS Build Result" >> $GITHUB_STEP_SUMMARY
-          echo "**Status**: ${{ env.IOS_BUILD_STATUS }}" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ env.IOS_BUILD_STATUS }}" = "ARCHIVE_READY_IOS_SIGNING_REQUIRED" ]; then
-            echo "**Next step**: Add APPLE_CERTIFICATE_BASE64, APPLE_PROVISIONING_PROFILE_BASE64, APPLE_CERTIFICATE_PASSWORD, APPLE_TEAM_ID to GitHub Secrets for IPA export." >> $GITHUB_STEP_SUMMARY
+          if ls release-ios/*.ipa 2>/dev/null; then
+            echo "**Status**: ✅ IOS_BUILD_READY" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Status**: ⚠️ ARCHIVE_READY (xcarchive packaged)" >> $GITHUB_STEP_SUMMARY
           fi

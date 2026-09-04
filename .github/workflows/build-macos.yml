@@ -1,7 +1,13 @@
 name: Build macOS — Owner
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
+
 jobs:
   build-macos:
     runs-on: macos-latest
@@ -34,6 +40,20 @@ jobs:
           name: OlivePizza-Owner-macOS-DMG
           path: dist-electron/*.dmg
           retention-days: 14
+      - name: Create GitHub Release
+        id: create_release
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+        with:
+          name: "Olive Pizza Owner macOS v1.0.${{ github.run_number }}"
+          tag_name: "v1.0.${{ github.run_number }}-mac"
+          files: dist-electron/*.dmg
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build status
         run: |
           if ls dist-electron/*.dmg 2>/dev/null; then
