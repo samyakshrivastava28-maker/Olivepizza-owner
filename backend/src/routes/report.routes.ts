@@ -6,7 +6,10 @@ import { CloudflareReportService } from '../services/reports/CloudflareReportSer
 import { MonthlyReportGenerator } from '../services/reports/MonthlyReportGenerator.js';
 import { CloudflareR2Service } from '../services/storage/CloudflareR2Service.js';
 import { GoogleSheetsReportService } from '../services/reports/GoogleSheetsReportService.js';
-import { pgPool } from '../config/postgres.js';
+import { MonthlyPdfReportService } from '../services/reports/MonthlyPdfReportService.js';
+import { GoogleSheetsMonthlyReportService } from '../services/reports/GoogleSheetsMonthlyReportService.js';
+import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngine.js';
+import { pgPool, query } from '../config/postgres.js';
 import crypto from 'crypto';
 
 const router = Router();
@@ -54,18 +57,15 @@ router.get('/pdf/:id', async (req: AuthRequest, res: Response) => {
     // 2. Fetch Buffer
     let buffer = await CloudflareR2Service.getBuffer(cloudflarePath);
 
-    // 3. If buffer not found, generate on the fly
+    // 3. If buffer not found, generate on the fly from PostgreSQL
     if (!buffer) {
-      buffer = await MonthlyReportGenerator.createPdfReportBuffer(monthName, yearNum, {
-        totalRevenue: docSnap.data()?.revenue || 0,
-        totalOrders: docSnap.data()?.orders || 0,
-        completedOrders: docSnap.data()?.orders || 0,
-        avgOrderValue: docSnap.data()?.revenue && docSnap.data()?.orders ? (docSnap.data()!.revenue / docSnap.data()!.orders).toFixed(2) : '0.00',
-        couponsUsed: 12,
-        upiCount: 8,
-        cashCount: 4,
-        cardCount: 2,
-        avgDeliveryMins: 22,
+      buffer = await MonthlyPdfReportService.generateMonthlyReportBuffer({
+        monthName,
+        year: yearNum,
+        branchId: 'main_branch',
+        branchName: 'Olive Pizza — Rajnandgaon HQ',
+        franchiseId: 'fra_primary',
+        franchiseName: 'Olive Pizza'
       });
     }
 
@@ -163,10 +163,119 @@ router.get('/monthly', verifyToken, requireOwnerOrAdmin, async (_req: AuthReques
  */
 router.post('/generate-monthly', verifyToken, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
   try {
-    const { month, year } = req.body;
-    const report = await MonthlyReportGenerator.generateAndArchiveMonthlyReport(month, year);
-    res.json({ success: true, report });
+    const user = req.user!;
+    const now = new Date();
+    const month = req.body.month || now.toLocaleString('default', { month: 'long' });
+    const year = Number(req.body.year) || now.getFullYear();
+    const branchId = user.branchId || req.body.branchId || 'main_branch';
+    const franchiseId = user.franchiseId || req.body.franchiseId || 'fra_primary';
+
+    // 1. Generate Multi-Page Monthly PDF Report (100% real PostgreSQL data)
+    const pdfBuffer = await MonthlyPdfReportService.generateMonthlyReportBuffer({
+      monthName: month,
+      year,
+      branchId,
+      branchName: 'Olive Pizza — Rajnandgaon HQ',
+      franchiseId,
+      franchiseName: 'Olive Pizza Franchise'
+    });
+
+    const reportKey = `${franchiseId}_${branchId}_${year}_${month.toLowerCase()}`;
+    let cloudflarePath = `reports/${year}/${reportKey}.pdf`;
+    let pdfUrl = `https://reports.olivepizza.in/monthly/${reportKey}.pdf`;
+
+    try {
+      const uploadRes = await CloudflareReportService.uploadPdfReport(year, month, pdfBuffer);
+      cloudflarePath = uploadRes.cloudflarePath;
+      pdfUrl = uploadRes.publicUrl || pdfUrl;
+    } catch (err: any) {
+      console.warn('[MonthlyReport] Cloudflare upload notice:', err.message);
+    }
+
+    // 2. Synchronize Rebuilt Enterprise Google Sheets (6 tabs, Olive Pizza brand theme)
+    let sheetsUrl = '';
+    try {
+      const sheetRes = await GoogleSheetsMonthlyReportService.syncMonthlyReport({
+        monthName: month,
+        year,
+        branchId,
+        franchiseId,
+        branchName: 'Olive Pizza — Rajnandgaon HQ',
+        franchiseName: 'Olive Pizza Franchise'
+      });
+      sheetsUrl = sheetRes.url;
+    } catch (sheetErr: any) {
+      console.warn('[MonthlyReport] Google Sheets sync notice:', sheetErr.message);
+    }
+
+    // 3. Compute summary snapshot for persistent history
+    const monthIndex = new Date(`${month} 1, ${year}`).getMonth();
+    const startDate = `${year}-${String(monthIndex + 1).padStart(2, '0')}-01`;
+    const lastDayNum = new Date(year, monthIndex + 1, 0).getDate();
+    const endDate = `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(lastDayNum).padStart(2, '0')}`;
+
+    const summary = await SalesCalculationEngine.getSalesSummary({
+      branchId,
+      franchiseId,
+      startDate,
+      endDate,
+      periodLabel: `${month.toUpperCase()} ${year}`
+    });
+
+    // 4. Save canonical report snapshot in PostgreSQL
+    const snapshotId = crypto.randomUUID();
+    await query(`
+      INSERT INTO canonical_report_snapshots (
+        id, franchise_id, branch_id, report_month, report_year,
+        summary_json, pdf_cloudflare_path, pdf_url, sheets_url, status
+      ) VALUES (
+        $1, $2, $3, $4, $5,
+        $6::jsonb, $7, $8, $9, 'COMPLETED'
+      )
+      ON CONFLICT (franchise_id, branch_id, report_month, report_year)
+      DO UPDATE SET
+        summary_json = EXCLUDED.summary_json,
+        pdf_cloudflare_path = EXCLUDED.pdf_cloudflare_path,
+        pdf_url = EXCLUDED.pdf_url,
+        sheets_url = EXCLUDED.sheets_url,
+        status = 'COMPLETED',
+        created_at = CURRENT_TIMESTAMP;
+    `, [
+      snapshotId, franchiseId, branchId, month, year,
+      JSON.stringify(summary), cloudflarePath, pdfUrl, sheetsUrl
+    ]);
+
+    // 5. Update Firestore metadata for backward compatibility
+    await adminDb.collection('monthly_reports').doc(reportKey).set({
+      id: reportKey,
+      month,
+      year,
+      revenue: summary.grossSales,
+      orders: summary.totalBills,
+      cloudflarePath,
+      reportUrl: pdfUrl,
+      downloadUrl: pdfUrl,
+      sheetsUrl,
+      status: 'COMPLETED',
+      createdTime: new Date().toISOString()
+    }, { merge: true });
+
+    res.json({
+      success: true,
+      report: {
+        id: reportKey,
+        month,
+        year,
+        grossSales: summary.grossSales,
+        netSales: summary.netSales,
+        totalBills: summary.totalBills,
+        pdfUrl,
+        sheetsUrl,
+        summary
+      }
+    });
   } catch (err: any) {
+    console.error('[Monthly Report Generation Error]:', err);
     res.status(500).json({ error: err.message });
   }
 });

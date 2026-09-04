@@ -12,6 +12,8 @@ import { queueEmail } from '../services/email.service.js';
 import { buildOrderStatusEmail } from '../services/emailTemplates.service.js';
 import { DeliveryCapacityService } from '../services/delivery/DeliveryCapacityService.js';
 import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogleSheetsService.js';
+import { CanonicalOrderService } from '../services/pos/CanonicalOrderService.js';
+import { BillingNumberService } from '../services/pos/BillingNumberService.js';
 import crypto from 'crypto';
 
 // Restaurant local timezone for daily order counter reset
@@ -523,22 +525,8 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     }
     trace.steps.push({ step: 'Idempotency Lock', status: 'success' });
 
-    // 3. Generate unique order ID + atomic daily order number
+    // 3. Atomically allocate Permanent Bill No. and Daily Order No. & commit to PostgreSQL
     const newOrderId = crypto.randomUUID();
-    const shortId = newOrderId.slice(-6).toUpperCase();
-
-    let dailyOrderNumber = 0;
-    let orderDateLocal = getLocalDateString();
-    try {
-      const counter = await getNextDailyOrderNumber();
-      dailyOrderNumber = counter.dailyOrderNumber;
-      orderDateLocal = counter.orderDateLocal;
-    } catch (counterErr: any) {
-      console.warn('[Orders] Daily counter failed (non-blocking, falling back to shortId):', counterErr.message);
-    }
-
-    // Human-readable daily number (#14) or fallback OP-XXXXXX
-    const orderNumber = dailyOrderNumber > 0 ? '#' + dailyOrderNumber : 'OP-' + shortId;
 
     const userRole = req.user?.role || 'customer';
     const isStaff = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(userRole);
@@ -553,9 +541,54 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     const timeoutMinutes = Number(process.env.ORDER_ACCEPT_TIMEOUT_MINUTES || 10);
     const acceptanceDeadline = new Date(Date.now() + timeoutMinutes * 60 * 1000).toISOString();
 
+    const canonical = await CanonicalOrderService.createCanonicalOrder({
+      id: newOrderId,
+      orderSource: resolvedOrderSource as any,
+      orderType: deliveryType === 'delivery' ? 'delivery' : 'pickup',
+      customerName: userData.name || (req.user as any)?.name || 'Gourmet Customer',
+      customerPhone: userPhone || 'N/A',
+      deliveryAddress: userAddress || undefined,
+      items: validatedItems.map(it => ({
+        menuItemId: it.menuItemId,
+        name: it.name,
+        price: it.price,
+        quantity: it.quantity,
+        size: it.size || 'Regular',
+        crust: it.crust || 'Normal',
+        addons: it.addons || []
+      })),
+      subtotal: serverCalculatedTotal,
+      discountAmount,
+      couponCode: appliedCouponCode || undefined,
+      taxAmount: taxes,
+      cgst: Math.round(taxes / 2),
+      sgst: taxes - Math.round(taxes / 2),
+      deliveryFee,
+      totalAmount: finalOrderTotal,
+      paymentMethod: (req.body.paymentMethod || 'COD').toUpperCase(),
+      paymentStatus: (req.body.paymentMethod || '').toUpperCase() === 'COD' ? 'PENDING' : 'PAID',
+      orderStatus: 'PLACED',
+      franchiseId: resolvedFranchiseId,
+      branchId: resolvedBranchId,
+      cashierName: resolvedCashierName || 'Online App',
+      terminalId: resolvedTerminalId || 'ONLINE-APP',
+      notes: req.body.notes || ''
+    });
+
+    const permanentBillNo = canonical.permanentBillNo;
+    const dailyOrderNumber = canonical.dailyOrderNo;
+    const orderNumber = `#${dailyOrderNumber}`;
+    const billNumber = `#${permanentBillNo}`;
+    const orderDateLocal = canonical.orderDate;
+
     try {
       await adminDb.collection('orders').doc(newOrderId).set({
         id: newOrderId,
+        permanentBillNo,
+        billNumber,
+        dailyOrderNumber,
+        orderNumber,
+        orderDateLocal,
         userId,
         items: validatedItems,
         totalAmount: finalOrderTotal,
@@ -580,9 +613,6 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         contactPhone: userPhone,
         customerName: userData.name || (req.user as any)?.name || 'Gourmet Customer',
         // Canonical order identifiers
-        dailyOrderNumber: dailyOrderNumber > 0 ? dailyOrderNumber : null,
-        orderDateLocal,
-        // Legacy field for backwards-compat with older listeners
         daily_order_number: orderNumber,
         paymentMethod: req.body.paymentMethod || 'COD',
         paymentId: req.body.paymentId || ('pay_' + newOrderId.slice(0, 8)),
@@ -605,7 +635,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         updatedAt: new Date(),
       });
 
-      trace.steps.push({ step: 'Firestore Write', status: 'success', orderId: newOrderId, dailyOrderNumber });
+      trace.steps.push({ step: 'Firestore Write', status: 'success', orderId: newOrderId, dailyOrderNumber, permanentBillNo });
 
       // Asynchronously sync online order to franchise-specific Google Spreadsheet
       FranchiseGoogleSheetsService.syncOrderToFranchise({
@@ -641,6 +671,8 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     res.status(201).json({ 
       message: 'Order placed successfully', 
       orderId: newOrderId, 
+      permanentBillNo,
+      billNumber,
       orderNumber, 
       dailyOrderNumber: dailyOrderNumber > 0 ? dailyOrderNumber : null, 
       orderDateLocal, 

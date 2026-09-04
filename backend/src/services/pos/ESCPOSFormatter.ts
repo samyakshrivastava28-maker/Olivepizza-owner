@@ -22,6 +22,8 @@ export interface ReceiptItem {
 export interface ReceiptData {
   orderNumber: string;
   billId: string;
+  permanentBillNo?: number;
+  billNumber?: string;
   date: string;
   time: string;
   orderType: 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY' | string;
@@ -97,9 +99,10 @@ export class ESCPOSFormatter {
     if (data.fssaiNumber) lines.push(center(`FSSAI: ${data.fssaiNumber}`));
     lines.push(doubleDivider);
 
-    // Bill & Order Metadata
-    lines.push(justify(`BILL: ${data.orderNumber}`, `DATE: ${data.date}`));
-    lines.push(justify(`TIME: ${data.time}`, `TERM: ${data.terminalId}`));
+    // Bill & Order Metadata (Permanent Bill No + Daily Order No)
+    const permBillText = data.billNumber || (data.permanentBillNo ? `#${data.permanentBillNo}` : data.orderNumber);
+    lines.push(justify(`PERM BILL: ${permBillText}`, `DATE: ${data.date}`));
+    lines.push(justify(`DAILY ORD: ${data.orderNumber}`, `TIME: ${data.time}`));
     lines.push(justify(`CASHIER: ${data.cashierName}`, `MODE: ${data.orderType}`));
 
     if (data.orderType === 'DINE_IN' && data.tableNumber) {

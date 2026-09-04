@@ -10,7 +10,12 @@ import { POSTelemetryHealthService } from '../services/pos/POSTelemetryHealthSer
 import { orderEventService } from '../services/order/OrderEventService.js';
 import { OwnerTemplates, CustomerTemplates } from '../services/notification/NotificationTemplates.js';
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
+import { CanonicalOrderService } from '../services/pos/CanonicalOrderService.js';
+import { BillingNumberService } from '../services/pos/BillingNumberService.js';
+import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngine.js';
+import { query } from '../config/postgres.js';
 import crypto from 'crypto';
+import net from 'net';
 
 const router = Router();
 
@@ -279,39 +284,61 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
     const franchiseId = user.franchiseId || 'fra_primary';
     const cashierName = user.email?.split('@')[0] || 'Counter Cashier';
 
-    // Unique Order ID
-    const newOrderId = crypto.randomUUID();
-    const shortId = newOrderId.slice(-6).toUpperCase();
-
-    // Daily Atomic Order Number Counter
-    let dailyOrderNumber = 0;
-    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
-    const counterRef = adminDb.collection('counters').doc('dailyOrders');
-
-    try {
-      dailyOrderNumber = await adminDb.runTransaction(async (t) => {
-        const snap = await t.get(counterRef);
-        const data = snap.exists ? snap.data()! : { date: today, count: 0 };
-        const newCount = data.date === today ? (data.count as number) + 1 : 1;
-        t.set(counterRef, { date: today, count: newCount });
-        return newCount;
-      });
-    } catch {
-      dailyOrderNumber = 1000 + Math.floor(Math.random() * 900);
-    }
-
-    const orderNumber = `#${dailyOrderNumber}`;
-
     // Map orderSource
     const orderSourceMap: Record<string, string> = {
       DINE_IN: 'POS_DINE_IN',
       TAKEAWAY: 'POS_TAKEAWAY',
       DELIVERY: 'POS_DELIVERY'
     };
-    const orderSource = orderSourceMap[resolvedOrderType] || 'POS_DINE_IN';
+    const orderSource = (orderSourceMap[resolvedOrderType] || 'POS_DINE_IN') as any;
+
+    // Authoritative PostgreSQL Order, Immutable Item Snapshot & Permanent Bill Creation
+    const canonical = await CanonicalOrderService.createCanonicalOrder({
+      orderSource,
+      orderType: resolvedOrderType.toLowerCase() as any,
+      customerName: customerName || (resolvedOrderType === 'DINE_IN' ? `Table ${tableNumber || 'Guest'}` : 'Walk-in Customer'),
+      customerPhone: customerPhone || 'N/A',
+      deliveryAddress: resolvedOrderType === 'DELIVERY' ? deliveryAddress : undefined,
+      tableNumber: resolvedOrderType === 'DINE_IN' ? (tableNumber || 'T-1') : undefined,
+      items: calc.items.map(it => ({
+        menuItemId: it.menuItemId || it.id,
+        name: it.name,
+        price: it.price,
+        quantity: it.quantity,
+        size: it.size || 'Regular',
+        crust: it.crust || 'Normal',
+        addons: it.addons || []
+      })),
+      subtotal: calc.subtotal,
+      discountAmount: calc.discountAmount,
+      couponCode: calc.couponCode || undefined,
+      taxAmount: calc.taxes,
+      cgst: calc.cgst,
+      sgst: calc.sgst,
+      deliveryFee: calc.deliveryFee,
+      totalAmount: calc.finalTotal,
+      paymentMethod: (paymentMethod || 'CASH').toUpperCase(),
+      paymentStatus: 'PAID',
+      orderStatus: resolvedOrderType === 'DINE_IN' ? 'preparing' : 'pending_acceptance',
+      franchiseId,
+      branchId,
+      cashierId: user.uid,
+      cashierName,
+      terminalId,
+      notes: notes || ''
+    });
+
+    const newOrderId = canonical.id;
+    const permanentBillNo = canonical.permanentBillNo;
+    const dailyOrderNumber = canonical.dailyOrderNo;
+    const orderNumber = `#${dailyOrderNumber}`;
+    const billNumber = `#${permanentBillNo}`;
+    const today = canonical.orderDate;
 
     const orderDocData = {
       id: newOrderId,
+      permanentBillNo,
+      billNumber,
       dailyOrderNumber,
       orderNumber,
       orderDateLocal: today,
@@ -323,6 +350,8 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
       discountAmount: calc.discountAmount,
       couponCode: calc.couponCode,
       taxes: calc.taxes,
+      cgst: calc.cgst,
+      sgst: calc.sgst,
       deliveryFee: calc.deliveryFee,
       totalAmount: calc.finalTotal,
       finalTotal: calc.finalTotal,
@@ -346,23 +375,9 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
       branchName: 'Olive Pizza — Rajnandgaon HQ',
       franchiseId,
       notes: notes || '',
-      googleSheetsSyncStatus: 'SYNC_PENDING',
-      googleSheetsQueuedAt: new Date().toISOString(),
       createdAt: new Date(),
       updatedAt: new Date()
     };
-
-    // Primary Database Persistence (Authoritative Source of Truth)
-    await adminDb.collection('orders').doc(newOrderId).set(orderDocData);
-
-    // Asynchronously sync POS order to franchise-specific Google Spreadsheet
-    FranchiseGoogleSheetsService.syncOrderToFranchise({ id: newOrderId, ...orderDocData })
-      .catch(e => console.warn('[POSSheetSync] Notice:', e.message));
-    await adminDb.collection('pos_bills').doc(newOrderId).set({
-      ...orderDocData,
-      billId: newOrderId,
-      calculation: calc
-    }).catch(() => {});
 
     // Update active shift sales tally asynchronously
     setImmediate(async () => {
@@ -435,6 +450,8 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
     const receiptData: ReceiptData = {
       orderNumber,
       billId: newOrderId,
+      permanentBillNo,
+      billNumber,
       date: today,
       time: new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }),
       orderType: resolvedOrderType,
@@ -465,8 +482,10 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
       success: true,
       message: 'Bill created and saved successfully',
       orderId: newOrderId,
-      orderNumber,
+      permanentBillNo,
+      billNumber,
       dailyOrderNumber,
+      orderNumber,
       finalTotal: calc.finalTotal,
       order: orderDocData,
       receipt: {
@@ -477,6 +496,143 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
   } catch (error: any) {
     console.error('[POS] Order creation failed:', error);
     res.status(500).json({ success: false, error: error.message || 'Failed to create bill' });
+  }
+});
+
+// ============================================================================
+// 4.5. ADVANCED DETERMINISTIC BILL SEARCH (SECTION 11 — ZERO AI, 100% SQL)
+// ============================================================================
+router.get('/search', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user!;
+    const isOwner = FranchiseScopeService.isGlobalOwner(user.email, user.role);
+    const branchId = isOwner && req.query.branchId ? (req.query.branchId as string) : (user.branchId || 'main_branch');
+    const franchiseId = isOwner && req.query.franchiseId ? (req.query.franchiseId as string) : (user.franchiseId || 'fra_primary');
+
+    const permBillNo = req.query.permanentBillNo ? parseInt(req.query.permanentBillNo as string, 10) : undefined;
+    const dailyOrderNo = req.query.dailyOrderNo ? parseInt(req.query.dailyOrderNo as string, 10) : undefined;
+
+    const results = await CanonicalOrderService.searchCanonicalOrders({
+      permanentBillNo: permBillNo,
+      dailyOrderNo: dailyOrderNo,
+      orderId: req.query.orderId as string,
+      customerPhone: req.query.customerPhone as string,
+      customerName: req.query.customerName as string,
+      startDate: req.query.startDate as string,
+      endDate: req.query.endDate as string,
+      minAmount: req.query.minAmount ? parseFloat(req.query.minAmount as string) : undefined,
+      maxAmount: req.query.maxAmount ? parseFloat(req.query.maxAmount as string) : undefined,
+      paymentMethod: req.query.paymentMethod as string,
+      paymentStatus: req.query.paymentStatus as string,
+      orderStatus: req.query.orderStatus as string,
+      orderSource: req.query.orderSource as string,
+      orderType: req.query.orderType as string,
+      itemName: req.query.itemName as string,
+      branchId,
+      franchiseId,
+      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : 50,
+      offset: req.query.offset ? parseInt(req.query.offset as string, 10) : 0
+    });
+
+    res.json({
+      success: true,
+      count: results.length,
+      orders: results
+    });
+  } catch (error: any) {
+    console.error('[POS Search] Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================================
+// 4.6. LIVE ONLINE ORDERS FOR POS WORKSPACE (SECTION 5 & 21)
+// ============================================================================
+router.get('/online-orders/live', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user!;
+    const branchId = user.branchId || 'main_branch';
+    const orders = await CanonicalOrderService.getLiveOnlineOrders(branchId);
+    res.json({ success: true, count: orders.length, orders });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/online-orders/:id/accept', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const user = req.user!;
+    const now = new Date();
+
+    await query(`
+      UPDATE canonical_orders
+      SET order_status = 'ACCEPTED', updated_at = $2
+      WHERE id = $1;
+    `, [id, now]);
+
+    await adminDb.collection('orders').doc(id).update({
+      status: 'accepted',
+      acceptedAt: now.toISOString(),
+      updatedAt: now
+    }).catch(() => {});
+
+    try {
+      await orderEventService.emitStatusChange(id, 'accepted', user.uid);
+    } catch {}
+
+    res.json({ success: true, message: 'Order accepted' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/online-orders/:id/reject', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { reason = 'Store busy / items unavailable' } = req.body;
+    const user = req.user!;
+
+    await CanonicalOrderService.cancelOrRefundOrder({
+      orderId: id,
+      reason,
+      cancelledBy: user.email || 'Cashier'
+    });
+
+    try {
+      await orderEventService.emitStatusChange(id, 'cancelled', user.uid);
+    } catch {}
+
+    res.json({ success: true, message: 'Order rejected' });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================================
+// 4.7. AUDITABLE VOID & REFUND BILL (SECTION 18)
+// ============================================================================
+router.post('/orders/:id/cancel', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { reason, refundAmount } = req.body;
+    const user = req.user!;
+
+    if (!reason) {
+      res.status(400).json({ success: false, error: 'Cancellation reason is required for audit' });
+      return;
+    }
+
+    const result = await CanonicalOrderService.cancelOrRefundOrder({
+      orderId: id,
+      reason,
+      refundAmount: refundAmount ? parseFloat(refundAmount) : undefined,
+      cancelledBy: user.email || 'Staff'
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -940,18 +1096,21 @@ router.post('/terminals/:terminalId/revoke', verifyToken, requireRole(['franchis
 router.get('/analytics/summary', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const branchId = user.branchId || 'main_branch';
-    const franchiseId = user.franchiseId || 'fra_primary';
+    const isOwner = FranchiseScopeService.isGlobalOwner(user.email, user.role);
+    const branchId = isOwner && req.query.branchId ? (req.query.branchId as string) : (user.branchId || 'main_branch');
+    const franchiseId = isOwner && req.query.franchiseId ? (req.query.franchiseId as string) : (user.franchiseId || 'fra_primary');
     const period = (req.query.period as any) || 'today';
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
 
-    const summary = await POSService.getAnalyticsSummary({
+    const { dateRange, periodLabel } = SalesCalculationEngine.resolveDateRange(period, startDate, endDate);
+
+    const summary = await SalesCalculationEngine.getSalesSummary({
       branchId,
       franchiseId,
-      period,
-      startDate,
-      endDate
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+      periodLabel
     });
 
     res.json({ success: true, summary });
@@ -962,10 +1121,54 @@ router.get('/analytics/summary', verifyToken, requirePOSRole, async (req: AuthRe
 
 router.get('/analytics/hourly-trend', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = req.user?.branchId || 'main_branch';
-    const dateStr = req.query.date as string;
-    const trend = await POSService.getHourlySalesTrend(branchId, dateStr);
-    res.json({ success: true, trend });
+    const user = req.user!;
+    const branchId = user.branchId || 'main_branch';
+    const dateStr = (req.query.date as string) || BillingNumberService.getLocalDateString();
+
+    const hourlyRes = await query(`
+      SELECT
+        EXTRACT(HOUR FROM order_time)::integer AS hour_num,
+        COUNT(*)::integer AS order_count,
+        COALESCE(SUM(total_amount), 0)::numeric AS total_sales
+      FROM canonical_orders
+      WHERE branch_id = $1 AND order_date = $2::date AND order_status NOT IN ('CANCELLED', 'cancelled', 'VOIDED', 'voided')
+      GROUP BY hour_num
+      ORDER BY hour_num ASC;
+    `, [branchId, dateStr]);
+
+    const hoursMap = new Map<number, { sales: number; orders: number }>();
+    hourlyRes.rows.forEach(r => {
+      hoursMap.set(parseInt(r.hour_num, 10), {
+        sales: parseFloat(r.total_sales),
+        orders: parseInt(r.order_count, 10)
+      });
+    });
+
+    const hours = [];
+    let peakHour = { hour: '12:00', sales: 0 };
+
+    for (let h = 10; h <= 23; h++) {
+      const data = hoursMap.get(h) || { sales: 0, orders: 0 };
+      const label = `${h}:00`;
+      hours.push({
+        hour: label,
+        label: `${h > 12 ? h - 12 : h} ${h >= 12 ? 'PM' : 'AM'}`,
+        sales: data.sales,
+        orders: data.orders
+      });
+      if (data.sales > peakHour.sales) {
+        peakHour = { hour: label, sales: data.sales };
+      }
+    }
+
+    res.json({
+      success: true,
+      trend: {
+        date: dateStr,
+        hours,
+        peakHour
+      }
+    });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -973,10 +1176,30 @@ router.get('/analytics/hourly-trend', verifyToken, requirePOSRole, async (req: A
 
 router.get('/analytics/product-performance', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = req.user?.branchId || 'main_branch';
+    const user = req.user!;
+    const branchId = user.branchId || 'main_branch';
+    const franchiseId = user.franchiseId || 'fra_primary';
     const limitCount = Number(req.query.limit) || 8;
-    const data = await POSService.getProductPerformanceLeaderboard(branchId, limitCount);
-    res.json({ success: true, ...data });
+
+    const { dateRange } = SalesCalculationEngine.resolveDateRange('this_month');
+
+    const products = await SalesCalculationEngine.getItemSalesSummary({
+      branchId,
+      franchiseId,
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+      limit: limitCount
+    });
+
+    res.json({
+      success: true,
+      products: products.map(p => ({
+        name: p.itemName,
+        category: p.sizeVariant || 'Regular',
+        quantitySold: p.quantitySold,
+        revenue: p.salesValue
+      }))
+    });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -2151,6 +2374,42 @@ router.post('/reprint-audit', verifyToken, requirePOSRole, async (req: AuthReque
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// ============================================================================
+// 4.10. TEST NETWORK / WIFI PRINTER (SECTION 10)
+// ============================================================================
+router.post('/printer/test-network', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+  const { ip, port = 9100 } = req.body;
+  if (!ip) {
+    res.status(400).json({ success: false, error: 'Printer IP address is required' });
+    return;
+  }
+
+  const socket = new net.Socket();
+  socket.setTimeout(3500);
+
+  let responded = false;
+  const finish = (success: boolean, error?: string) => {
+    if (responded) return;
+    responded = true;
+    socket.destroy();
+    res.json({ success, message: success ? `Network printer reached at ${ip}:${port}` : error });
+  };
+
+  socket.connect(Number(port), ip, () => {
+    // Send ESC @ (initialize printer)
+    socket.write(Buffer.from([0x1B, 0x40]));
+    finish(true);
+  });
+
+  socket.on('timeout', () => {
+    finish(false, `Connection timed out to printer at ${ip}:${port}`);
+  });
+
+  socket.on('error', (err) => {
+    finish(false, `Socket connection error: ${err.message}`);
+  });
 });
 
 export default router;
