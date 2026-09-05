@@ -39,7 +39,24 @@ jobs:
           name: OlivePizza-Owner-Windows-Installer
           path: dist-electron/*.exe
           retention-days: 30
-      - name: Create GitHub Release
+      # Create or Update Unified GitHub Release (All Platforms)
+      - name: Create or Update Unified GitHub Release
+        id: create_unified_release
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
+        with:
+          name: "Olive Pizza Owner — Latest Release (All Platforms)"
+          tag_name: "latest"
+          files: dist-electron/*.exe
+          draft: false
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Create Versioned GitHub Release
+      - name: Create Versioned GitHub Release
         id: create_release
         continue-on-error: true
         uses: softprops/action-gh-release@v2
@@ -50,6 +67,7 @@ jobs:
           files: dist-electron/*.exe
           draft: false
           prerelease: false
+          make_latest: false
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
