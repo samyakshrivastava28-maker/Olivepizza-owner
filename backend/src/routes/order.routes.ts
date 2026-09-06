@@ -1005,16 +1005,29 @@ router.post('/:id/assign-rider', verifyToken, async (req: AuthRequest, res: Resp
     }
 
     const { adminDb } = await import('../config/firebase.js');
-    const riderDoc = await adminDb.collection('users').doc(riderId).get();
-    const rData = riderDoc.data() || {};
+    let riderDoc = await adminDb.collection('users').doc(riderId).get();
+    let rData = riderDoc.data() || {};
+    if (!riderDoc.exists) {
+      const dpDoc = await adminDb.collection('delivery_partners').doc(riderId).get();
+      if (dpDoc.exists) {
+        rData = dpDoc.data() || {};
+      }
+    }
 
+    const nowIso = new Date().toISOString();
     const result = await OrderStateMachine.transition(id, 'partner_assigned', { uid: uid || 'system', role: userRole || 'restaurant_manager', name }, {
       deliveryPartnerId: riderId,
       deliveryPartnerName: rData.name || rData.displayName || 'Rider',
       deliveryPartnerPhone: rData.phone || rData.phoneNumber || '+91 91799 44445',
+      partnerAssignedAt: nowIso,
+      expectedPickupAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     });
 
     if (!result.success) return res.status(400).json({ error: result.error });
+
+    // Mark activeOrderId on rider record to enforce single assignment
+    adminDb.collection('users').doc(riderId).set({ activeOrderId: id }, { merge: true }).catch(() => {});
+    adminDb.collection('delivery_partners').doc(riderId).set({ activeOrderId: id }, { merge: true }).catch(() => {});
 
     // Notify Rider
     const { notificationEngine } = await import('../services/notification/NotificationEngine.js');
@@ -1188,6 +1201,68 @@ router.post('/:id/acknowledge-cancellation', verifyToken, async (req: AuthReques
   } catch (err: any) {
     console.error('[Orders] Acknowledge cancellation error:', err);
     res.status(500).json({ success: false, error: err.message || 'Failed to acknowledge cancellation' });
+  }
+});
+
+// ─── GET /:id/rider-contact — Authenticated Secure Endpoint to Retrieve Assigned Rider Contact ───
+router.get('/:id/rider-contact', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.uid;
+    const orderRef = adminDb.collection('orders').doc(id);
+    const snap = await orderRef.get();
+
+    if (!snap.exists) {
+      res.status(404).json({ success: false, error: 'Order not found' });
+      return;
+    }
+
+    const orderData = snap.data()!;
+    const isStaff = ['owner', 'admin', 'developer', 'restaurant_manager', 'manager'].includes(req.user?.role || '');
+
+    // Authorization: Only customer who placed the order or staff can access rider contact
+    if (orderData.userId !== userId && !isStaff) {
+      res.status(403).json({ success: false, error: 'Forbidden: Unauthorized access to order details' });
+      return;
+    }
+
+    // Check if order has reached a terminal state
+    const status = (orderData.status || '').toLowerCase();
+    if (['delivered', 'cancelled', 'rejected', 'completed'].includes(status)) {
+      res.status(400).json({ success: false, error: 'Order is no longer active' });
+      return;
+    }
+
+    const riderId = orderData.deliveryPartnerId;
+    if (!riderId) {
+      res.json({
+        success: true,
+        assigned: false,
+        message: 'No delivery partner assigned yet'
+      });
+      return;
+    }
+
+    // Retrieve rider verified contact info
+    const riderDoc = await adminDb.collection('users').doc(riderId).get();
+    const riderData = riderDoc.exists ? riderDoc.data()! : {};
+
+    const riderPhone = riderData.phone || riderData.phoneNumber || orderData.deliveryPartnerPhone || '';
+    const riderName = riderData.name || riderData.displayName || orderData.deliveryPartnerName || 'Delivery Partner';
+    const vehicleNumber = riderData.vehicleNumber || orderData.deliveryVehicleNumber || '';
+
+    res.json({
+      success: true,
+      assigned: true,
+      rider: {
+        name: riderName,
+        phone: riderPhone,
+        vehicleNumber
+      }
+    });
+  } catch (err: any) {
+    console.error('[Orders] Get rider contact error:', err);
+    res.status(500).json({ success: false, error: err.message || 'Failed to fetch rider contact' });
   }
 });
 

@@ -229,6 +229,40 @@ async function run() {
     if (res.status !== 400) throw new Error(`Expected 400, got ${res.status}`);
   });
 
+  console.log('\n[12. Operational App Allowlist Security (Part 1)]');
+  await test('Reject unauthenticated POST /api/auth/authorize-app with 401', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/authorize-app`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetApp: 'POS' })
+    });
+    if (res.status !== 401) throw new Error(`Expected 401, got ${res.status}`);
+  });
+
+  await test('Reject authorize-app with invalid targetApp parameter with 401 (or 400 when authed)', async () => {
+    const res = await fetch(`${baseUrl}/api/auth/authorize-app`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetApp: 'HACKER_PANEL' })
+    });
+    // Unauthenticated request is caught by verifyToken middleware first (401)
+    if (res.status !== 401 && res.status !== 400) throw new Error(`Expected 401 or 400, got ${res.status}`);
+  });
+
+  console.log('\n[13. Canonical Order Status Reconciliation]');
+  await test('Reconcile legacy statuses into canonical OrderStatus enum', async () => {
+    const { OrderStateMachine } = await import('../src/services/order/OrderStateMachine.js');
+    if (OrderStateMachine.reconcileStatus('pending_acceptance') !== 'pending') throw new Error('Failed to reconcile pending_acceptance');
+    if (OrderStateMachine.reconcileStatus('PENDING') !== 'pending') throw new Error('Failed to reconcile uppercase PENDING');
+    if (OrderStateMachine.reconcileStatus('preparing') !== 'preparing') throw new Error('Failed to reconcile preparing');
+    if (OrderStateMachine.reconcileStatus('ready') !== 'ready') throw new Error('Failed to reconcile ready');
+    if (OrderStateMachine.reconcileStatus('picked_up') !== 'picked_up') throw new Error('Failed to reconcile picked_up');
+    if (OrderStateMachine.reconcileStatus('out_for_delivery') !== 'out_for_delivery') throw new Error('Failed to reconcile out_for_delivery');
+    if (OrderStateMachine.reconcileStatus('delivered') !== 'delivered') throw new Error('Failed to reconcile delivered');
+    if (OrderStateMachine.reconcileStatus('cancelled') !== 'cancelled') throw new Error('Failed to reconcile cancelled');
+    if (OrderStateMachine.reconcileStatus('garbage_status') !== 'pending') throw new Error('Failed fallback on unknown status');
+  });
+
   console.log('\n===============================================================');
   console.log(`TOTAL TESTS: ${passed + failed} | PASSED: ${passed} | FAILED: ${failed}`);
   console.log('===============================================================\n');

@@ -458,6 +458,253 @@ router.post('/orders/:id/complete', async (req: AuthRequest, res: Response): Pro
   }
 });
 
+// 8b. POST /orders/:id/action - Unified Idempotent Notification & Live Action Handler
+router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promise<void> => {
+  const idempotencyKey = (req.headers['idempotency-key'] as string) || req.body.idempotencyKey || `act_${Date.now()}`;
+  try {
+    const orderId = req.params.id;
+    const { action, riderLat, riderLng, proofImageUrl, signatureUrl, notes } = req.body;
+    const uid = req.user?.uid!;
+    const name = (req.user as any)?.name || req.user?.email || 'Rider';
+
+    if (!action) {
+      res.status(400).json({ success: false, error: 'Action is required' });
+      return;
+    }
+
+    const orderRef = adminDb.collection('orders').doc(orderId);
+    const orderDoc = await orderRef.get();
+
+    if (!orderDoc.exists) {
+      res.status(404).json({ success: false, error: 'Order not found' });
+      return;
+    }
+
+    const orderData = orderDoc.data()!;
+
+    // Ownership check: delivery partner can only execute actions on their own assigned order
+    if (
+      req.user?.role === 'delivery_partner' &&
+      orderData.deliveryPartnerId &&
+      orderData.deliveryPartnerId !== uid
+    ) {
+      res.status(403).json({ success: false, error: 'Forbidden: This order is assigned to a different delivery partner.' });
+      return;
+    }
+
+    const currentStatus = (orderData.status || '').toLowerCase();
+
+    // Check terminal states
+    if (['cancelled', 'rejected', 'failed'].includes(currentStatus)) {
+      res.status(400).json({ success: false, error: `Cannot execute action on ${currentStatus} order.` });
+      return;
+    }
+
+    // Idempotency: Check if this idempotency key was already processed
+    if (orderData.lastActionIdempotencyKey === idempotencyKey) {
+      res.json({
+        success: true,
+        duplicate: true,
+        message: 'Action already processed (idempotent)',
+        orderId,
+        status: currentStatus,
+        idempotencyKey
+      });
+      return;
+    }
+
+    const normalizedAction = action.toUpperCase().trim();
+
+    switch (normalizedAction) {
+      case 'ARRIVED_AT_STORE': {
+        await orderRef.update({
+          riderArrivedAtStoreAt: new Date().toISOString(),
+          lastActionIdempotencyKey: idempotencyKey,
+          updatedAt: new Date().toISOString()
+        });
+        res.json({
+          success: true,
+          message: 'Arrived at store recorded',
+          orderId,
+          status: currentStatus,
+          idempotencyKey
+        });
+        return;
+      }
+
+      case 'PICKED_UP': {
+        if (['picked_up', 'out_for_delivery', 'delivered'].includes(currentStatus)) {
+          res.json({
+            success: true,
+            duplicate: true,
+            message: 'Order already picked up',
+            orderId,
+            status: currentStatus,
+            idempotencyKey
+          });
+          return;
+        }
+
+        const pickResult = await OrderStateMachine.transition(orderId, 'picked_up', { uid, role: 'delivery_partner', name }, {
+          pickedUpAt: new Date().toISOString(),
+          lastActionIdempotencyKey: idempotencyKey
+        });
+
+        if (!pickResult.success) {
+          res.status(400).json({ success: false, error: pickResult.error });
+          return;
+        }
+
+        const outResult = await OrderStateMachine.transition(orderId, 'out_for_delivery', { uid, role: 'delivery_partner', name }, {
+          outForDeliveryAt: new Date().toISOString(),
+          lastActionIdempotencyKey: idempotencyKey
+        });
+
+        res.json({
+          success: true,
+          message: 'Order picked up and out for delivery',
+          orderId,
+          status: 'out_for_delivery',
+          idempotencyKey
+        });
+        return;
+      }
+
+      case 'OUT_FOR_DELIVERY': {
+        if (['out_for_delivery', 'delivered'].includes(currentStatus)) {
+          res.json({
+            success: true,
+            duplicate: true,
+            message: 'Order already out for delivery',
+            orderId,
+            status: currentStatus,
+            idempotencyKey
+          });
+          return;
+        }
+
+        const outResult = await OrderStateMachine.transition(orderId, 'out_for_delivery', { uid, role: 'delivery_partner', name }, {
+          outForDeliveryAt: new Date().toISOString(),
+          lastActionIdempotencyKey: idempotencyKey
+        });
+
+        if (!outResult.success) {
+          res.status(400).json({ success: false, error: outResult.error });
+          return;
+        }
+
+        res.json({
+          success: true,
+          message: 'Order is now out for delivery',
+          orderId,
+          status: 'out_for_delivery',
+          idempotencyKey
+        });
+        return;
+      }
+
+      case 'ARRIVED_AT_CUSTOMER': {
+        await orderRef.update({
+          riderArrivedAtCustomerAt: new Date().toISOString(),
+          lastActionIdempotencyKey: idempotencyKey,
+          updatedAt: new Date().toISOString()
+        });
+        res.json({
+          success: true,
+          message: 'Arrived at customer location recorded',
+          orderId,
+          status: currentStatus,
+          idempotencyKey
+        });
+        return;
+      }
+
+      case 'DELIVERED': {
+        if (currentStatus === 'delivered') {
+          res.json({
+            success: true,
+            duplicate: true,
+            message: 'Order already marked delivered',
+            orderId,
+            status: 'delivered',
+            idempotencyKey
+          });
+          return;
+        }
+
+        // Strict 200m Haversine Proximity Check
+        const destLat = orderData.deliveryAddress?.lat || orderData.location?.lat;
+        const destLng = orderData.deliveryAddress?.lng || orderData.location?.lng;
+
+        if (destLat && destLng) {
+          if (!riderLat || !riderLng) {
+            res.status(400).json({
+              success: false,
+              error: 'Rider GPS coordinates (riderLat, riderLng) are required to verify proximity before marking delivered.',
+              requiredMeters: 200
+            });
+            return;
+          }
+
+          const distanceMeters = calculateDistanceMeters(
+            Number(riderLat),
+            Number(riderLng),
+            Number(destLat),
+            Number(destLng)
+          );
+
+          if (distanceMeters > 200) {
+            res.status(400).json({
+              success: false,
+              error: `You are too far from the customer delivery address (${Math.round(distanceMeters)}m away). Must be within 200 meters to complete.`,
+              distanceMeters: Math.round(distanceMeters),
+              requiredMeters: 200
+            });
+            return;
+          }
+        }
+
+        const updates: any = {
+          status: 'delivered',
+          deliveredAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          lastActionIdempotencyKey: idempotencyKey,
+          proofOfDelivery: {
+            proofImageUrl: proofImageUrl || null,
+            signatureUrl: signatureUrl || null,
+            notes: notes || 'Delivered via notification action',
+            completedLat: riderLat || null,
+            completedLng: riderLng || null,
+            completedAt: new Date().toISOString()
+          }
+        };
+
+        await orderRef.set(updates, { merge: true });
+
+        await adminDb.collection('users').doc(uid).set({
+          lastDeliveredOrderId: orderId,
+          lastDeliveredAt: new Date().toISOString()
+        }, { merge: true });
+
+        res.json({
+          success: true,
+          message: 'Delivery successfully completed and verified',
+          orderId,
+          status: 'delivered',
+          idempotencyKey
+        });
+        return;
+      }
+
+      default:
+        res.status(400).json({ success: false, error: `Unsupported action: ${action}` });
+    }
+  } catch (error: any) {
+    console.error('[RiderDelivery] Action error:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to process action' });
+  }
+});
+
 
 // 9. POST /status - Toggle Online / Offline Working Status
 router.post('/status', async (req: AuthRequest, res: Response): Promise<void> => {

@@ -43,10 +43,22 @@ export class RiderDispatchEngine {
     const restaurantLat = orderData.restaurantLat || 21.0967;
     const restaurantLng = orderData.restaurantLng || 81.0315;
 
-    // 1. Query delivery partners for this branch
+    // 1. Query delivery partners from both users and delivery_partners collections
+    const ridersMap = new Map<string, any>();
+
     const ridersSnap = await adminDb.collection('users')
       .where('role', 'in', ['delivery_partner', 'delivery'])
       .get();
+    ridersSnap.forEach((doc) => ridersMap.set(doc.id, { uid: doc.id, ...doc.data() }));
+
+    const dpSnap = await adminDb.collection('delivery_partners').get().catch(() => ({ docs: [] } as any));
+    dpSnap.forEach((doc: any) => {
+      const data = doc.data();
+      const uid = data.uid || doc.id;
+      if (!ridersMap.has(uid)) {
+        ridersMap.set(uid, { uid, ...data });
+      }
+    });
 
     // 2. Query active locations
     const locSnap = await adminDb.collection('delivery_locations').get();
@@ -56,43 +68,43 @@ export class RiderDispatchEngine {
     const candidates: EligibleRider[] = [];
     const nowMs = Date.now();
 
-    for (const doc of ridersSnap.docs) {
-      const uid = doc.id;
+    for (const [uid, rData] of ridersMap.entries()) {
       if (excludedUids.has(uid)) continue;
 
-      const rData = doc.data();
       const riderBranchId = rData.branchId || 'main_branch';
-      if (riderBranchId !== branchId && riderBranchId !== 'all') continue;
+      if (riderBranchId !== branchId && riderBranchId !== 'all' && branchId !== 'all') continue;
       if (rData.isOnline === false || rData.isActive === false) continue;
       if (rData.activeOrderId && rData.activeOrderId !== orderId) continue; // single-assignment rule
 
       const loc = locMap.get(uid);
-      if (!loc || !loc.latitude || !loc.longitude) continue;
+      let latitude = restaurantLat;
+      let longitude = restaurantLng;
+      let distanceMeters = 300; // Default: at the restaurant / branch
+      let score = 5000;
 
-      // GPS freshness check (< 5 minutes)
-      const locTime = loc.updated_at ? new Date(loc.updated_at).getTime() : nowMs;
-      const isFresh = (nowMs - locTime) <= (5 * 60 * 1000);
-      if (!isFresh) continue;
+      if (loc && loc.latitude && loc.longitude) {
+        const locTime = loc.updated_at ? new Date(loc.updated_at).getTime() : nowMs;
+        const isFresh = (nowMs - locTime) <= (15 * 60 * 1000); // 15-minute freshness window
 
-      const distanceMeters = calculateDistanceMeters(
-        restaurantLat,
-        restaurantLng,
-        Number(loc.latitude),
-        Number(loc.longitude)
-      );
-
-      // Max radius 15km
-      if (distanceMeters > 15000) continue;
-
-      // Scoring formula: lower distance = higher score (10000 - distance)
-      const score = Math.max(0, 10000 - distanceMeters);
+        if (isFresh) {
+          const lat = Number(loc.latitude);
+          const lng = Number(loc.longitude);
+          const dist = calculateDistanceMeters(restaurantLat, restaurantLng, lat, lng);
+          if (dist <= 15000) { // Max radius 15km
+            latitude = lat;
+            longitude = lng;
+            distanceMeters = dist;
+            score = Math.max(1000, 10000 - dist);
+          }
+        }
+      }
 
       candidates.push({
         uid,
         name: rData.name || rData.displayName || 'Rider',
         phone: rData.phone || rData.phoneNumber || '+91 91799 44445',
-        latitude: Number(loc.latitude),
-        longitude: Number(loc.longitude),
+        latitude,
+        longitude,
         distanceMeters: Math.round(distanceMeters),
         score,
         branchId: riderBranchId,

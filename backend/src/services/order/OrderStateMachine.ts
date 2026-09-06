@@ -192,11 +192,18 @@ export class OrderStateMachine {
       // State-specific calculations and lifecycle hooks
       if (toState === 'accepted') {
         updates.acceptedAt = nowIso;
+        if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
+          const prepMinutes = metadata.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
+          updates.estimatedPreparationMinutes = prepMinutes;
+          updates.expectedReadyAt = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+        }
       } else if (toState === 'preparing') {
         updates.preparingAt = nowIso;
-        const prepMinutes = PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
+        const prepMinutes = metadata.estimatedPreparationMinutes || orderData.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
         updates.estimatedPreparationMinutes = prepMinutes;
-        updates.expectedReadyAt = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+        if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
+          updates.expectedReadyAt = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+        }
         
         // Schedule auto-dispatch at ~2/3 prep time
         const autoDispatchDelayMs = Math.floor((prepMinutes * (2 / 3)) * 60 * 1000);
@@ -216,6 +223,12 @@ export class OrderStateMachine {
         updates.outForDeliveryAt = nowIso;
       } else if (toState === 'delivered') {
         updates.deliveredAt = nowIso;
+        // Release rider active order lock
+        const riderId = orderData.deliveryPartnerId || metadata.deliveryPartnerId;
+        if (riderId) {
+          adminDb.collection('users').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+          adminDb.collection('delivery_partners').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+        }
       } else if (toState === 'cancelled') {
         updates.cancelledAt = nowIso;
         updates.cancellationReason = metadata.cancellationReason || 'CUSTOMER_CANCELLED';
@@ -227,6 +240,13 @@ export class OrderStateMachine {
         );
         updates.cancellationAcknowledged = false;
         updates.cancellationAcknowledgedAt = null;
+
+        // Release rider active order lock if assigned
+        const riderId = orderData.deliveryPartnerId || metadata.deliveryPartnerId;
+        if (riderId) {
+          adminDb.collection('users').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+          adminDb.collection('delivery_partners').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+        }
 
         // Authoritative payment/refund status
         const isPaid = (orderData.paymentStatus || '').toLowerCase() === 'paid' || orderData.paymentCaptured === true;

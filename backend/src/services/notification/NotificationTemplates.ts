@@ -232,6 +232,13 @@ interface BuildOptions {
   currentStatus?: string;
   eventTimestamp?: string;
   serverTimestamp?: string;
+  // Live Activity & ongoing order fields
+  orderNumber?: string;
+  etaMinutes?: string;
+  riderName?: string;
+  restaurantName?: string;
+  isLive?: string;
+  [key: string]: any;
 }
 
 function buildPayload(title: string, body: string, opts: BuildOptions): NotificationPayload {
@@ -257,6 +264,13 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
   if (opts.currentStatus) safeData.currentStatus = opts.currentStatus;
   if (opts.eventTimestamp) safeData.eventTimestamp = opts.eventTimestamp;
   if (opts.serverTimestamp) safeData.serverTimestamp = opts.serverTimestamp;
+
+  // Live Activity & ongoing order fields
+  if (opts.orderNumber) safeData.orderNumber = String(opts.orderNumber);
+  if (opts.etaMinutes) safeData.etaMinutes = String(opts.etaMinutes);
+  if (opts.riderName) safeData.riderName = String(opts.riderName);
+  if (opts.restaurantName) safeData.restaurantName = String(opts.restaurantName);
+  if (opts.isLive) safeData.isLive = String(opts.isLive);
 
   // Custom action & branch fields
   if (opts.channelId) safeData.channelId = opts.channelId;
@@ -950,6 +964,11 @@ export class CustomerTemplates {
       currentStatus: payload.status,
       eventTimestamp: payload.eventTimestamp,
       serverTimestamp: new Date().toISOString(),
+      orderNumber: payload.orderNumber,
+      etaMinutes: payload.eta || '',
+      riderName: payload.deliveryPartnerName || '',
+      restaurantName: 'Olive Pizza — Rajnandgaon HQ',
+      isLive: isTerminal ? 'false' : 'true',
     });
   }
 }
