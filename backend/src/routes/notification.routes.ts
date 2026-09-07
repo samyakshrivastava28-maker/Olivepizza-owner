@@ -950,6 +950,12 @@ router.post('/send-custom', verifyToken, requireRole(['owner', 'admin', 'develop
       return;
     }
 
+    const isReportCategory = category === 'monthly_report' || category === 'report';
+    if (isReportCategory && (audience === 'customers' || audience === 'delivery')) {
+      res.status(403).json({ error: 'Forbidden: Internal monthly and financial reports cannot be sent to customers or delivery personnel.' });
+      return;
+    }
+
     const client = await pgPool.connect();
     let targetUids: string[] = [];
 

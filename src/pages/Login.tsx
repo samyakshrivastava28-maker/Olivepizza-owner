@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router';
 import { auth, googleProvider } from '../lib/firebase';
-import { signInWithEmailAndPassword, signInWithPopup } from 'firebase/auth';
+import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, GoogleAuthProvider } from 'firebase/auth';
+import { Capacitor } from '@capacitor/core';
 import { useAuthStore, isAuthorizedOwnerEmail } from '../lib/store';
 import { Lock, Mail, AlertCircle, ArrowRight } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -60,8 +61,22 @@ export default function Login() {
     setError(null);
     setLoading(true);
     try {
-      const res = await signInWithPopup(auth, googleProvider);
-      validateAndAuthenticate(res.user);
+      let user: any = null;
+      if (Capacitor.isNativePlatform()) {
+        const { FirebaseAuthentication } = await import('@capacitor-firebase/authentication');
+        const nativeResult = await FirebaseAuthentication.signInWithGoogle();
+        if (nativeResult.credential?.idToken) {
+          const credential = GoogleAuthProvider.credential(nativeResult.credential.idToken);
+          const res = await signInWithCredential(auth, credential);
+          user = res.user;
+        } else {
+          throw new Error('Google Sign-In failed on mobile device.');
+        }
+      } else {
+        const res = await signInWithPopup(auth, googleProvider);
+        user = res.user;
+      }
+      validateAndAuthenticate(user);
     } catch (err: any) {
       if (err.code !== 'auth/popup-closed-by-user') {
         setError(err.message);

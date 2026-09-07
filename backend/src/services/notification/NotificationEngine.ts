@@ -30,12 +30,10 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { adminMessaging, adminDb as db } from '../../config/firebase.js';
 import { pgPool } from '../../config/postgres.js';
 import { NotificationLogger } from './NotificationLogger.js';
-import type { NotificationPayload } from './NotificationTemplates.js';
+import type { NotificationPayload, NotificationCategory as TemplateCategory } from './NotificationTemplates.js';
 
-export type NotificationCategory =
-  | 'alarm_actionable'    // Continuous alarm (new order, delivery assignment) — highest priority
-  | 'pinned_live'         // Ongoing pinned tracker (customer order tracker updates)
-  | 'simple_informational'; // One-shot informational (marketing, standard push)
+export type NotificationCategory = TemplateCategory | 'simple_informational';
+
 
 export interface NotificationEngineOptions {
   tag?: string;
@@ -85,8 +83,24 @@ export class NotificationEngine {
       return { successCount: 0, failureCount: 0, tokensFound: 0, errors: [] };
     }
 
+    // ── 0. Server-Side Security Guard: Monthly / Financial Reports Safety ──
+    const isReportCategory = options.category === 'monthly_report' ||
+      options.category === 'report' ||
+      payload.data?.category === 'monthly_report' ||
+      payload.data?.category === 'report' ||
+      (options.tag && options.tag.startsWith('monthly_report_'));
+
+    let targetUids = firebaseUserIds;
+    if (isReportCategory) {
+      targetUids = await this.filterForbiddenReportRecipients(firebaseUserIds);
+      if (targetUids.length === 0) {
+        console.warn(`[NotificationEngine][Security Guard] All target UIDs were blocked from receiving internal reports (Customer/Delivery guard enforced).`);
+        return { successCount: 0, failureCount: 0, tokensFound: 0, errors: ['forbidden_audience'] };
+      }
+    }
+
     // ── 1. Resolve FCM tokens ─────────────────────────────────────────────────
-    const tokens = await this.resolveTokens(firebaseUserIds, options.targetApp);
+    const tokens = await this.resolveTokens(targetUids, options.targetApp);
 
     const startTime = Date.now();
     const notificationId = options.orderId ? `notif_${options.orderId}_${Date.now()}` : `notif_${Date.now()}`;
@@ -313,6 +327,67 @@ export class NotificationEngine {
       tokensFound: tokens.length,
       errors,
     };
+  }
+
+  /**
+   * Hard Server-Side Security Guard:
+   * Re-evaluates backend identity and drops any customer or delivery personnel
+   * from receiving internal business / monthly reports.
+   */
+  public async filterForbiddenReportRecipients(
+    uids: string[],
+    mockProfiles?: Record<string, { role: string; email?: string }>
+  ): Promise<string[]> {
+    const allowedStaffRoles = new Set([
+      'owner', 'admin', 'developer', 'platform_owner',
+      'franchise_owner', 'franchise_manager',
+      'restaurant_manager', 'manager', 'cashier', 'staff', 'kitchen_staff'
+    ]);
+    const forbiddenRoles = new Set(['customer', 'delivery', 'delivery_partner', 'rider']);
+
+    const allowedUids: string[] = [];
+    for (const uid of uids) {
+      try {
+        let role = '';
+        let email = '';
+
+        if (mockProfiles && mockProfiles[uid]) {
+          role = (mockProfiles[uid].role || '').toLowerCase().trim();
+          email = (mockProfiles[uid].email || '').toLowerCase().trim();
+        } else {
+          const userDoc = await db.collection('users').doc(uid).get();
+          if (userDoc.exists) {
+            const data = userDoc.data() || {};
+            role = (data.role || '').toLowerCase().trim();
+            email = (data.email || '').toLowerCase().trim();
+          } else {
+            const res = await pgPool.query(`SELECT role, email FROM users WHERE firebase_uid = $1`, [uid]).catch(() => ({ rows: [] }));
+            if (res.rows.length > 0) {
+              role = (res.rows[0].role || '').toLowerCase().trim();
+              email = (res.rows[0].email || '').toLowerCase().trim();
+            }
+          }
+        }
+
+        const isOwnerEmail = ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com', 'olivepizzamaker@gmail.com'].includes(email);
+
+        // 1. Forbidden roles are unconditionally dropped
+        if (forbiddenRoles.has(role)) {
+          console.warn(`[NotificationEngine][Security Guard] Blocked internal report notification to user ${uid} with forbidden role '${role}'.`);
+          continue;
+        }
+
+        // 2. Only allow if verified staff role or verified owner email
+        if (isOwnerEmail || allowedStaffRoles.has(role)) {
+          allowedUids.push(uid);
+        } else {
+          console.warn(`[NotificationEngine][Security Guard] Blocked internal report notification to user ${uid} without staff authorization (role='${role}').`);
+        }
+      } catch (e: any) {
+        console.warn(`[NotificationEngine][Security Guard] Exception checking report recipient ${uid}:`, e.message);
+      }
+    }
+    return allowedUids;
   }
 
   /**

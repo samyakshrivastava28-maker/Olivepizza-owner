@@ -4,7 +4,7 @@ import apiApp from './app';
 import { DataRetentionJob } from './jobs/DataRetentionJob';
 import './services/DataLifecycleService';
 import './services/notification/NotificationQueueService';
-import './jobs/WeeklyReportJob';
+import './jobs/MonthlyReportJob';
 import { kb } from './services/KnowledgeBaseService';
 import { pineconeService } from './services/ai/PineconeService';
 import { storageAnalyzer } from './services/storageAnalyzer.service';

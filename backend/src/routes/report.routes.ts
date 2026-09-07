@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
 import { verifyToken, AuthRequest } from '../middleware/auth.middleware.js';
-import { weeklyReportService } from '../lib/services/WeeklyReportService.js';
+import { MonthlyReportNotificationService, ReportScope } from '../services/reports/MonthlyReportNotificationService.js';
 import { CloudflareReportService } from '../services/reports/CloudflareReportService.js';
 import { MonthlyReportGenerator } from '../services/reports/MonthlyReportGenerator.js';
 import { CloudflareR2Service } from '../services/storage/CloudflareR2Service.js';
@@ -27,34 +27,70 @@ const requireOwnerOrAdmin = (req: AuthRequest, res: Response, next: any) => {
 /**
  * GET /api/reports/pdf/:id
  * Streams the PDF report directly (from Cloudflare R2 or local disk storage).
+ * STRICT SECURITY: Requires authentication and scope authorization.
  */
-router.get('/pdf/:id', async (req: AuthRequest, res: Response) => {
+router.get('/pdf/:id', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+      return;
+    }
+
     const { id } = req.params;
     const download = req.query.download === 'true';
 
-    // 1. Check Firestore metadata
+    // 1. Check Firestore metadata & PostgreSQL canonical snapshots
     const docSnap = await adminDb.collection('monthly_reports').doc(id).get();
     let cloudflarePath = `reports/${id}.pdf`;
     let monthName = 'Executive';
     let yearNum = new Date().getFullYear();
+    let franchiseId: string | null = null;
+    let branchId: string | null = null;
+    let scopeLevel: 'GLOBAL' | 'FRANCHISE' | 'RESTAURANT' = 'GLOBAL';
 
     if (docSnap.exists) {
       const data = docSnap.data()!;
       cloudflarePath = data.cloudflarePath || cloudflarePath;
       monthName = data.month || monthName;
       yearNum = data.year || yearNum;
+      franchiseId = data.franchiseId || null;
+      branchId = data.branchId || data.restaurantId || null;
+      scopeLevel = data.accessScope || (branchId ? 'RESTAURANT' : franchiseId ? 'FRANCHISE' : 'GLOBAL');
     } else {
-      const weeklySnap = await adminDb.collection('reports').doc(id).get();
-      if (weeklySnap.exists) {
-        const data = weeklySnap.data()!;
-        cloudflarePath = data.cloudflarePath || `reports/${data.year}/OlivePizza_Weekly_Report_${data.year}_W${data.weekNumber}.pdf`;
-        monthName = data.weekLabel || 'Weekly';
-        yearNum = data.year || yearNum;
+      const pgSnap = await query(
+        `SELECT franchise_id, branch_id, report_month, report_year, pdf_cloudflare_path
+         FROM canonical_report_snapshots
+         WHERE id::text = $1 OR pdf_cloudflare_path LIKE $2 LIMIT 1`,
+        [id, `%${id}%`]
+      ).catch(() => ({ rows: [] }));
+
+      if (pgSnap.rows.length > 0) {
+        const row = pgSnap.rows[0];
+        franchiseId = row.franchise_id;
+        branchId = row.branch_id;
+        monthName = row.report_month;
+        yearNum = row.report_year;
+        cloudflarePath = row.pdf_cloudflare_path || cloudflarePath;
+        scopeLevel = branchId ? 'RESTAURANT' : franchiseId ? 'FRANCHISE' : 'GLOBAL';
       }
     }
 
-    // 2. Fetch Buffer
+    // 2. Authoritative Server-Side Scope Authorization Check
+    const scope: ReportScope = {
+      level: scopeLevel,
+      franchiseId,
+      restaurantId: branchId,
+      periodMonth: monthName,
+      periodYear: yearNum
+    };
+
+    const authResult = MonthlyReportNotificationService.isUserAuthorizedForReport(req.user, scope);
+    if (!authResult.authorized) {
+      res.status(403).json({ error: authResult.reason || 'Forbidden: Access to this internal report is restricted.' });
+      return;
+    }
+
+    // 3. Fetch Buffer
     let buffer = await CloudflareR2Service.getBuffer(cloudflarePath);
 
     // 3. If buffer not found, generate on the fly from PostgreSQL
@@ -260,6 +296,32 @@ router.post('/generate-monthly', verifyToken, requireOwnerOrAdmin, async (req: A
       createdTime: new Date().toISOString()
     }, { merge: true });
 
+    const reportScopeLevel: 'GLOBAL' | 'FRANCHISE' | 'RESTAURANT' = (!franchiseId || franchiseId === 'global') ? 'GLOBAL' : (branchId ? 'RESTAURANT' : 'FRANCHISE');
+    const reportScope: ReportScope = {
+      level: reportScopeLevel,
+      franchiseId: reportScopeLevel === 'GLOBAL' ? null : franchiseId,
+      restaurantId: reportScopeLevel === 'RESTAURANT' ? branchId : null,
+      periodMonth: month,
+      periodYear: year,
+    };
+
+    // Save scope in Firestore metadata
+    await adminDb.collection('monthly_reports').doc(reportKey).set({
+      accessScope: reportScope.level,
+      franchiseId: reportScope.franchiseId,
+      branchId: reportScope.restaurantId,
+      restaurantId: reportScope.restaurantId,
+      createdBy: user.uid
+    }, { merge: true });
+
+    // 6. Dispatch Authoritative Scoped Monthly Report Notification
+    await MonthlyReportNotificationService.dispatchMonthlyReportNotification(reportScope, {
+      reportKey,
+      pdfUrl,
+      grossSales: summary.grossSales,
+      totalOrders: summary.totalBills
+    }).catch(err => console.error('[MonthlyReport] Notification dispatch notice:', err));
+
     res.json({
       success: true,
       report: {
@@ -292,82 +354,6 @@ router.delete('/monthly/:id', verifyToken, requireOwnerOrAdmin, async (req: Auth
     res.json({ success });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * POST /api/reports/generate
- * Queues weekly report generation as a background task.
- */
-router.post('/generate', verifyToken, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
-  try {
-    const { targetDateIso } = req.body;
-    const targetDate = targetDateIso ? new Date(targetDateIso) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const weekInfo = weeklyReportService.getWeekInfo(targetDate);
-
-    const taskId = crypto.randomUUID();
-    const taskName = `weekly_report_${weekInfo.docId}`;
-
-    await pgPool.query(`
-      INSERT INTO background_tasks (id, task_name, status, payload, created_at)
-      VALUES ($1, $2, 'processing', $3, CURRENT_TIMESTAMP)
-      ON CONFLICT (id) DO UPDATE SET status = 'processing', updated_at = CURRENT_TIMESTAMP
-    `, [taskId, taskName, JSON.stringify({ docId: weekInfo.docId, weekLabel: weekInfo.weekLabel })])
-    .catch(e => console.warn('[Report Route] Postgres task log warning:', e.message));
-
-    setImmediate(async () => {
-      try {
-        console.log(`[Background Task ${taskId}] Starting weekly report generation for ${weekInfo.weekLabel}...`);
-        await weeklyReportService.generateAndProcessReport(targetDate);
-        
-        await pgPool.query(`
-          UPDATE background_tasks 
-          SET status = 'completed', updated_at = CURRENT_TIMESTAMP 
-          WHERE id = $1
-        `, [taskId]).catch(() => {});
-      } catch (err: any) {
-        console.error(`[Background Task ${taskId}] Error:`, err);
-        await pgPool.query(`
-          UPDATE background_tasks 
-          SET status = 'failed', error_message = $2, updated_at = CURRENT_TIMESTAMP 
-          WHERE id = $1
-        `, [taskId, err.message]).catch(() => {});
-      }
-    });
-
-    res.json({
-      success: true,
-      taskId,
-      message: `Weekly report generation for ${weekInfo.weekLabel} started in background.`,
-      docId: weekInfo.docId,
-      weekLabel: weekInfo.weekLabel,
-    });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-/**
- * POST /api/reports/email-again
- */
-router.post('/email-again', verifyToken, requireOwnerOrAdmin, async (req: AuthRequest, res: Response) => {
-  try {
-    const { docId } = req.body;
-    if (!docId) return res.status(400).json({ error: 'docId is required' });
-
-    const reportDoc = await adminDb.collection('reports').doc(docId).get();
-    if (!reportDoc.exists) {
-      return res.status(404).json({ error: 'Weekly report not found' });
-    }
-
-    const data = reportDoc.data()!;
-    setImmediate(async () => {
-      await weeklyReportService.generateAndProcessReport(new Date(data.generatedAt || Date.now()));
-    });
-
-    res.json({ success: true, message: `Weekly report email resend triggered for ${data.weekLabel || docId}.` });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
   }
 });
 

@@ -15,7 +15,6 @@
 
 import { pgPool } from '../../config/postgres.js';
 import { DevAuditService } from './DevAuditService.js';
-import { WeeklyReportService } from '../../lib/services/WeeklyReportService.js';
 
 export interface ScheduledCronJob {
   id: string;
@@ -61,10 +60,10 @@ export class SchedulerManagerService {
   private static async seedDefaults() {
     const jobs = [
       {
-        id: 'weekly_business_report',
-        name: 'Weekly Executive Report & Cloudflare R2 Backup',
-        schedulePattern: 'Every Monday @ 08:00 AM IST',
-        description: 'Generates 4-page executive PDF report, backs up to Cloudflare R2, and emails owner with attachment.'
+        id: 'monthly_business_report',
+        name: 'Monthly Executive Report & Cloudflare R2 Backup',
+        schedulePattern: '1st of Every Month @ 00:05 AM IST',
+        description: 'Generates executive PDF report, backs up to Cloudflare R2, syncs Google Sheets, and dispatches scoped notifications.'
       },
       {
         id: 'email_queue_worker',
@@ -120,10 +119,9 @@ export class SchedulerManagerService {
     await this.initTable();
     const start = Date.now();
     try {
-      if (jobId === 'weekly_business_report') {
-        const { WeeklyReportService } = await import('../../lib/services/WeeklyReportService.js');
-        const service = new WeeklyReportService();
-        await service.generateAndProcessReport();
+      if (jobId === 'monthly_business_report') {
+        const { MonthlyReportJob } = await import('../../jobs/MonthlyReportJob.js');
+        await MonthlyReportJob.runMonthEndPipeline();
       } else if (jobId === 'email_queue_worker') {
         const { processEmailQueue } = await import('../email.service.js');
         await processEmailQueue();

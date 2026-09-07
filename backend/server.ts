@@ -8,7 +8,7 @@ import apiApp from './src/app.ts';
 import { DataRetentionJob } from './src/jobs/DataRetentionJob.ts';
 import './src/services/DataLifecycleService.ts';
 import './src/services/notification/NotificationQueueService.ts';
-import './src/jobs/WeeklyReportJob.ts';
+import './src/jobs/MonthlyReportJob.ts';
 import { kb } from './src/services/KnowledgeBaseService.ts';
 import { pineconeService } from './src/services/ai/PineconeService.ts';
 import { storageAnalyzer } from './src/services/storageAnalyzer.service.ts';
