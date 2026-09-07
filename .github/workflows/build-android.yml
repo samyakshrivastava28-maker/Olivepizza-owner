@@ -167,7 +167,8 @@ jobs:
         with:
           name: "Olive Pizza Owner — Latest Release (All Platforms)"
           tag_name: "latest"
-          files: artifact/*.apk
+          files: artifact/*-release.apk
+          clobber: true
           draft: false
           prerelease: false
           make_latest: true
