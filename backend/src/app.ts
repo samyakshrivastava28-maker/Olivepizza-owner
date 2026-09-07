@@ -148,6 +148,10 @@ app.use(cors({
   origin: (origin, callback) => {
     if (
       !origin || 
+      origin === 'null' ||
+      origin.startsWith('file://') ||
+      origin.startsWith('capacitor://') ||
+      origin.startsWith('ionic://') ||
       allowedOrigins.includes(origin) ||
       origin.endsWith('.olivepizza.in') ||
       origin.startsWith('http://localhost') ||
@@ -158,8 +162,8 @@ app.use(cors({
     ) {
       callback(null, true);
     } else {
-      // SECURITY: Reject all origins not in the allowlist in production.
-      callback(new Error(`CORS: Origin '${origin}' is not permitted.`));
+      // Reject origin safely without throwing 500 error
+      callback(null, false);
     }
   },
   credentials: true

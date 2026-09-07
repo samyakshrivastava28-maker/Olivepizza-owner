@@ -26,8 +26,10 @@ export function getApiBaseUrl(): string {
     import.meta.env.PROD ||
     Capacitor.isNativePlatform() ||
     (typeof window !== 'undefined' && (
+      window.location.protocol === 'file:' ||
       window.location.protocol === 'capacitor:' ||
       window.location.protocol === 'ionic:' ||
+      navigator.userAgent.includes('Electron') ||
       (window.location.hostname === 'localhost' && window.location.port === '')
     ))
   ) {
@@ -41,11 +43,13 @@ export function getApiUrl(endpoint: string = ''): string {
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   if (typeof window === 'undefined') return `${PRODUCTION_BACKEND_URL}${cleanEndpoint}`;
 
-  // On Native Capacitor Android/iOS or production Web
+  // On Native Capacitor Android/iOS, Electron Desktop, or production Web
   if (
     Capacitor.isNativePlatform() ||
+    window.location.protocol === 'file:' ||
     window.location.protocol === 'capacitor:' ||
     window.location.protocol === 'ionic:' ||
+    navigator.userAgent.includes('Electron') ||
     (window.location.hostname === 'localhost' && window.location.port === '') ||
     import.meta.env.PROD
   ) {
