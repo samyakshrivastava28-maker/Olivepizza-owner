@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Clock,
   CheckCircle2,
@@ -23,9 +23,11 @@ import {
   ChefHat,
   PackageCheck,
   Truck,
+  ShieldAlert,
+  Info,
 } from 'lucide-react';
 import { db } from '../lib/firebase';
-import { collection, onSnapshot, doc, setDoc, updateDoc } from 'firebase/firestore';
+import { collection, onSnapshot } from 'firebase/firestore';
 import { Order, OrderStatus } from '../types/models';
 import { fetchApi } from '../lib/api';
 import toast from 'react-hot-toast';
@@ -57,7 +59,6 @@ export default function OrderManagement() {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [fulfillmentFilter, setFulfillmentFilter] = useState<string>('all');
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
-  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
 
   // Firestore real-time listener for orders
   useEffect(() => {
@@ -93,40 +94,6 @@ export default function OrderManagement() {
 
     return () => unsubscribe();
   }, []);
-
-  // Update order status in Firestore and Backend
-  const handleUpdateStatus = async (orderId: string, nextStatus: string, reason?: string) => {
-    setActionLoadingId(orderId);
-    const toastId = toast.loading(`Updating order to ${nextStatus.toUpperCase()}...`);
-    try {
-      // 1. Direct Firestore write
-      const updateData: any = {
-        status: nextStatus,
-        updatedAt: new Date().toISOString(),
-      };
-      if (reason) updateData.cancellationReason = reason;
-
-      await setDoc(doc(db, 'orders', orderId), updateData, { merge: true });
-
-      // 2. Notify backend endpoint for event emission and customer notifications
-      fetchApi(`/api/orders/${orderId}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: nextStatus, cancellationReason: reason }),
-      }).catch(() => {});
-
-      toast.success(`Order #${orderId.slice(-6).toUpperCase()} is now ${nextStatus.toUpperCase()}!`, { id: toastId });
-
-      if (selectedOrder && selectedOrder.id === orderId) {
-        setSelectedOrder((prev) => (prev ? { ...prev, status: nextStatus as OrderStatus } : null));
-      }
-    } catch (err: any) {
-      console.error('[OrderManagement] Status update failed:', err);
-      toast.error(`Update failed: ${err.message}`, { id: toastId });
-    } finally {
-      setActionLoadingId(null);
-    }
-  };
 
   // Live Orders: Active in-progress orders
   const liveOrders = useMemo(() => {
@@ -263,6 +230,14 @@ export default function OrderManagement() {
       {/* TAB 1: LIVE KITCHEN QUEUE */}
       {activeTab === 'live' && (
         <div className="space-y-4">
+          {/* Read-Only Surveillance Notice */}
+          <div className="flex items-center gap-3 p-3.5 bg-amber-500/10 border border-amber-500/25 rounded-2xl text-amber-300 text-xs font-medium">
+            <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              <strong>Owner Read-Only Monitoring:</strong> Kitchen stage transitions (Accept, Prepare, Mark Ready) and Rider Deliveries are executed on Restaurant Manager and Delivery terminals to ensure operational integrity.
+            </span>
+          </div>
+
           {loading ? (
             <div className="text-center py-16 text-slate-500 text-xs">Streaming live orders from database...</div>
           ) : liveOrders.length === 0 ? (
@@ -336,62 +311,13 @@ export default function OrderManagement() {
                         <span className="font-mono text-base font-black text-orange-400">₹{totalAmt}</span>
                       </div>
 
-                      {/* Stage Transition Buttons */}
-                      <div className="space-y-1.5">
-                        {(s === 'pending_acceptance' || s === 'pending') && (
-                          <div className="flex gap-2">
-                            <button
-                              disabled={actionLoadingId === order.id}
-                              onClick={() => handleUpdateStatus(order.id, 'preparing')}
-                              className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-600/20 disabled:opacity-50"
-                            >
-                              <ChefHat className="w-3.5 h-3.5" /> Accept & Prepare
-                            </button>
-                            <button
-                              disabled={actionLoadingId === order.id}
-                              onClick={() => handleUpdateStatus(order.id, 'cancelled', 'Rejected by store')}
-                              className="px-3 py-2 bg-rose-600/20 hover:bg-rose-600 border border-rose-600/40 text-rose-300 hover:text-white font-bold rounded-xl text-xs transition-all disabled:opacity-50"
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        )}
-
-                        {(s === 'preparing' || s === 'accepted') && (
-                          <button
-                            disabled={actionLoadingId === order.id}
-                            onClick={() => handleUpdateStatus(order.id, 'ready')}
-                            className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-blue-600/20 disabled:opacity-50"
-                          >
-                            <PackageCheck className="w-3.5 h-3.5" /> Mark Ready for Pickup / Delivery
-                          </button>
-                        )}
-
-                        {s === 'ready' && (
-                          <button
-                            disabled={actionLoadingId === order.id}
-                            onClick={() => handleUpdateStatus(order.id, 'out_for_delivery')}
-                            className="w-full py-2 bg-purple-600 hover:bg-purple-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-purple-600/20 disabled:opacity-50"
-                          >
-                            <Truck className="w-3.5 h-3.5" /> Handover to Delivery Partner
-                          </button>
-                        )}
-
-                        {(s === 'out_for_delivery' || s === 'picked_up') && (
-                          <button
-                            disabled={actionLoadingId === order.id}
-                            onClick={() => handleUpdateStatus(order.id, 'delivered')}
-                            className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-600/20 disabled:opacity-50"
-                          >
-                            <CheckCircle2 className="w-3.5 h-3.5" /> Complete Order (Delivered)
-                          </button>
-                        )}
-
+                      {/* Read-Only Inspect Button */}
+                      <div>
                         <button
                           onClick={() => setSelectedOrder(order)}
-                          className="w-full py-1.5 bg-[#0B0F17] hover:bg-slate-800 border border-slate-800 text-slate-300 text-[11px] font-bold rounded-lg transition-all"
+                          className="w-full py-2.5 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 text-orange-400 hover:text-orange-300 font-bold rounded-xl text-xs flex items-center justify-center gap-2 transition-all shadow-sm"
                         >
-                          View Full Invoice & Details
+                          <Eye className="w-4 h-4" /> Inspect Full Order & Invoice
                         </button>
                       </div>
                     </div>
@@ -517,37 +443,72 @@ export default function OrderManagement() {
               </button>
             </div>
 
-            {/* Status Change Selector in Modal */}
-            <div className="p-3 bg-[#0B0F17] rounded-xl border border-slate-800 space-y-2">
+            {/* Status Inspection & Read-Only Badge */}
+            <div className="p-3.5 bg-[#0B0F17] rounded-xl border border-slate-800 space-y-2">
               <div className="flex justify-between items-center text-xs">
-                <span className="text-slate-400 font-bold">Status:</span>
+                <span className="text-slate-400 font-bold">Lifecycle Status:</span>
                 {getStatusBadge(selectedOrder.status)}
               </div>
-              <div className="flex items-center gap-2 pt-1 border-t border-slate-800/80">
-                <span className="text-[11px] text-slate-400">Change Status:</span>
-                <select
-                  value={selectedOrder.status}
-                  onChange={(e) => handleUpdateStatus(selectedOrder.id, e.target.value)}
-                  className="flex-1 bg-[#0E1524] border border-slate-700 text-slate-200 text-xs rounded-lg px-2 py-1 focus:border-orange-500 focus:outline-none"
-                >
-                  <option value="pending_acceptance">Pending Acceptance</option>
-                  <option value="preparing">Preparing</option>
-                  <option value="ready">Ready for Pickup</option>
-                  <option value="out_for_delivery">Out for Delivery</option>
-                  <option value="delivered">Delivered</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
+              <div className="flex items-center gap-2 pt-2 border-t border-slate-800/80 text-[11px] text-amber-400/90 font-medium">
+                <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                <span>Read-Only Surveillance: State transitions managed on Restaurant & Rider terminals.</span>
               </div>
             </div>
 
-            {/* Customer Details */}
+            {/* Customer & Delivery Details */}
             <div className="space-y-2 text-xs">
               <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Customer & Delivery</div>
+              <div className="p-3 bg-[#0B0F17] rounded-xl border border-slate-800 space-y-1.5 text-slate-300">
+                <div className="font-bold text-white text-sm">{selectedOrder.customerName || (selectedOrder as any).userName || 'Customer'}</div>
+                <div className="flex items-center gap-2 text-slate-400">
+                  <Phone className="w-3.5 h-3.5 text-slate-500" />
+                  <a href={`tel:${selectedOrder.contactPhone || (selectedOrder as any).customerPhone || (selectedOrder as any).phone || ''}`} className="hover:text-orange-400">
+                    {selectedOrder.contactPhone || (selectedOrder as any).customerPhone || (selectedOrder as any).phone || 'N/A'}
+                  </a>
+                </div>
+                <div className="flex items-start gap-2 text-slate-400 pt-0.5">
+                  <MapPin className="w-3.5 h-3.5 text-slate-500 shrink-0 mt-0.5" />
+                  <span>{selectedOrder.deliveryAddress?.addressLine || selectedOrder.deliveryAddress?.address || (typeof selectedOrder.deliveryAddress === 'string' ? selectedOrder.deliveryAddress : 'Pickup at Store')}</span>
+                </div>
+                <div className="flex items-center gap-2 text-slate-500 text-[11px] pt-1 border-t border-slate-800/60">
+                  <Clock className="w-3 h-3" /> Placed at: {formatOrderTime(selectedOrder.createdAt)}
+                </div>
+              </div>
+            </div>
+
+            {/* Fulfillment & Rider Details */}
+            <div className="space-y-2 text-xs">
+              <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Fulfillment & Rider</div>
               <div className="p-3 bg-[#0B0F17] rounded-xl border border-slate-800 space-y-1 text-slate-300">
-                <div className="font-bold text-white">{selectedOrder.customerName || (selectedOrder as any).userName || 'Customer'}</div>
-                <div>Phone: {selectedOrder.contactPhone || (selectedOrder as any).customerPhone || (selectedOrder as any).phone || 'N/A'}</div>
-                <div>Address: {selectedOrder.deliveryAddress?.addressLine || selectedOrder.deliveryAddress?.address || (typeof ( typeof selectedOrder.deliveryAddress === 'string' ? selectedOrder.deliveryAddress : selectedOrder.deliveryAddress?.addressLine || '' ) === 'string' ? ( typeof selectedOrder.deliveryAddress === 'string' ? selectedOrder.deliveryAddress : selectedOrder.deliveryAddress?.addressLine || '' ) : 'Pickup at Store')}</div>
-                <div className="text-slate-500 text-[11px]">Placed at: {formatOrderTime(selectedOrder.createdAt)}</div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-400">Fulfillment Type:</span>
+                  <span className="font-bold uppercase text-white bg-slate-800 px-2 py-0.5 rounded text-[10px]">
+                    {(selectedOrder as any).fulfillmentType || (selectedOrder as any).orderType || 'delivery'}
+                  </span>
+                </div>
+                {(selectedOrder as any).deliveryPartnerName ? (
+                  <div className="flex justify-between items-center pt-1 border-t border-slate-800/50">
+                    <span className="text-slate-400">Assigned Rider:</span>
+                    <span className="font-bold text-emerald-400">{(selectedOrder as any).deliveryPartnerName}</span>
+                  </div>
+                ) : (selectedOrder as any).deliveryPartnerId ? (
+                  <div className="flex justify-between items-center pt-1 border-t border-slate-800/50">
+                    <span className="text-slate-400">Assigned Rider ID:</span>
+                    <span className="font-mono text-emerald-400">{(selectedOrder as any).deliveryPartnerId.slice(0, 10)}...</span>
+                  </div>
+                ) : (
+                  <div className="text-slate-500 text-[11px] pt-1 border-t border-slate-800/50 italic">
+                    {(selectedOrder as any).fulfillmentType === 'pickup' || (selectedOrder as any).orderType === 'pickup' ? 'Store Pickup Order (No Rider)' : 'Pending Dispatch / Rider Assignment'}
+                  </div>
+                )}
+                {(selectedOrder as any).paymentMethod && (
+                  <div className="flex justify-between items-center pt-1 border-t border-slate-800/50">
+                    <span className="text-slate-400">Payment Method:</span>
+                    <span className="font-mono font-bold text-white uppercase text-[11px]">
+                      {(selectedOrder as any).paymentMethod} ({(selectedOrder as any).paymentStatus || 'confirmed'})
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -556,12 +517,18 @@ export default function OrderManagement() {
               <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Ordered Items</div>
               <div className="p-3 bg-[#0B0F17] rounded-xl border border-slate-800 space-y-2">
                 {selectedOrder.items?.map((it: any, idx: number) => (
-                  <div key={idx} className="flex justify-between items-center text-slate-300 border-b border-slate-800/40 pb-1.5 last:border-0 last:pb-0">
+                  <div key={idx} className="flex justify-between items-start text-slate-300 border-b border-slate-800/40 pb-2 last:border-0 last:pb-0">
                     <div>
                       <span className="font-bold text-white">{it.quantity || 1}x</span> {it.name || it.productName}
-                      {it.size && <span className="text-[10px] text-slate-500 block">Size: {it.size}</span>}
+                      {it.size && <span className="text-[10px] text-orange-400/90 block">Size: {it.size}</span>}
+                      {it.crust && <span className="text-[10px] text-slate-500 block">Crust: {it.crust}</span>}
+                      {Array.isArray(it.selectedAddons) && it.selectedAddons.length > 0 && (
+                        <span className="text-[10px] text-slate-400 block">
+                          Add-ons: {it.selectedAddons.map((a: any) => (typeof a === 'string' ? a : a.name)).join(', ')}
+                        </span>
+                      )}
                     </div>
-                    <span className="font-mono text-orange-400">₹{(it.price || 0) * (it.quantity || 1)}</span>
+                    <span className="font-mono text-orange-400 font-bold">₹{(it.price || 0) * (it.quantity || 1)}</span>
                   </div>
                 ))}
               </div>
@@ -575,7 +542,7 @@ export default function OrderManagement() {
               </div>
               {(selectedOrder as any).discountAmount ? (
                 <div className="flex justify-between text-emerald-400">
-                  <span>Discount:</span>
+                  <span>Discount {((selectedOrder as any).appliedCouponCode ? `(${((selectedOrder as any).appliedCouponCode)})` : '')}:</span>
                   <span className="font-mono">-₹{Number((selectedOrder as any).discountAmount)}</span>
                 </div>
               ) : null}
@@ -585,9 +552,15 @@ export default function OrderManagement() {
                   <span className="font-mono">₹{Number(selectedOrder.deliveryFee)}</span>
                 </div>
               ) : null}
+              {(selectedOrder as any).packagingCharge ? (
+                <div className="flex justify-between text-slate-400">
+                  <span>Packaging Charge:</span>
+                  <span className="font-mono">₹{Number((selectedOrder as any).packagingCharge)}</span>
+                </div>
+              ) : null}
               {(selectedOrder as any).taxes ? (
                 <div className="flex justify-between text-slate-400">
-                  <span>Taxes (5% GST):</span>
+                  <span>Taxes (GST):</span>
                   <span className="font-mono">₹{Number((selectedOrder as any).taxes)}</span>
                 </div>
               ) : null}

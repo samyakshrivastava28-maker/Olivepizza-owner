@@ -233,58 +233,7 @@ export const AI_TOOLS: ToolDefinition[] = [
     },
   },
 
-  // ─── CHECKOUT & PAYMENT ───────────────────────────────────────────────────
-  {
-    type: 'function',
-    requiresAuth: true,
-    clientSide: true,
-    function: {
-      name: 'start_checkout',
-      description: 'Navigate to the checkout page to begin the order placement flow.',
-      parameters: {
-        type: 'object',
-        properties: {
-          selectedPaymentMethod: { type: 'string', enum: ['upi', 'card', 'wallet', 'cod'], description: 'Pre-selected payment method' },
-        },
-        required: [],
-      },
-    },
-  },
 
-  {
-    type: 'function',
-    requiresAuth: true,
-    clientSide: true,
-    function: {
-      name: 'start_payment',
-      description: 'Initiate the payment flow for UPI, card, or wallet payments at the checkout stage.',
-      parameters: {
-        type: 'object',
-        properties: {
-          paymentMethod: { type: 'string', enum: ['upi', 'card', 'wallet'], description: 'Online payment method' },
-        },
-        required: ['paymentMethod'],
-      },
-    },
-  },
-
-  {
-    type: 'function',
-    requiresAuth: true,
-    clientSide: true,
-    function: {
-      name: 'place_order',
-      description: 'Place the order using Cash on Delivery (COD). ONLY call this for COD payment — never for UPI/card/wallet. Always confirm with user before calling.',
-      parameters: {
-        type: 'object',
-        properties: {
-          deliveryAddress: { type: 'string', description: 'Confirmed delivery address for the order' },
-          note:            { type: 'string', description: 'Special delivery instructions e.g. ring bell twice' },
-        },
-        required: [],
-      },
-    },
-  },
 
   // ─── COUPON MANAGEMENT ────────────────────────────────────────────────────
   {
@@ -333,16 +282,7 @@ export const AI_TOOLS: ToolDefinition[] = [
     },
   },
 
-  {
-    type: 'function',
-    requiresAuth: true,
-    clientSide: false,
-    function: {
-      name: 'repeat_order',
-      description: 'Rebuild the cart with items from the user\'s last completed order.',
-      parameters: { type: 'object', properties: {}, required: [] },
-    },
-  },
+
 
   {
     type: 'function',

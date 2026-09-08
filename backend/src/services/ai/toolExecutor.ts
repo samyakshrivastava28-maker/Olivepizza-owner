@@ -180,63 +180,7 @@ export async function executeBackendTool(
         };
       }
 
-      // ─── REPEAT ORDER ─────────────────────────────────────────────────────
-      case 'repeat_order': {
-        if (!user?.uid) {
-          return { toolCallId, toolName, status: 'auth_required', userMessage: 'Please log in to repeat your last order.' };
-        }
 
-        const snapshot = await adminDb.collection('orders')
-          .where('userId', '==', user.uid)
-          .where('status', 'in', ['delivered', 'completed'])
-          .orderBy('createdAt', 'desc')
-          .limit(1)
-          .get();
-
-        if (snapshot.empty) {
-          return {
-            toolCallId,
-            toolName,
-            status: 'executed_server',
-            result: { items: [] },
-            userMessage: 'You have no completed orders to repeat.',
-            toolLatencyMs: Date.now() - toolStart,
-          };
-        }
-
-        const lastOrder = snapshot.docs[0].data();
-        const items = lastOrder.items || [];
-
-        return {
-          toolCallId,
-          toolName,
-          status: 'forward_client',
-          result: { items, orderId: snapshot.docs[0].id },
-          userMessage: `Rebuilding your cart with ${items.length} item(s) from your previous order.`,
-          toolLatencyMs: Date.now() - toolStart,
-        };
-      }
-
-      // ─── PLACE ORDER (COD — server validates, client executes) ────────────
-      case 'place_order': {
-        if (!user?.uid) {
-          return { toolCallId, toolName, status: 'auth_required', userMessage: 'Please log in to place an order.' };
-        }
-        // Forward to client — client calls the production /api/order endpoint
-        return {
-          toolCallId,
-          toolName,
-          status: 'forward_client',
-          result: {
-            paymentMethod: 'cod',
-            address: args.deliveryAddress || '',
-            note: args.note || 'Placed via Olive AI Concierge',
-            userId: user.uid,
-          },
-          userMessage: 'Processing Pay on Delivery order...',
-          toolLatencyMs: Date.now() - toolStart,
-        };
-      }
 
       // ─── UNKNOWN / CLIENT-ONLY FALLBACK ──────────────────────────────────
       default: {

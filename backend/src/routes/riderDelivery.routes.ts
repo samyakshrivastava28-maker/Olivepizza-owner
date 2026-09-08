@@ -224,8 +224,24 @@ router.post('/orders/:id/accept', async (req: AuthRequest, res: Response): Promi
   const requestId = `req_acc_dlv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   try {
     const orderId = req.params.id;
+    const userRole = (req.user?.role || '').toLowerCase();
     const uid = req.user?.uid!;
     const name = (req.user as any)?.name || req.user?.email || 'Rider';
+
+    // Backend-level Owner Read-Only Enforcement
+    if (userRole === 'owner' || userRole === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
+      res.status(403).json({
+        success: false,
+        error: 'Forbidden: Owner has read-only operational authority. Deliveries must be accepted by assigned delivery partners.',
+        requestId
+      });
+      return;
+    }
+
+    if (userRole !== 'delivery_partner' && userRole !== 'delivery') {
+      res.status(403).json({ success: false, error: 'Forbidden: Delivery partner authorization required', requestId });
+      return;
+    }
 
     const orderRef = adminDb.collection('orders').doc(orderId);
     const orderDoc = await orderRef.get();
@@ -288,6 +304,22 @@ router.post('/orders/:id/decline', async (req: AuthRequest, res: Response): Prom
   try {
     const orderId = req.params.id;
     const uid = req.user?.uid!;
+    const userRole = (req.user?.role || '').toLowerCase();
+
+    if (userRole === 'owner' || userRole === 'admin') {
+      res.status(403).json({
+        success: false,
+        error: 'Forbidden: Owner has read-only authority. Rejection/decline must be performed by delivery partners.',
+        code: 'OWNER_READ_ONLY_FORBIDDEN',
+        requestId
+      });
+      return;
+    }
+
+    if (userRole !== 'delivery_partner' && userRole !== 'delivery') {
+      res.status(403).json({ success: false, error: 'Forbidden: Delivery partner authorization required', requestId });
+      return;
+    }
 
     const orderRef = adminDb.collection('orders').doc(orderId);
     const orderDoc = await orderRef.get();
@@ -318,6 +350,10 @@ router.post('/orders/:id/decline', async (req: AuthRequest, res: Response): Prom
       updatedAt: new Date()
     });
 
+    // Release rider lock upon decline
+    adminDb.collection('users').doc(uid).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+    adminDb.collection('delivery_partners').doc(uid).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+
     // Auto-dispatch to next candidate
     const { RiderDispatchEngine } = await import('../services/delivery/RiderDispatchEngine.js');
     RiderDispatchEngine.autoDispatchRider(orderId).catch((err: any) => {
@@ -342,7 +378,38 @@ router.post('/orders/:id/pickup', async (req: AuthRequest, res: Response): Promi
   try {
     const orderId = req.params.id;
     const uid = req.user?.uid!;
+    const userRole = (req.user?.role || '').toLowerCase();
     const name = (req.user as any)?.name || req.user?.email || 'Rider';
+
+    if (userRole === 'owner' || userRole === 'admin') {
+      res.status(403).json({
+        success: false,
+        error: 'Forbidden: Owner has read-only authority. Pickup must be performed by delivery partners.',
+        code: 'OWNER_READ_ONLY_FORBIDDEN'
+      });
+      return;
+    }
+
+    if (userRole !== 'delivery_partner' && userRole !== 'delivery') {
+      res.status(403).json({ success: false, error: 'Forbidden: Delivery partner authorization required' });
+      return;
+    }
+
+    const orderDoc = await adminDb.collection('orders').doc(orderId).get();
+    if (!orderDoc.exists) {
+      res.status(404).json({ error: 'Order not found' });
+      return;
+    }
+
+    const orderData = orderDoc.data()!;
+    // Ownership check: partner can only pick up their own assigned order
+    if (
+      orderData.deliveryPartnerId &&
+      orderData.deliveryPartnerId !== uid
+    ) {
+      res.status(403).json({ error: 'Forbidden: This order is assigned to a different delivery partner.' });
+      return;
+    }
 
     // Step 1: Transition to picked_up
     const pickResult = await OrderStateMachine.transition(orderId, 'picked_up', { uid, role: 'delivery_partner', name });
@@ -370,6 +437,21 @@ router.post('/orders/:id/complete', async (req: AuthRequest, res: Response): Pro
     const orderId = req.params.id;
     const { riderLat, riderLng, proofImageUrl, signatureUrl, notes } = req.body;
     const uid = req.user?.uid!;
+    const userRole = (req.user?.role || '').toLowerCase();
+
+    if (userRole === 'owner' || userRole === 'admin') {
+      res.status(403).json({
+        success: false,
+        error: 'Forbidden: Owner has read-only authority. Delivery completion must be performed by delivery partners.',
+        code: 'OWNER_READ_ONLY_FORBIDDEN'
+      });
+      return;
+    }
+
+    if (userRole !== 'delivery_partner' && userRole !== 'delivery') {
+      res.status(403).json({ success: false, error: 'Forbidden: Delivery partner authorization required' });
+      return;
+    }
 
     const orderRef = adminDb.collection('orders').doc(orderId);
     const orderDoc = await orderRef.get();
@@ -383,7 +465,6 @@ router.post('/orders/:id/complete', async (req: AuthRequest, res: Response): Pro
 
     // Ownership check: delivery partner can only complete their own assigned order
     if (
-      req.user?.role === 'delivery_partner' &&
       orderData.deliveryPartnerId &&
       orderData.deliveryPartnerId !== uid
     ) {
@@ -425,33 +506,39 @@ router.post('/orders/:id/complete', async (req: AuthRequest, res: Response): Pro
       }
     }
 
-    const updates = {
-      status: 'delivered',
-      deliveredAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      proofOfDelivery: {
-        proofImageUrl: proofImageUrl || null,
-        signatureUrl: signatureUrl || null,
-        notes: notes || 'Delivered to customer',
-        completedLat: riderLat || null,
-        completedLng: riderLng || null,
-        completedAt: new Date().toISOString()
-      }
+    const proofOfDelivery = {
+      proofImageUrl: proofImageUrl || null,
+      signatureUrl: signatureUrl || null,
+      notes: notes || 'Delivered to customer',
+      completedLat: riderLat || null,
+      completedLng: riderLng || null,
+      completedAt: new Date().toISOString()
     };
 
-    await orderRef.set(updates, { merge: true });
+    const transResult = await OrderStateMachine.transition(
+      orderId,
+      'delivered',
+      { uid, role: 'delivery_partner', name: (req.user as any)?.name || req.user?.email || 'Rider' },
+      { proofOfDelivery }
+    );
+
+    if (!transResult.success) {
+      res.status(400).json({ success: false, error: transResult.error || 'Failed to transition order to delivered' });
+      return;
+    }
 
     // Update rider daily stats in user doc
     await adminDb.collection('users').doc(uid).set({
       lastDeliveredOrderId: orderId,
       lastDeliveredAt: new Date().toISOString()
-    }, { merge: true });
+    }, { merge: true }).catch(() => {});
 
     res.json({
       success: true,
       message: 'Delivery successfully completed and verified',
       orderId,
-      status: 'delivered'
+      status: 'delivered',
+      version: transResult.version
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to complete delivery' });

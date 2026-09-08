@@ -788,14 +788,28 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
   }
 });
 
-// Universal Order Status Update (Staff, Delivery Partner, Owner, Admin only)
-router.all(['/:id/status'], verifyToken, requireRole(['owner', 'admin', 'restaurant_manager', 'manager', 'kitchen_staff', 'cashier', 'delivery_partner', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+// Universal Order Status Update (Strictly Operational Roles — Owner is Read-Only)
+router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const { status, cancellationReason, deliveryPartnerId, deliveryPartnerName, deliveryPartnerPhone } = req.body;
     const uid = req.user!.uid;
-    const role = req.user!.role || 'staff';
+    const role = (req.user!.role || 'staff').toLowerCase();
     const name = (req.user as any)?.name || (req.user as any)?.displayName || req.user?.email || 'Staff';
+
+    // Backend-level Owner Read-Only Enforcement
+    if (role === 'owner' || role === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
+      res.status(403).json({
+        error: 'Forbidden: Owner has read-only operational authority. Stage transitions are managed on Restaurant Manager and Delivery terminals.'
+      });
+      return;
+    }
+
+    const operationalRoles = ['restaurant_manager', 'manager', 'kitchen_staff', 'cashier', 'delivery_partner'];
+    if (!operationalRoles.includes(role)) {
+      res.status(403).json({ error: 'Forbidden: Operational role required for status mutation' });
+      return;
+    }
 
     if (!status) {
       res.status(400).json({ error: 'Status is required' });
@@ -826,12 +840,21 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
   const requestId = `req_acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   try {
     const { id } = req.params;
-    const userRole = req.user?.role;
+    const userRole = (req.user?.role || '').toLowerCase();
     const uid = req.user?.uid;
     const userBranchId = req.user?.branchId;
     const name = (req.user as any)?.name || req.user?.email || 'Manager';
-    const isAuthorizedStaff = ['owner', 'admin', 'developer', 'manager', 'restaurant_manager', 'kitchen_staff'].includes(userRole || '');
-    
+
+    // Backend-level Owner Read-Only Enforcement
+    if (userRole === 'owner' || userRole === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: Owner has read-only operational authority. Kitchen transitions must be executed by restaurant managers.',
+        requestId
+      });
+    }
+
+    const isAuthorizedStaff = ['manager', 'restaurant_manager', 'kitchen_staff', 'cashier'].includes(userRole);
     if (!isAuthorizedStaff || !uid) {
       return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
     }
@@ -844,10 +867,8 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
 
     const orderData = orderDoc.data()!;
     const orderBranchId = orderData.branchId || 'main_branch';
-    const isGlobalUser = ['owner', 'admin', 'developer'].includes(userRole || '') || 
-      ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'].includes(req.user?.email?.toLowerCase() || '');
 
-    if (!isGlobalUser && userBranchId && userBranchId !== orderBranchId) {
+    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all') {
       return res.status(403).json({
         success: false,
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
@@ -908,12 +929,21 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
   const requestId = `req_rej_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   try {
     const { id } = req.params;
-    const userRole = req.user?.role;
+    const userRole = (req.user?.role || '').toLowerCase();
     const uid = req.user?.uid;
     const userBranchId = req.user?.branchId;
     const name = (req.user as any)?.name || req.user?.email || 'Manager';
-    const isAuthorizedStaff = ['owner', 'admin', 'developer', 'manager', 'restaurant_manager'].includes(userRole || '');
-    
+
+    // Backend-level Owner Read-Only Enforcement
+    if (userRole === 'owner' || userRole === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: Owner has read-only operational authority. Kitchen order rejection must be executed by restaurant managers.',
+        requestId
+      });
+    }
+
+    const isAuthorizedStaff = ['manager', 'restaurant_manager', 'cashier'].includes(userRole);
     if (!isAuthorizedStaff || !uid) {
       return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
     }
@@ -925,10 +955,8 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
 
     const orderData = orderDoc.data()!;
     const orderBranchId = orderData.branchId || 'main_branch';
-    const isGlobalUser = ['owner', 'admin', 'developer'].includes(userRole || '') || 
-      ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'].includes(req.user?.email?.toLowerCase() || '');
 
-    if (!isGlobalUser && userBranchId && userBranchId !== orderBranchId) {
+    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all') {
       return res.status(403).json({
         success: false,
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
@@ -986,12 +1014,19 @@ router.post('/:id/assign-rider', verifyToken, async (req: AuthRequest, res: Resp
   try {
     const { id } = req.params;
     const { riderId } = req.body;
-    const userRole = req.user?.role;
+    const userRole = (req.user?.role || '').toLowerCase();
     const uid = req.user?.uid;
     const name = (req.user as any)?.name || req.user?.email || 'Manager';
     
-    if (!['owner', 'admin', 'developer', 'manager', 'restaurant_manager'].includes(userRole || '')) {
-      return res.status(403).json({ error: 'Unauthorized' });
+    // Backend-level Owner Read-Only Enforcement
+    if (userRole === 'owner' || userRole === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
+      return res.status(403).json({
+        error: 'Forbidden: Owner has read-only operational authority. Rider assignment is handled automatically or by restaurant managers.'
+      });
+    }
+
+    if (!['manager', 'restaurant_manager'].includes(userRole)) {
+      return res.status(403).json({ error: 'Unauthorized: Restaurant manager role required' });
     }
 
     if (!riderId) return res.status(400).json({ error: 'riderId is required' });
@@ -1000,7 +1035,7 @@ router.post('/:id/assign-rider', verifyToken, async (req: AuthRequest, res: Resp
     const eligibleRiders = await RiderDispatchEngine.findEligibleRiders(id);
     const selected = eligibleRiders.find(r => r.uid === riderId);
 
-    if (!selected && userRole !== 'owner' && userRole !== 'admin') {
+    if (!selected) {
       return res.status(400).json({ error: 'Selected rider is ineligible (offline, busy, or out of branch radius).' });
     }
 

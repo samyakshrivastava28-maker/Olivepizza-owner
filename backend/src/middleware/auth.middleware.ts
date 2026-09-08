@@ -86,6 +86,39 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           // POS terminal binding — stored in Firestore user record for cashier role
           if (userData.terminalId) terminalId = userData.terminalId as string;
         }
+
+        // Secondary fallback: if user role is still 'customer', check role-specific operational collections strictly by UID
+        if (role === 'customer' || !role) {
+          // Check restaurant_managers by UID
+          const rmDoc = await adminDb.collection('restaurant_managers').doc(uid).get().catch(() => null);
+          if (rmDoc && rmDoc.exists && rmDoc.data()?.isActive !== false) {
+            const rmData = rmDoc.data()!;
+            role = rmData.role || 'restaurant_manager';
+            if (rmData.branchId) branchId = rmData.branchId;
+            if (rmData.permissions) permissions = rmData.permissions;
+          }
+
+          // Check delivery_partners by UID
+          if (role === 'customer' || !role) {
+            const dpDoc = await adminDb.collection('delivery_partners').doc(uid).get().catch(() => null);
+            if (dpDoc && dpDoc.exists && dpDoc.data()?.isActive !== false) {
+              const dpData = dpDoc.data()!;
+              role = dpData.role || 'delivery_partner';
+              if (dpData.branchId) branchId = dpData.branchId;
+            }
+          }
+
+          // Check franchise_users by UID
+          if (role === 'customer' || !role) {
+            const fuDoc = await adminDb.collection('franchise_users').doc(uid).get().catch(() => null);
+            if (fuDoc && fuDoc.exists && fuDoc.data()?.isActive !== false) {
+              const fuData = fuDoc.data()!;
+              role = fuData.role || 'franchise_manager';
+              if (fuData.franchiseId) franchiseId = fuData.franchiseId;
+              if (fuData.branchIds) branchIds = fuData.branchIds;
+            }
+          }
+        }
       } catch (dbErr) {
         console.warn('[AuthMiddleware] Failed to read fallback role from Firestore:', dbErr);
       }

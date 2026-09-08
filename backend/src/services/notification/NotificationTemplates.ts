@@ -62,9 +62,9 @@ export type NotificationCategory =
 
 // ─── Android Channel IDs ──────────────────────────────────────────────────────
 export const ANDROID_CHANNELS = {
-  ORDER_NEW: 'olive_order_new',
+  ORDER_NEW: 'olive_order_new_v2',
   ORDER_STATUS: 'olive_order_status',
-  ORDER_COMPLETED: 'olive_order_completed',
+  ORDER_COMPLETED: 'olive_order_completed_v2',
   DELIVERY_ASSIGNMENT: 'olive_delivery_assignment',
   DELIVERY_UPDATES: 'olive_delivery_updates',
   MARKETING: 'olive_marketing',
@@ -75,9 +75,9 @@ export type AndroidChannelId = typeof ANDROID_CHANNELS[keyof typeof ANDROID_CHAN
 
 // ─── Sound Mapping ────────────────────────────────────────────────────────────
 export const SOUNDS = {
-  new_order: 'order_alert',        // Owner new order — distinctive bell
+  new_order: 'new_order',        // Owner & Manager new order alarm (new_order.mp3)
   delivery_assigned: 'delivery_chime',     // Delivery partner — chime
-  delivered: 'success_ding',       // Delivered — pleasant success
+  delivered: 'order_delivered',       // Delivered — pleasant success (order_delivered.mp3)
   cancelled: 'cancel_buzz',        // Cancelled — soft warning
   confirmed: 'order_confirmed',    // Customer order confirmed
   marketing: 'soft_pop',           // Promotions

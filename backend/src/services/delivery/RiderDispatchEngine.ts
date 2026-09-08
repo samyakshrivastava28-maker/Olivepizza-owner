@@ -121,22 +121,75 @@ export class RiderDispatchEngine {
    */
   public static async autoDispatchRider(orderId: string): Promise<{ success: boolean; rider?: EligibleRider; reason?: string }> {
     const candidates = await this.findEligibleRiders(orderId);
+    const orderRef = adminDb.collection('orders').doc(orderId);
+
     if (candidates.length === 0) {
+      await orderRef.set({
+        riderAssignmentStatus: 'pending_rider_available',
+        riderAssignmentNote: 'No eligible riders currently available in branch radius',
+        updatedAt: new Date()
+      }, { merge: true }).catch(() => {});
       return { success: false, reason: 'No eligible riders currently available in branch radius' };
     }
 
-    const bestRider = candidates[0];
+    let assignedRider: EligibleRider | null = null;
 
-    // Atomically assign rider in Firestore
-    const orderRef = adminDb.collection('orders').doc(orderId);
-    await orderRef.update({
-      status: 'partner_assigned',
-      deliveryPartnerId: bestRider.uid,
-      deliveryPartnerName: bestRider.name,
-      deliveryPartnerPhone: bestRider.phone,
-      partnerAssignedAt: new Date().toISOString(),
-      updatedAt: new Date(),
-    });
+    for (const candidate of candidates) {
+      const userRef = adminDb.collection('users').doc(candidate.uid);
+      const dpRef = adminDb.collection('delivery_partners').doc(candidate.uid);
+
+      try {
+        await adminDb.runTransaction(async (t) => {
+          const orderSnap = await t.get(orderRef);
+          if (!orderSnap.exists) {
+            throw new Error('Order not found');
+          }
+          const currentOrder = orderSnap.data()!;
+          if (currentOrder.deliveryPartnerId && currentOrder.deliveryPartnerId !== candidate.uid) {
+            // Already assigned to someone else
+            return;
+          }
+
+          const userSnap = await t.get(userRef);
+          const userData = userSnap.data() || {};
+          if (userData.activeOrderId && userData.activeOrderId !== orderId) {
+            throw new Error('Rider is already busy with another order');
+          }
+
+          const now = new Date();
+          const isoNow = now.toISOString();
+
+          t.update(orderRef, {
+            status: 'partner_assigned',
+            deliveryPartnerId: candidate.uid,
+            deliveryPartnerName: candidate.name,
+            deliveryPartnerPhone: candidate.phone,
+            partnerAssignedAt: isoNow,
+            riderAssignedAt: isoNow,
+            riderAssignmentStatus: 'assigned',
+            updatedAt: now,
+          });
+
+          t.set(userRef, { activeOrderId: orderId }, { merge: true });
+          t.set(dpRef, { activeOrderId: orderId }, { merge: true });
+
+          assignedRider = candidate;
+        });
+
+        if (assignedRider) break;
+      } catch (txnErr) {
+        console.warn(`[DispatchEngine] Candidate ${candidate.uid} could not be locked:`, (txnErr as any)?.message);
+      }
+    }
+
+    if (!assignedRider) {
+      await orderRef.set({
+        riderAssignmentStatus: 'pending_rider_available',
+        riderAssignmentNote: 'All eligible candidates are currently busy',
+        updatedAt: new Date()
+      }, { merge: true }).catch(() => {});
+      return { success: false, reason: 'All eligible candidates are currently busy' };
+    }
 
     const orderDoc = await orderRef.get();
     const orderData = orderDoc.data() || {};
@@ -148,20 +201,20 @@ export class RiderDispatchEngine {
       customerName: orderData.customerName || 'Customer',
       customerPhone: orderData.contactPhone || 'N/A',
       deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
-      distance: `${(bestRider.distanceMeters / 1000).toFixed(1)} km`,
-      eta: `${Math.ceil(bestRider.distanceMeters / 400) || 10} mins`,
+      distance: `${((assignedRider as EligibleRider).distanceMeters / 1000).toFixed(1)} km`,
+      eta: `${Math.ceil((assignedRider as EligibleRider).distanceMeters / 400) || 10} mins`,
       totalAmount: Number(orderData.totalAmount || 0),
       paymentMethod: orderData.paymentMethod || 'COD',
     });
 
     // Notify Rider with actionable alert
-    await notificationEngine.send(bestRider.uid, riderPayload, {
+    await notificationEngine.send((assignedRider as EligibleRider).uid, riderPayload, {
       category: 'alarm_actionable',
       priority: 'critical',
       orderId,
       targetApp: 'delivery'
     });
 
-    return { success: true, rider: bestRider };
+    return { success: true, rider: assignedRider };
   }
 }

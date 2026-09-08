@@ -51,33 +51,37 @@ const ALLOWED_TRANSITIONS: Record<CanonicalOrderStatus, CanonicalOrderStatus[]> 
   pending:          ['accepted', 'cancelled'],
   accepted:         ['preparing', 'cancelled'],
   preparing:        ['partner_assigned', 'ready', 'cancelled'],
-  partner_assigned: ['ready', 'picked_up', 'cancelled'],
-  ready:            ['partner_assigned', 'picked_up', 'cancelled'],
-  picked_up:        ['out_for_delivery', 'cancelled'],
+  partner_assigned: ['ready', 'picked_up', 'out_for_delivery', 'cancelled'],
+  ready:            ['partner_assigned', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled'],
+  picked_up:        ['out_for_delivery', 'delivered', 'cancelled'],
   out_for_delivery: ['delivered', 'cancelled'],
   delivered:        [],
   cancelled:        [],
 };
 
-// Authority rules per transition
+// Authority rules per transition — strictly operational roles (Owner has read-only surveillance)
 const ROLE_AUTHORITY: Record<string, StateMachineActorRole[]> = {
-  'pending->accepted':          ['restaurant_manager', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'pending->cancelled':         ['customer', 'restaurant_manager', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'accepted->preparing':        ['restaurant_manager', 'kitchen_staff', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'accepted->cancelled':        ['restaurant_manager', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'preparing->partner_assigned': ['restaurant_manager', 'delivery_partner', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'preparing->ready':           ['restaurant_manager', 'kitchen_staff', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'preparing->cancelled':       ['restaurant_manager', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'partner_assigned->ready':    ['restaurant_manager', 'kitchen_staff', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'partner_assigned->picked_up': ['delivery_partner', 'owner', 'admin', 'developer', 'system'],
-  'partner_assigned->cancelled': ['restaurant_manager', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'ready->partner_assigned':    ['restaurant_manager', 'delivery_partner', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'ready->picked_up':           ['delivery_partner', 'owner', 'admin', 'developer', 'system'],
-  'ready->cancelled':           ['restaurant_manager', 'cashier', 'owner', 'admin', 'developer', 'system'],
-  'picked_up->out_for_delivery': ['delivery_partner', 'owner', 'admin', 'developer', 'system'],
-  'picked_up->cancelled':       ['restaurant_manager', 'owner', 'admin', 'developer', 'system'],
-  'out_for_delivery->delivered': ['delivery_partner', 'owner', 'admin', 'developer', 'system'],
-  'out_for_delivery->cancelled': ['restaurant_manager', 'owner', 'admin', 'developer', 'system'],
+  'pending->accepted':          ['restaurant_manager', 'cashier', 'system'],
+  'pending->cancelled':         ['customer', 'restaurant_manager', 'cashier', 'system'],
+  'accepted->preparing':        ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
+  'accepted->cancelled':        ['restaurant_manager', 'cashier', 'system'],
+  'preparing->partner_assigned': ['restaurant_manager', 'cashier', 'system'],
+  'preparing->ready':           ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
+  'preparing->cancelled':       ['restaurant_manager', 'cashier', 'system'],
+  'partner_assigned->ready':    ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
+  'partner_assigned->picked_up': ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
+  'partner_assigned->out_for_delivery': ['delivery_partner', 'restaurant_manager', 'system'],
+  'partner_assigned->cancelled': ['restaurant_manager', 'cashier', 'system'],
+  'ready->partner_assigned':    ['restaurant_manager', 'cashier', 'system'],
+  'ready->picked_up':           ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
+  'ready->out_for_delivery':    ['restaurant_manager', 'cashier', 'system'],
+  'ready->delivered':           ['restaurant_manager', 'cashier', 'kitchen_staff', 'system'],
+  'ready->cancelled':           ['restaurant_manager', 'cashier', 'system'],
+  'picked_up->out_for_delivery': ['delivery_partner', 'system'],
+  'picked_up->delivered':       ['delivery_partner', 'system'],
+  'picked_up->cancelled':       ['restaurant_manager', 'system'],
+  'out_for_delivery->delivered': ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
+  'out_for_delivery->cancelled': ['restaurant_manager', 'system'],
 };
 
 export class OrderStateMachine {
@@ -92,12 +96,25 @@ export class OrderStateMachine {
     }
     return 'pending';
   }
+
   public static async transition(
     orderId: string,
     toState: CanonicalOrderStatus,
     actor: StateMachineActor,
     metadata: Record<string, any> = {}
   ): Promise<TransitionResult> {
+    const normalizedActorRole = (actor.role || 'customer').toLowerCase() as StateMachineActorRole;
+    if ((normalizedActorRole === 'owner' || normalizedActorRole === 'admin') && toState !== 'cancelled') {
+      return {
+        success: false,
+        orderId,
+        previousStatus: 'pending',
+        currentStatus: 'pending',
+        version: 0,
+        error: `Owner has read-only authority. Operational stage transition '${toState}' must be performed by restaurant managers, kitchen staff, or delivery partners.`,
+      };
+    }
+
     const client = await pgPool.connect().catch(() => null);
     
     try {
@@ -160,12 +177,25 @@ export class OrderStateMachine {
         };
       }
 
-      // Validate actor authority
+      // Validate actor authority — strictly operational roles
       const transitionKey = `${fromState}->${toState}`;
-      const authorizedRoles = ROLE_AUTHORITY[transitionKey] || ['owner', 'admin', 'developer', 'system'];
+      const authorizedRoles = ROLE_AUTHORITY[transitionKey] || ['system'];
       const normalizedActorRole = (actor.role || 'customer').toLowerCase() as StateMachineActorRole;
 
-      const isAuthorized = authorizedRoles.includes(normalizedActorRole) || ['owner', 'admin', 'developer', 'system'].includes(normalizedActorRole);
+      // Enforce Owner Read-Only Rule at Backend Level
+      if (normalizedActorRole === 'owner' || normalizedActorRole === 'admin') {
+        if (client) await client.query('ROLLBACK').catch(() => {});
+        return {
+          success: false,
+          orderId,
+          previousStatus: fromState,
+          currentStatus: fromState,
+          version: orderData.notification_version || 1,
+          error: `Owner has read-only authority. Operational stage transition '${transitionKey}' must be performed by restaurant managers, kitchen staff, or delivery partners.`,
+        };
+      }
+
+      const isAuthorized = authorizedRoles.includes(normalizedActorRole) || normalizedActorRole === 'system';
       if (!isAuthorized) {
         if (client) await client.query('ROLLBACK').catch(() => {});
         return {
@@ -189,20 +219,24 @@ export class OrderStateMachine {
         ...metadata,
       };
 
-      // State-specific calculations and lifecycle hooks
+      // State-specific calculations and authoritative server timestamps
       if (toState === 'accepted') {
         updates.acceptedAt = nowIso;
         if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
           const prepMinutes = metadata.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
           updates.estimatedPreparationMinutes = prepMinutes;
-          updates.expectedReadyAt = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+          const readyTime = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+          updates.expectedReadyAt = readyTime;
+          updates.estimatedReadyAt = readyTime;
         }
       } else if (toState === 'preparing') {
         updates.preparingAt = nowIso;
         const prepMinutes = metadata.estimatedPreparationMinutes || orderData.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
         updates.estimatedPreparationMinutes = prepMinutes;
         if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
-          updates.expectedReadyAt = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+          const readyTime = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+          updates.expectedReadyAt = readyTime;
+          updates.estimatedReadyAt = readyTime;
         }
         
         // Schedule auto-dispatch at ~2/3 prep time
@@ -215,8 +249,16 @@ export class OrderStateMachine {
 
       } else if (toState === 'partner_assigned') {
         updates.partnerAssignedAt = nowIso;
+        updates.riderAssignedAt = nowIso;
       } else if (toState === 'ready') {
         updates.readyAt = nowIso;
+        // If this is a delivery order without an assigned partner yet, auto-dispatch immediately
+        const fulfillment = (orderData.fulfillmentType || orderData.deliveryType || 'delivery').toLowerCase();
+        if (fulfillment === 'delivery' && !orderData.deliveryPartnerId && !metadata.deliveryPartnerId) {
+          RiderDispatchEngine.autoDispatchRider(orderId).catch((e) =>
+            console.warn('[OrderStateMachine] Auto-dispatch on ready notice:', e.message)
+          );
+        }
       } else if (toState === 'picked_up') {
         updates.pickedUpAt = nowIso;
       } else if (toState === 'out_for_delivery') {
