@@ -66,7 +66,7 @@ service cloud.firestore {
     match /orders/{orderId} {
       allow read: if hasFullAccess() || 
                   (isSignedIn() && resource.data.userId == request.auth.uid) || 
-                  (isDeliveryPartner() && (resource.data.deliveryPartnerId == request.auth.uid || resource.data.status in ['ready', 'packed', 'partner_assigned', 'picked_up', 'out_for_delivery']));
+                  (isDeliveryPartner() && resource.data.deliveryPartnerId == request.auth.uid);
       allow write: if hasFullAccess();
     }
 

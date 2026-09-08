@@ -13,6 +13,7 @@ import { notificationEngine } from '../services/notification/NotificationEngine.
 import { CanonicalOrderService } from '../services/pos/CanonicalOrderService.js';
 import { BillingNumberService } from '../services/pos/BillingNumberService.js';
 import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngine.js';
+import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 import { query } from '../config/postgres.js';
 import crypto from 'crypto';
 import net from 'net';
@@ -487,7 +488,7 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
       dailyOrderNumber,
       orderNumber,
       finalTotal: calc.finalTotal,
-      order: orderDocData,
+      order: OrderProjectionService.projectForPOS(orderDocData, newOrderId),
       receipt: {
         text: receiptText,
         data: receiptData
@@ -534,10 +535,12 @@ router.get('/search', verifyToken, requirePOSRole, async (req: AuthRequest, res:
       offset: req.query.offset ? parseInt(req.query.offset as string, 10) : 0
     });
 
+    const projectedOrders = results.map((o: any) => OrderProjectionService.projectForPOS(o, o.order_id || o.id));
+
     res.json({
       success: true,
-      count: results.length,
-      orders: results
+      count: projectedOrders.length,
+      orders: projectedOrders
     });
   } catch (error: any) {
     console.error('[POS Search] Error:', error);
@@ -553,7 +556,8 @@ router.get('/online-orders/live', verifyToken, requirePOSRole, async (req: AuthR
     const user = req.user!;
     const branchId = user.branchId || 'main_branch';
     const orders = await CanonicalOrderService.getLiveOnlineOrders(branchId);
-    res.json({ success: true, count: orders.length, orders });
+    const projectedOrders = orders.map((o: any) => OrderProjectionService.projectForPOS(o, o.order_id || o.id));
+    res.json({ success: true, count: projectedOrders.length, orders: projectedOrders });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -655,35 +659,13 @@ router.get('/history', verifyToken, requirePOSRole, async (req: AuthRequest, res
         return await adminDb.collection('orders').where('branchId', '==', branchId).limit(limitCount).get();
       });
 
-    let bills: any[] = snap.docs.map(doc => {
-      const d = doc.data();
-      return {
-        id: doc.id,
-        orderNumber: d.dailyOrderNumber ? `#${d.dailyOrderNumber}` : (d.orderNumber || `#${doc.id.slice(0, 6)}`),
-        dailyOrderNumber: d.dailyOrderNumber,
-        customerName: d.customerName || 'Walk-in Customer',
-        customerPhone: d.contactPhone || 'N/A',
-        totalAmount: Number(d.totalAmount || 0),
-        subtotal: Number(d.subtotal || 0),
-        taxes: Number(d.taxes || 0),
-        discountAmount: Number(d.discountAmount || 0),
-        paymentMethod: d.paymentMethod || 'CASH',
-        paymentStatus: d.paymentStatus || 'PAID',
-        status: d.status || 'pending',
-        orderType: (d.orderSource || d.orderType || 'DINE_IN').toUpperCase(),
-        tableNumber: d.tableNumber || null,
-        terminalId: d.terminalId || 'POS-TERM-01',
-        cashierName: d.cashierName || 'Cashier',
-        items: d.items || [],
-        createdAt: d.createdAt?.toDate ? d.createdAt.toDate().toISOString() : d.createdAt
-      };
-    });
+    let bills: any[] = snap.docs.map(doc => OrderProjectionService.projectForPOS(doc.data(), doc.id));
 
     if (searchQuery) {
       bills = bills.filter(b => 
-        b.orderNumber.toLowerCase().includes(searchQuery) ||
-        b.customerPhone.toLowerCase().includes(searchQuery) ||
-        b.customerName.toLowerCase().includes(searchQuery) ||
+        (b.orderNumber && b.orderNumber.toLowerCase().includes(searchQuery)) ||
+        (b.customerPhone && b.customerPhone.toLowerCase().includes(searchQuery)) ||
+        (b.customerName && b.customerName.toLowerCase().includes(searchQuery)) ||
         (b.tableNumber && b.tableNumber.toLowerCase().includes(searchQuery))
       );
     }

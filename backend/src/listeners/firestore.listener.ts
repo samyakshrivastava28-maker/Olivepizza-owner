@@ -315,11 +315,22 @@ export class FirestoreListener {
       const totalAmount = Number(orderData.totalAmount || orderData.total_amount || 0);
 
       let subject = '';
-      if (status === 'pending') subject = `Order Placed — #${orderNumber}`;
-      else if (status === 'accepted') subject = `Order Accepted — #${orderNumber}`;
-      else if (status === 'cancelled') subject = `Order Cancelled — #${orderNumber}`;
-      else if (status === 'delivered') subject = `Order Delivered — #${orderNumber}`;
-      else return; // Don't email for every minor step like preparing
+      switch (status) {
+        case 'pending':
+          subject = `Order Placed — #${orderNumber}`;
+          break;
+        case 'accepted':
+          subject = `Order Accepted — #${orderNumber}`;
+          break;
+        case 'cancelled':
+          subject = `Order Cancelled — #${orderNumber}`;
+          break;
+        case 'delivered':
+          subject = `Order Delivered — #${orderNumber}`;
+          break;
+        default:
+          return; // Don't email for every minor step like preparing
+      }
 
       const fullOrderData = {
         items: Array.isArray(orderData.items) ? orderData.items : [],

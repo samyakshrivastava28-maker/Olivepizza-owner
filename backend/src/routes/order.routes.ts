@@ -1,4 +1,5 @@
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
+import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { Router, Request, Response } from 'express';
 import { query } from '../lib/db.js';
@@ -80,34 +81,7 @@ router.get('/', verifyToken, async (req: AuthRequest, res: Response): Promise<vo
       });
 
       const orders = snapshot.docs.map((doc: any) => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          orderNumber: data.orderNumber || `#${doc.id.slice(0, 6).toUpperCase()}`,
-          dailyOrderNumber: data.dailyOrderNumber,
-          userId: data.userId,
-          customerName: data.customerName || data.userName || data.deliveryAddress?.customerName || 'Customer',
-          contactPhone: data.contactPhone || data.phone || '',
-          customerEmail: data.customerEmail || data.userEmail || '',
-          deliveryAddress: data.deliveryAddress,
-          items: data.items || [],
-          subtotal: Number(data.subtotal || data.totalAmount || 0),
-          totalAmount: Number(data.totalAmount || 0),
-          deliveryFee: Number(data.deliveryFee || 0),
-          taxes: Number(data.taxes || 0),
-          packagingCharge: Number(data.packagingCharge || 0),
-          discountAmount: Number(data.discountAmount || 0),
-          status: (data.status || 'pending').toLowerCase(),
-          fulfillmentType: data.fulfillmentType || data.deliveryType || 'delivery',
-          deliveryType: data.deliveryType || 'delivery',
-          paymentStatus: data.paymentStatus || 'pending',
-          paymentMethod: data.paymentMethod || 'online',
-          deliveryPartnerId: data.deliveryPartnerId,
-          deliveryPartnerName: data.deliveryPartnerName,
-          branchId: data.branchId || 'main_branch',
-          createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : (data.createdAt || new Date()),
-          updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : (data.updatedAt || new Date()),
-        };
+        return OrderProjectionService.projectByRole({ id: doc.id, ...doc.data() }, user);
       });
 
       res.json(orders);
@@ -124,23 +98,9 @@ router.get('/', verifyToken, async (req: AuthRequest, res: Response): Promise<vo
         return await adminDb.collection('orders').where('userId', '==', user.uid).limit(50).get();
       });
       
-    const orders = snapshot.docs.map((doc: any) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        userId: data.userId,
-        orderNumber: data.orderNumber || `#${doc.id.slice(0, 6).toUpperCase()}`,
-        dailyOrderNumber: data.dailyOrderNumber,
-        status: data.status,
-        totalAmount: Number(data.totalAmount || 0),
-        deliveryFee: Number(data.deliveryFee || 0),
-        contactPhone: data.contactPhone,
-        deliveryAddress: data.deliveryAddress?.addressLine || data.deliveryAddress,
-        items: data.items || [],
-        createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : (data.createdAt || new Date()),
-        updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : (data.updatedAt || new Date())
-      };
-    });
+    const orders = snapshot.docs
+      .map((doc: any) => OrderProjectionService.projectForCustomer(doc.data(), user.uid, doc.id))
+      .filter(Boolean);
 
     res.json(orders);
   } catch (error) {
@@ -178,38 +138,58 @@ router.get('/live', verifyToken, requireRole(['restaurant_manager', 'owner', 'ki
     });
 
     const activeOrders = snapshot.docs
-      .map((doc: any) => {
-        const data = doc.data();
-        const status = (data.status || 'pending').toLowerCase();
-        return {
-          id: doc.id,
-          orderNumber: data.orderNumber || `#${doc.id.slice(0, 6).toUpperCase()}`,
-          dailyOrderNumber: data.dailyOrderNumber,
-          userId: data.userId,
-          customerName: data.customerName || data.userName || data.deliveryAddress?.customerName || 'Customer',
-          contactPhone: data.contactPhone || data.phone || '',
-          deliveryAddress: data.deliveryAddress,
-          items: data.items || [],
-          subtotal: Number(data.subtotal || data.totalAmount || 0),
-          totalAmount: Number(data.totalAmount || 0),
-          deliveryFee: Number(data.deliveryFee || 0),
-          taxes: Number(data.taxes || 0),
-          status,
-          fulfillmentType: data.fulfillmentType || data.deliveryType || 'delivery',
-          deliveryType: data.deliveryType || 'delivery',
-          deliveryPartnerId: data.deliveryPartnerId,
-          deliveryPartnerName: data.deliveryPartnerName,
-          branchId: data.branchId || 'main_branch',
-          createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : (data.createdAt || new Date()),
-          updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate() : (data.updatedAt || new Date()),
-        };
-      })
+      .map((doc: any) => OrderProjectionService.projectForRestaurantManager(doc.data(), doc.id))
       .filter((o: any) => activeStatuses.includes(o.status));
 
     res.json({ success: true, count: activeOrders.length, orders: activeOrders });
   } catch (error: any) {
     console.error("[Orders] Failed to fetch live orders:", error);
     res.status(500).json({ error: error?.message || 'Failed to fetch live orders' });
+  }
+});
+
+// 2b. GET /:id - Single order lookup with authorized role-based field projection
+router.get('/:id', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const user = req.user;
+    if (!user || !user.uid) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const docSnap = await adminDb.collection('orders').doc(id).get();
+    if (!docSnap.exists) {
+      res.status(404).json({ error: 'Order not found' });
+      return;
+    }
+
+    const data = docSnap.data()!;
+    const role = (user.role || 'customer').toLowerCase();
+    const isStaff = ['restaurant_manager', 'manager', 'owner', 'developer', 'admin', 'platform_owner', 'kitchen_staff', 'cashier', 'franchise_manager', 'franchise_owner'].includes(role) ||
+      user.email === 'olivepizzarjn@gmail.com' ||
+      user.email === 'webhub2811@gmail.com';
+
+    // If customer, verify ownership
+    if (!isStaff && role !== 'delivery_partner' && role !== 'delivery') {
+      if (data.userId !== user.uid) {
+        res.status(403).json({ error: 'Forbidden: You do not have permission to view this order' });
+        return;
+      }
+    }
+
+    // If delivery partner, verify assignment
+    if ((role === 'delivery_partner' || role === 'delivery') && !isStaff) {
+      if (data.deliveryPartnerId !== user.uid) {
+        res.status(403).json({ error: 'Forbidden: You are not the assigned delivery partner for this order' });
+        return;
+      }
+    }
+
+    const projected = OrderProjectionService.projectByRole({ id: docSnap.id, ...data }, user);
+    res.json({ success: true, order: projected });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to fetch order' });
   }
 });
 

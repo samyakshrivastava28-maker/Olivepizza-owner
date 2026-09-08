@@ -128,29 +128,41 @@ router.post('/transactional', async (req, res) => {
           } else if (event === 'ORDER_STATUS_CHANGED') {
             const status = data.status || order.status;
             
-            if (status === 'preparing') {
-              await queueEmail(customerEmail, '✅ Your order has been confirmed!', wrapper(buildOrderConfirmedEmail(order)), 'transactional');
-            } else if (status === 'ready' && order.deliveryPartnerId) { // Delivery partner accepted
-              let partnerName = 'Delivery Partner';
-              let partnerPhoto = '';
-              let vehicleInfo = '';
-              try {
-                const partnerSnap = await adminDb.collection('users').doc(order.deliveryPartnerId).get();
-                if (partnerSnap.exists) {
-                  const partner = partnerSnap.data();
-                  partnerName = partner?.name || partnerName;
-                  partnerPhoto = partner?.photoUrl || partnerPhoto;
-                  vehicleInfo = partner?.vehicleType ? `${partner.vehicleType} (${partner.vehicleNumber || 'No number'})` : vehicleInfo;
+            switch (status) {
+              case 'preparing':
+                await queueEmail(customerEmail, '✅ Your order has been confirmed!', wrapper(buildOrderConfirmedEmail(order)), 'transactional');
+                break;
+
+              case 'ready':
+                if (order.deliveryPartnerId) {
+                  let partnerName = 'Delivery Partner';
+                  let partnerPhoto = '';
+                  let vehicleInfo = '';
+                  try {
+                    const partnerSnap = await adminDb.collection('users').doc(order.deliveryPartnerId).get();
+                    if (partnerSnap.exists) {
+                      const partner = partnerSnap.data();
+                      partnerName = partner?.name || partnerName;
+                      partnerPhoto = partner?.photoUrl || partnerPhoto;
+                      vehicleInfo = partner?.vehicleType ? `${partner.vehicleType} (${partner.vehicleNumber || 'No number'})` : vehicleInfo;
+                    }
+                  } catch (e) {}
+                  await queueEmail(customerEmail, '🚴 Your delivery partner is on the way!', wrapper(buildDeliveryPartnerAssignedEmail(order, partnerName, partnerPhoto, vehicleInfo)), 'transactional');
                 }
-              } catch (e) {}
-              await queueEmail(customerEmail, '🚴 Your delivery partner is on the way!', wrapper(buildDeliveryPartnerAssignedEmail(order, partnerName, partnerPhoto, vehicleInfo)), 'transactional');
-            } else if (status === 'delivered') {
-              let recommendedProducts: any[] = [];
-              try {
-                const productsSnap = await adminDb.collection('products').where('isAvailable', '==', true).limit(3).get();
-                recommendedProducts = productsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-              } catch (e) {}
-              await queueEmail(customerEmail, '🎉 Enjoy your meal!', wrapper(buildOrderDeliveredEmail(order, recommendedProducts)), 'transactional');
+                break;
+
+              case 'delivered': {
+                let recommendedProducts: any[] = [];
+                try {
+                  const productsSnap = await adminDb.collection('products').where('isAvailable', '==', true).limit(3).get();
+                  recommendedProducts = productsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                } catch (e) {}
+                await queueEmail(customerEmail, '🎉 Enjoy your meal!', wrapper(buildOrderDeliveredEmail(order, recommendedProducts)), 'transactional');
+                break;
+              }
+
+              default:
+                break;
             }
           }
           console.log(`[Email] Transactional | Recipient: ${customerEmail} | Template: ${event} (${data.status}) | Success: true`);

@@ -3,6 +3,7 @@ import { adminDb } from '../config/firebase.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogleSheetsService.js';
+import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 
 const router = Router();
 
@@ -1888,56 +1889,35 @@ router.get('/:id/restaurants', requireRole(['owner', 'admin', 'developer', 'plat
 router.get('/:id/live-orders', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const orderSnap = await adminDb.collection('orders').limit(100).get().catch(() => ({ docs: [] } as any));
-    let orders = orderSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
 
-    if (orders.length === 0) {
-      orders = [
-        {
-          id: 'ord_live_101',
-          orderNumber: 'OP-8291',
-          customerName: 'Rohit Sharma',
-          customerPhone: '+91 98261 11223',
-          deliveryAddress: 'House 44, Kailash Nagar, Rajnandgaon',
-          branchName: 'Rajnandgaon HQ',
-          franchiseId: id,
-          source: 'ONLINE_APP',
-          status: 'PREPARING',
-          totalAmount: 580,
-          paymentMethod: 'UPI',
-          paymentStatus: 'PAID',
-          items: [
-            { name: 'Farm Fresh Deluxe Pizza (Medium)', quantity: 1, price: 399 },
-            { name: 'Garlic Breadsticks', quantity: 1, price: 129 },
-            { name: 'Coke 500ml', quantity: 1, price: 52 }
-          ],
-          createdAt: new Date(Date.now() - 12 * 60 * 1000).toISOString()
-        },
-        {
-          id: 'ord_live_102',
-          orderNumber: 'OP-8292',
-          customerName: 'Ananya Verma',
-          customerPhone: '+91 97130 55441',
-          deliveryAddress: 'Table #4 (Dine-In)',
-          branchName: 'Rajnandgaon HQ',
-          franchiseId: id,
-          source: 'POS_DINE_IN',
-          status: 'ACCEPTED',
-          totalAmount: 740,
-          paymentMethod: 'CASH',
-          paymentStatus: 'PAID',
-          items: [
-            { name: 'Paneer Makhani Feast (Large)', quantity: 1, price: 599 },
-            { name: 'Cheese Dip', quantity: 2, price: 70 }
-          ],
-          createdAt: new Date(Date.now() - 5 * 60 * 1000).toISOString()
-        }
-      ];
+    // Verify franchise access if caller is not global owner
+    const scope = FranchiseScopeService.resolveScope(req.user);
+    try {
+      FranchiseScopeService.assertFranchiseAccess(scope, id);
+    } catch (scopeErr: any) {
+      res.status(403).json({ success: false, error: scopeErr.message || 'Forbidden: Access denied to this franchise orders' });
+      return;
     }
+
+    const orderSnap = await adminDb.collection('orders')
+      .where('franchiseId', '==', id)
+      .limit(100)
+      .get()
+      .catch(async () => {
+        return await adminDb.collection('orders').limit(100).get();
+      });
+
+    const orders = orderSnap.docs
+      .filter(d => {
+        const data = d.data();
+        return !data.franchiseId || data.franchiseId === id || id === 'fra_primary' || id === 'fra_rajnandgaon';
+      })
+      .map(d => OrderProjectionService.projectForFranchiseManager(d.data(), d.id));
 
     res.json({
       success: true,
       franchiseId: id,
+      count: orders.length,
       orders
     });
   } catch (error: any) {

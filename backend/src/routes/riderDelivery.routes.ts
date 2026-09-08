@@ -4,6 +4,7 @@ import { adminDb } from '../config/firebase.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { DeliveryDataLifecycleService } from '../services/delivery/DeliveryDataLifecycleService.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
+import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 
 const router = Router();
 
@@ -179,10 +180,7 @@ router.get('/active-orders', async (req: AuthRequest, res: Response): Promise<vo
       .get()
       .catch(() => ({ docs: [] } as any));
 
-    const orders = snap.docs.map((d: any) => ({
-      id: d.id,
-      ...d.data()
-    }));
+    const orders = snap.docs.map((d: any) => OrderProjectionService.projectForDeliveryRider(d.data(), d.id));
 
     res.json({ success: true, orders });
   } catch (error: any) {
@@ -204,10 +202,7 @@ router.get('/history', async (req: AuthRequest, res: Response): Promise<void> =>
       .get()
       .catch(() => ({ docs: [] } as any));
 
-    const orders = snap.docs.map((d: any) => ({
-      id: d.id,
-      ...d.data()
-    }));
+    const orders = snap.docs.map((d: any) => OrderProjectionService.projectForDeliveryRider(d.data(), d.id));
 
     res.json({
       success: true,

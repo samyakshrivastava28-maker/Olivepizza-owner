@@ -220,85 +220,111 @@ export class OrderStateMachine {
       };
 
       // State-specific calculations and authoritative server timestamps
-      if (toState === 'accepted') {
-        updates.acceptedAt = nowIso;
-        if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
-          const prepMinutes = metadata.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
+      switch (toState) {
+        case 'accepted': {
+          updates.acceptedAt = nowIso;
+          if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
+            const prepMinutes = metadata.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
+            updates.estimatedPreparationMinutes = prepMinutes;
+            const readyTime = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+            updates.expectedReadyAt = readyTime;
+            updates.estimatedReadyAt = readyTime;
+          }
+          break;
+        }
+
+        case 'preparing': {
+          updates.preparingAt = nowIso;
+          const prepMinutes = metadata.estimatedPreparationMinutes || orderData.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
           updates.estimatedPreparationMinutes = prepMinutes;
-          const readyTime = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
-          updates.expectedReadyAt = readyTime;
-          updates.estimatedReadyAt = readyTime;
+          if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
+            const readyTime = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+            updates.expectedReadyAt = readyTime;
+            updates.estimatedReadyAt = readyTime;
+          }
+          
+          // Schedule auto-dispatch at ~2/3 prep time
+          const autoDispatchDelayMs = Math.floor((prepMinutes * (2 / 3)) * 60 * 1000);
+          setTimeout(() => {
+            RiderDispatchEngine.autoDispatchRider(orderId).catch((e) =>
+              console.warn('[DispatchEngine] Auto-dispatch background notice:', e.message)
+            );
+          }, Math.max(2000, autoDispatchDelayMs));
+          break;
         }
-      } else if (toState === 'preparing') {
-        updates.preparingAt = nowIso;
-        const prepMinutes = metadata.estimatedPreparationMinutes || orderData.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
-        updates.estimatedPreparationMinutes = prepMinutes;
-        if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
-          const readyTime = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
-          updates.expectedReadyAt = readyTime;
-          updates.estimatedReadyAt = readyTime;
+
+        case 'partner_assigned': {
+          updates.partnerAssignedAt = nowIso;
+          updates.riderAssignedAt = nowIso;
+          break;
         }
-        
-        // Schedule auto-dispatch at ~2/3 prep time
-        const autoDispatchDelayMs = Math.floor((prepMinutes * (2 / 3)) * 60 * 1000);
-        setTimeout(() => {
-          RiderDispatchEngine.autoDispatchRider(orderId).catch((e) =>
-            console.warn('[DispatchEngine] Auto-dispatch background notice:', e.message)
+
+        case 'ready': {
+          updates.readyAt = nowIso;
+          // If this is a delivery order without an assigned partner yet, auto-dispatch immediately
+          const fulfillment = (orderData.fulfillmentType || orderData.deliveryType || 'delivery').toLowerCase();
+          if (fulfillment === 'delivery' && !orderData.deliveryPartnerId && !metadata.deliveryPartnerId) {
+            RiderDispatchEngine.autoDispatchRider(orderId).catch((e) =>
+              console.warn('[OrderStateMachine] Auto-dispatch on ready notice:', e.message)
+            );
+          }
+          break;
+        }
+
+        case 'picked_up': {
+          updates.pickedUpAt = nowIso;
+          break;
+        }
+
+        case 'out_for_delivery': {
+          updates.outForDeliveryAt = nowIso;
+          break;
+        }
+
+        case 'delivered': {
+          updates.deliveredAt = nowIso;
+          // Release rider active order lock
+          const riderId = orderData.deliveryPartnerId || metadata.deliveryPartnerId;
+          if (riderId) {
+            adminDb.collection('users').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+            adminDb.collection('delivery_partners').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+          }
+          break;
+        }
+
+        case 'cancelled': {
+          updates.cancelledAt = nowIso;
+          updates.cancellationReason = metadata.cancellationReason || 'CUSTOMER_CANCELLED';
+          updates.cancellationSource = metadata.cancellationSource || actor.role || 'system';
+          updates.cancellationExplanation = metadata.cancellationExplanation || (
+            metadata.cancellationReason === 'RESTAURANT_ACCEPT_TIMEOUT'
+              ? 'The restaurant was unable to accept your order within the required time.'
+              : 'Order was cancelled.'
           );
-        }, Math.max(2000, autoDispatchDelayMs));
+          updates.cancellationAcknowledged = false;
+          updates.cancellationAcknowledgedAt = null;
 
-      } else if (toState === 'partner_assigned') {
-        updates.partnerAssignedAt = nowIso;
-        updates.riderAssignedAt = nowIso;
-      } else if (toState === 'ready') {
-        updates.readyAt = nowIso;
-        // If this is a delivery order without an assigned partner yet, auto-dispatch immediately
-        const fulfillment = (orderData.fulfillmentType || orderData.deliveryType || 'delivery').toLowerCase();
-        if (fulfillment === 'delivery' && !orderData.deliveryPartnerId && !metadata.deliveryPartnerId) {
-          RiderDispatchEngine.autoDispatchRider(orderId).catch((e) =>
-            console.warn('[OrderStateMachine] Auto-dispatch on ready notice:', e.message)
-          );
-        }
-      } else if (toState === 'picked_up') {
-        updates.pickedUpAt = nowIso;
-      } else if (toState === 'out_for_delivery') {
-        updates.outForDeliveryAt = nowIso;
-      } else if (toState === 'delivered') {
-        updates.deliveredAt = nowIso;
-        // Release rider active order lock
-        const riderId = orderData.deliveryPartnerId || metadata.deliveryPartnerId;
-        if (riderId) {
-          adminDb.collection('users').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
-          adminDb.collection('delivery_partners').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
-        }
-      } else if (toState === 'cancelled') {
-        updates.cancelledAt = nowIso;
-        updates.cancellationReason = metadata.cancellationReason || 'CUSTOMER_CANCELLED';
-        updates.cancellationSource = metadata.cancellationSource || actor.role || 'system';
-        updates.cancellationExplanation = metadata.cancellationExplanation || (
-          metadata.cancellationReason === 'RESTAURANT_ACCEPT_TIMEOUT'
-            ? 'The restaurant was unable to accept your order within the required time.'
-            : 'Order was cancelled.'
-        );
-        updates.cancellationAcknowledged = false;
-        updates.cancellationAcknowledgedAt = null;
+          // Release rider active order lock if assigned
+          const riderId = orderData.deliveryPartnerId || metadata.deliveryPartnerId;
+          if (riderId) {
+            adminDb.collection('users').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+            adminDb.collection('delivery_partners').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+          }
 
-        // Release rider active order lock if assigned
-        const riderId = orderData.deliveryPartnerId || metadata.deliveryPartnerId;
-        if (riderId) {
-          adminDb.collection('users').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
-          adminDb.collection('delivery_partners').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
+          // Authoritative payment/refund status
+          const isPaid = (orderData.paymentStatus || '').toLowerCase() === 'paid' || orderData.paymentCaptured === true;
+          const isCod = (orderData.paymentMethod || '').toLowerCase() === 'cod';
+          if (!isPaid || isCod) {
+            updates.refundStatus = 'not_applicable';
+          } else {
+            // Trigger payment reconciliation/refund queue without falsely claiming refund completed
+            updates.refundStatus = 'pending_review';
+          }
+          break;
         }
 
-        // Authoritative payment/refund status
-        const isPaid = (orderData.paymentStatus || '').toLowerCase() === 'paid' || orderData.paymentCaptured === true;
-        const isCod = (orderData.paymentMethod || '').toLowerCase() === 'cod';
-        if (!isPaid || isCod) {
-          updates.refundStatus = 'not_applicable';
-        } else {
-          // Trigger payment reconciliation/refund queue without falsely claiming refund completed
-          updates.refundStatus = 'pending_review';
-        }
+        default:
+          break;
       }
 
       await orderRef.update(updates);
@@ -385,31 +411,42 @@ export class OrderStateMachine {
         let title = 'Olive Pizza Order Update';
         let body = `Your order ${orderNumber} status is now ${toState}.`;
 
-        if (toState === 'accepted') {
-          title = 'Order Confirmed! 🍕';
-          body = 'The kitchen has accepted your order and will begin handcrafted preparation shortly.';
-        } else if (toState === 'preparing') {
-          title = 'Baking in Stone Ovens 🔥';
-          body = `Your pizza is being freshly baked (~ ${order.estimatedPreparationMinutes || 15} mins).`;
-        } else if (toState === 'partner_assigned') {
-          title = 'Rider Assigned 🛵';
-          body = `${order.deliveryPartnerName || 'Your delivery partner'} is assigned to pick up your order.`;
-        } else if (toState === 'ready') {
-          title = 'Order Ready! ✨';
-          body = 'Your order is hot, packaged, and ready for dispatch.';
-        } else if (toState === 'picked_up' || toState === 'out_for_delivery') {
-          title = 'Out for Delivery 🚀';
-          body = 'Your delivery partner is on the way with your hot meal!';
-        } else if (toState === 'delivered') {
-          title = 'Order Delivered! 🎉';
-          body = 'Enjoy your delicious meal! Tap to rate your food and delivery experience.';
-        } else if (toState === 'cancelled') {
-          title = 'Order Cancelled';
-          if (order.cancellationReason === 'RESTAURANT_ACCEPT_TIMEOUT') {
-            body = `Sorry, your Olive Pizza order ${orderNumber} was cancelled because the restaurant could not accept it in time.`;
-          } else {
-            body = `Your order ${orderNumber} was cancelled. ${order.cancellationExplanation || order.cancellationReason || ''}`;
-          }
+        switch (toState) {
+          case 'accepted':
+            title = 'Order Confirmed! 🍕';
+            body = 'The kitchen has accepted your order and will begin handcrafted preparation shortly.';
+            break;
+          case 'preparing':
+            title = 'Baking in Stone Ovens 🔥';
+            body = `Your pizza is being freshly baked (~ ${order.estimatedPreparationMinutes || 15} mins).`;
+            break;
+          case 'partner_assigned':
+            title = 'Rider Assigned 🛵';
+            body = `${order.deliveryPartnerName || 'Your delivery partner'} is assigned to pick up your order.`;
+            break;
+          case 'ready':
+            title = 'Order Ready! ✨';
+            body = 'Your order is hot, packaged, and ready for dispatch.';
+            break;
+          case 'picked_up':
+          case 'out_for_delivery':
+            title = 'Out for Delivery 🚀';
+            body = 'Your delivery partner is on the way with your hot meal!';
+            break;
+          case 'delivered':
+            title = 'Order Delivered! 🎉';
+            body = 'Enjoy your delicious meal! Tap to rate your food and delivery experience.';
+            break;
+          case 'cancelled':
+            title = 'Order Cancelled';
+            if (order.cancellationReason === 'RESTAURANT_ACCEPT_TIMEOUT') {
+              body = `Sorry, your Olive Pizza order ${orderNumber} was cancelled because the restaurant could not accept it in time.`;
+            } else {
+              body = `Your order ${orderNumber} was cancelled. ${order.cancellationExplanation || order.cancellationReason || ''}`;
+            }
+            break;
+          default:
+            break;
         }
 
         await notificationEngine.send(customerUid, {
