@@ -3,7 +3,7 @@
  *
  * Manages 15 notification templates in PostgreSQL notification_templates:
  *  - New Order, Accepted, Preparing, Ready, Partner Assigned, Out for Delivery, Delivered, Cancelled
- *  - Promotional, Weekly Report, Backup Complete, Developer Alert, Security Alert, Maintenance, Broadcast
+ *  - Promotional, Monthly Report, Backup Complete, Developer Alert, Security Alert, Maintenance, Broadcast
  *
  * Supports title, body, sound, priority, channel, icon, color, deep links, badge, category,
  * enable/disable toggles, and test push triggers for Android & Web Push.

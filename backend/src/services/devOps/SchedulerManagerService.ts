@@ -2,7 +2,9 @@
  * SchedulerManagerService — Cron Job & Background Task Operations Center
  *
  * Manages every background scheduled job:
- *  - Weekly Business Reports Generation & Emailing
+ *  - Monthly Business Reports Generation & Emailing
+ *  - Daily Google Sheets Finalized Orders Sync (00:00 AM IST)
+ *  - 8-Hour Inactive Cart Push Reminder
  *  - Notification Queue Drainer
  *  - Email Queue Drainer
  *  - FCM Token Cleanup & Storage Analytics
@@ -82,6 +84,18 @@ export class SchedulerManagerService {
         name: 'FCM Token Cleanup & Storage Analytics',
         schedulePattern: 'Every 24 Hours',
         description: 'Prunes invalid or expired FCM tokens and logs storage metrics to storage_analytics_daily.'
+      },
+      {
+        id: 'daily_sheets_sync',
+        name: 'Daily Google Sheets Finalized Orders Sync',
+        schedulePattern: 'Every Day @ 00:00 AM IST',
+        description: 'Syncs previous day finalized orders to franchise-separated Google Spreadsheets idempotently.'
+      },
+      {
+        id: 'abandoned_cart_reminder',
+        name: '8-Hour Inactive Cart Push Reminder',
+        schedulePattern: 'Hourly Check (0 * * * *)',
+        description: 'Identifies inactive carts (~8 hours), queries valid active coupons, and sends single personalized reminder.'
       }
     ];
 

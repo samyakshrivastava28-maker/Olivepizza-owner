@@ -15,7 +15,25 @@
 import { WebSocketServer as WSSNative, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { appEventBus, OrderStatusChangedEvent, OrderCreatedEvent } from '../eventBus/AppEventBus.js';
-import { adminAuth } from '../../config/firebase.js';
+import { adminAuth, adminDb } from '../../config/firebase.js';
+
+async function resolveAuthoritativeRole(uid: string, tokenRole?: string): Promise<string> {
+  if (tokenRole && tokenRole !== 'customer') return tokenRole;
+  try {
+    const userDoc = await adminDb.collection('users').doc(uid).get();
+    if (userDoc.exists) {
+      const data = userDoc.data();
+      if (data?.role) return data.role;
+    }
+    const dpDoc = await adminDb.collection('delivery_partners').doc(uid).get();
+    if (dpDoc.exists && dpDoc.data()?.isActive !== false) {
+      return 'delivery_partner';
+    }
+  } catch (err) {
+    console.warn('[WebSocketServer] Failed to resolve role for', uid, err);
+  }
+  return 'customer';
+}
 
 export interface ConnectedClient {
   ws: WebSocket;
@@ -65,7 +83,7 @@ class OliveWebSocketServer {
         try {
           const decoded = await adminAuth.verifyIdToken(token);
           uid = decoded.uid;
-          role = (decoded.role as string) || 'customer';
+          role = await resolveAuthoritativeRole(uid, decoded.role as string);
         } catch (tokenErr) {
           console.warn('[WebSocketServer] Handshake token verification failed:', tokenErr);
           uid = 'anonymous';
@@ -121,7 +139,7 @@ class OliveWebSocketServer {
 
               const decoded = await adminAuth.verifyIdToken(msg.token);
               authUid = decoded.uid;
-              authRole = (decoded.role as string) || 'customer';
+              authRole = await resolveAuthoritativeRole(authUid, decoded.role as string);
 
               // Update client registration with verified identity
               const oldSet = this.clients.get(client.uid);
@@ -169,6 +187,12 @@ class OliveWebSocketServer {
 
           // 5. Driver GPS location update (500ms streaming from delivery app)
           if (msg.type === 'driver_location' && msg.data) {
+            const allowedDriverRoles = ['delivery_partner', 'delivery', 'owner', 'admin', 'developer'];
+            if (!client.role || !allowedDriverRoles.includes(client.role) || client.uid === 'anonymous') {
+              this.safeSend(ws, { type: 'error', data: { message: 'Unauthorized location publisher' } });
+              return;
+            }
+
             const loc: DriverLocationData = {
               ...msg.data,
               deliveryPartnerId: client.uid,

@@ -79,7 +79,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     }
 
     const { targetApp, terminalId, requestedBranchId } = req.body;
-    const validApps = ['POS', 'RESTAURANT_MANAGER', 'FRANCHISE_MANAGER', 'DELIVERY'];
+    const validApps = ['POS', 'RESTAURANT_MANAGER', 'FRANCHISE_MANAGER', 'DELIVERY', 'OWNER'];
     if (!targetApp || !validApps.includes(targetApp)) {
       res.status(400).json({ authorized: false, reason: `Invalid targetApp. Must be one of: ${validApps.join(', ')}` });
       return;
@@ -268,6 +268,13 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
         } catch (dpErr) {
           console.warn('[AuthorizeApp] Delivery partner check notice:', dpErr);
         }
+      }
+    } else if (targetApp === 'OWNER') {
+      const allowedRoles = ['owner', 'admin', 'developer', 'platform_owner'];
+      if (allowedRoles.includes(role) || allowedApps.includes('OWNER')) {
+        isAuthorized = true;
+      } else {
+        denialReason = 'Your account is not authorized to access the Olive Pizza Owner & Executive Console. Access is restricted to platform owners and administrators.';
       }
     }
 

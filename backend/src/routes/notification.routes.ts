@@ -748,6 +748,12 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       return;
     }
 
+    const operationalApps = ['owner', 'pos', 'restaurant_manager', 'franchise_manager', 'delivery'];
+    let safeAppName = appName || (user.role === 'owner' ? 'owner' : 'customer');
+    if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer')) {
+      safeAppName = 'customer';
+    }
+
     await notificationQueue.registerToken(userId, token, {
       oldToken,
       deviceId,
@@ -755,7 +761,7 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       platform,
       browser,
       appVersion,
-      appName: appName || (user.role === 'owner' ? 'owner' : 'customer'),
+      appName: safeAppName,
       role: user.role || 'customer',
       franchiseId: user.franchiseId,
       branchId: user.branchId,
@@ -780,6 +786,12 @@ router.post('/register-token', verifyToken, async (req: AuthRequest, res: Respon
       return;
     }
 
+    const operationalApps = ['owner', 'pos', 'restaurant_manager', 'franchise_manager', 'delivery'];
+    let safeAppName = appName || (user.role === 'owner' ? 'owner' : 'customer');
+    if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer')) {
+      safeAppName = 'customer';
+    }
+
     await notificationQueue.registerToken(userId, token, {
       oldToken,
       deviceId,
@@ -787,7 +799,7 @@ router.post('/register-token', verifyToken, async (req: AuthRequest, res: Respon
       platform,
       browser,
       appVersion,
-      appName: appName || (user.role === 'owner' ? 'owner' : 'customer'),
+      appName: safeAppName,
       role: user.role || 'customer',
       franchiseId: user.franchiseId,
       branchId: user.branchId,

@@ -70,7 +70,7 @@ export class PlatformConfigService {
           aiAssistant: true,
           promotions: true,
           notifications: true,
-          weeklyReports: true,
+          monthlyReports: true,
           deliveryTracking: true,
           maintenanceMode: false,
           betaFeatures: false,
@@ -104,8 +104,8 @@ export class PlatformConfigService {
         key: 'scheduler_timings',
         category: 'cron',
         value: {
-          weeklyReportDay: 'Monday',
-          weeklyReportTime: '08:00',
+          monthlyReportDay: 1,
+          monthlyReportTime: '00:05',
           tokenCleanupIntervalHours: 24,
           emailQueuePollingIntervalMs: 5000
         },

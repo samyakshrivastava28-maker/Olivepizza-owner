@@ -25,10 +25,14 @@ export interface AuthState {
   isLoading: boolean;
   isInitialized: boolean;
   authStatus: AuthStatus;
+  restrictedReason: string | null;
+  restrictedEmail: string | null;
   setUser: (user: User | null, role: UserRole | null) => void;
   setAuthStatus: (status: AuthStatus) => void;
   setInitialized: (isInitialized: boolean) => void;
   setLoading: (isLoading: boolean) => void;
+  setRestricted: (reason: string | null, email?: string | null) => void;
+  clearRestricted: () => void;
   logout: () => Promise<void>;
 }
 
@@ -53,6 +57,8 @@ export const useAuthStore = create<AuthState>()(
       isLoading: true,
       isInitialized: false,
       authStatus: 'IDLE',
+      restrictedReason: null,
+      restrictedEmail: null,
 
       setUser: (user: User | null, role: UserRole | null) => {
         const isAuth = !!user && !!role;
@@ -63,6 +69,8 @@ export const useAuthStore = create<AuthState>()(
           isLoading: false,
           isInitialized: true,
           authStatus: isAuth ? 'AUTHENTICATED' : 'UNAUTHENTICATED',
+          restrictedReason: isAuth ? null : undefined,
+          restrictedEmail: isAuth ? null : undefined,
         });
       },
 
@@ -77,6 +85,26 @@ export const useAuthStore = create<AuthState>()(
       setInitialized: (isInitialized: boolean) => set({ isInitialized }),
       setLoading: (isLoading: boolean) => set({ isLoading }),
 
+      setRestricted: (reason: string | null, email?: string | null) => {
+        set({
+          restrictedReason: reason,
+          restrictedEmail: email || null,
+          user: null,
+          role: null,
+          isAuthenticated: false,
+          isLoading: false,
+          isInitialized: true,
+          authStatus: 'UNAUTHENTICATED',
+        });
+      },
+
+      clearRestricted: () => {
+        set({
+          restrictedReason: null,
+          restrictedEmail: null,
+        });
+      },
+
       logout: async () => {
         try {
           await signOut(auth);
@@ -90,6 +118,8 @@ export const useAuthStore = create<AuthState>()(
           isLoading: false,
           isInitialized: true,
           authStatus: 'UNAUTHENTICATED',
+          restrictedReason: null,
+          restrictedEmail: null,
         });
       },
     }),

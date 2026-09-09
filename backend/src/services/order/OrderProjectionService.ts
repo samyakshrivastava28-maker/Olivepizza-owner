@@ -155,6 +155,10 @@ export interface CustomerOrderProjection {
   id: string;
   orderNumber: string;
   dailyOrderNumber?: number;
+  permanentBillNo?: number;
+  billNumber?: string;
+  billReference?: string;
+  orderSource?: string;
   status: string;
   items: Array<{
     id?: string;
@@ -512,6 +516,10 @@ export class OrderProjectionService {
       id: orderId,
       orderNumber: order.orderNumber || `#${orderId.slice(0, 6).toUpperCase()}`,
       dailyOrderNumber: order.dailyOrderNumber,
+      permanentBillNo: order.permanentBillNo ? Number(order.permanentBillNo) : undefined,
+      billNumber: order.billNumber || (order.permanentBillNo ? `#${order.permanentBillNo}` : undefined),
+      billReference: order.billReference || orderId,
+      orderSource: order.orderSource || 'ONLINE',
       status: (order.status || 'pending').toLowerCase(),
       items,
       subtotal: Number(order.subtotal || order.totalAmount || 0),

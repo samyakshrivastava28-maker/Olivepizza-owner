@@ -43,7 +43,12 @@ const FranchiseManager = lazyWithRetry(() => import('./pages/FranchiseManager'))
 const FranchiseWorkspace = lazyWithRetry(() => import('./pages/FranchiseWorkspace'));
 const RestaurantControlPage = lazyWithRetry(() => import('./pages/RestaurantControlPage'));
 
+import { useAuthStore } from './lib/store';
+import { AppRestrictedScreen } from './components/common/AppRestrictedScreen';
+
 export default function App() {
+  const { restrictedReason, restrictedEmail, clearRestricted, logout } = useAuthStore();
+
   return (
     <GlobalErrorBoundary>
       <HelmetProvider>
@@ -60,10 +65,26 @@ export default function App() {
           }}
         />
         <AuthProvider>
-          <PushNotificationManager />
-          <Suspense fallback={<PizzaLoader text="Initializing Olive Pizza Owner Platform..." />}>
-            <Routes>
-              {/* Public Login Route */}
+          {restrictedReason ? (
+            <AppRestrictedScreen
+              appName="Olive Pizza Owner & Executive Console"
+              userEmail={restrictedEmail || undefined}
+              reason={restrictedReason}
+              onSignOut={async () => {
+                clearRestricted();
+                await logout();
+              }}
+              onRetry={() => {
+                clearRestricted();
+                window.location.reload();
+              }}
+            />
+          ) : (
+            <>
+              <PushNotificationManager />
+              <Suspense fallback={<PizzaLoader text="Initializing Olive Pizza Owner Platform..." />}>
+                <Routes>
+                  {/* Public Login Route */}
               <Route path="/login" element={<Login />} />
 
               {/* Protected Owner Operations */}
@@ -240,6 +261,8 @@ export default function App() {
               <Route path="*" element={<Navigate to="/analytics" replace />} />
             </Routes>
           </Suspense>
+          </>
+        )}
         </AuthProvider>
       </HelmetProvider>
     </GlobalErrorBoundary>

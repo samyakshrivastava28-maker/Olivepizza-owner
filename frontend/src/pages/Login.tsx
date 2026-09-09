@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router';
 import { auth, googleProvider } from '../lib/firebase';
-import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, GoogleAuthProvider } from 'firebase/auth';
+import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, GoogleAuthProvider, signOut } from 'firebase/auth';
 import { useAuthStore, isAuthorizedOwnerEmail } from '../lib/store';
 import { Lock, Mail, AlertCircle, ArrowRight, ShieldCheck } from 'lucide-react';
 import { AppLogo } from '../components/common/AppLogo';
 import { Capacitor } from '@capacitor/core';
+import { getApiUrl } from '../lib/config';
 import toast from 'react-hot-toast';
 
 export default function Login() {
@@ -20,26 +21,79 @@ export default function Login() {
 
   const redirectUrl = new URLSearchParams(location.search).get('redirect') || '/dashboard';
 
-  const validateAndAuthenticate = (user: any) => {
-    if (!isAuthorizedOwnerEmail(user.email)) {
-      setError('Owner access is not available for this account.');
-      toast.error('Owner access is not available for this account.');
+  const validateAndAuthenticate = async (user: any): Promise<boolean> => {
+    try {
+      const isOwnerEmail = isAuthorizedOwnerEmail(user.email);
+      const token = await user.getIdToken();
+
+      let isAuthorized = false;
+      let serverUser: any = null;
+      let denialReason = 'This Google account is not authorized to access the Olive Pizza Owner & Executive Console.';
+
+      try {
+        const authRes = await fetch(getApiUrl('/api/auth/authorize-app'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ targetApp: 'OWNER' })
+        });
+
+        if (authRes.ok) {
+          const data = await authRes.json();
+          if (data.authorized) {
+            isAuthorized = true;
+            serverUser = data.user;
+          } else {
+            denialReason = data.reason || denialReason;
+          }
+        } else {
+          const data = await authRes.json().catch(() => ({}));
+          denialReason = data.reason || denialReason;
+          if (authRes.status !== 403 && isOwnerEmail) {
+            isAuthorized = true;
+          }
+        }
+      } catch (networkErr: any) {
+        console.warn('[Login] Network error checking authorization:', networkErr);
+        if (isOwnerEmail) {
+          isAuthorized = true;
+        }
+      }
+
+      if (!isAuthorized) {
+        console.warn(`[Login] Access restricted for ${user.email}: ${denialReason}`);
+        await signOut(auth);
+        useAuthStore.getState().setRestricted(denialReason, user.email);
+        setError(denialReason);
+        toast.error(denialReason);
+        return false;
+      }
+
+      const resolvedRole = serverUser?.role || (isOwnerEmail ? 'owner' : 'admin');
+      const resolvedName = serverUser?.name || user.displayName || user.name || user.email?.split('@')[0] || 'Owner';
+
+      setUser(
+        {
+          uid: user.uid,
+          email: user.email,
+          name: resolvedName,
+          photoURL: user.photoURL || undefined,
+          role: resolvedRole,
+        },
+        resolvedRole
+      );
+      toast.success(`Welcome back, ${resolvedName}!`);
+      navigate(redirectUrl, { replace: true });
+      return true;
+    } catch (err: any) {
+      console.error('[Login] Authorization failed:', err);
+      await signOut(auth);
+      setError(err.message || 'Authorization check failed');
+      toast.error(err.message || 'Authorization check failed');
       return false;
     }
-
-    setUser(
-      {
-        uid: user.uid,
-        email: user.email,
-        name: user.displayName || user.name || user.email?.split('@')[0],
-        photoURL: user.photoURL || undefined,
-        role: 'owner',
-      },
-      'owner'
-    );
-    toast.success(`Welcome back, ${user.displayName || user.name || 'Owner'}!`);
-    navigate(redirectUrl, { replace: true });
-    return true;
   };
 
   const handleEmailLogin = async (e: React.FormEvent) => {
@@ -48,7 +102,7 @@ export default function Login() {
     setLoading(true);
     try {
       const res = await signInWithEmailAndPassword(auth, email.trim(), password);
-      validateAndAuthenticate(res.user);
+      await validateAndAuthenticate(res.user);
     } catch (err: any) {
       let msg = err.message;
       if (err.code === 'auth/invalid-credential') {
@@ -80,13 +134,13 @@ export default function Login() {
         if (nativeResult.credential?.idToken) {
           const credential = GoogleAuthProvider.credential(nativeResult.credential.idToken);
           const res = await signInWithCredential(auth, credential);
-          validateAndAuthenticate(res.user);
+          await validateAndAuthenticate(res.user);
         } else {
           throw new Error('Google Sign-In failed on device.');
         }
       } else {
         const res = await signInWithPopup(auth, googleProvider);
-        validateAndAuthenticate(res.user);
+        await validateAndAuthenticate(res.user);
       }
     } catch (err: any) {
       if (err.code !== 'auth/popup-closed-by-user') {

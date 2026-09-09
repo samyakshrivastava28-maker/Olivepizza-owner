@@ -171,22 +171,62 @@ router.post('/google-sheet/sync', verifyToken, requireOwnerOrAdmin, async (_req:
 
 /**
  * GET /api/reports/monthly
- * Lists all monthly reports stored in Cloudflare R2 and Firestore.
+ * Lists monthly reports stored in Cloudflare R2 and Firestore.
+ * Scoped by role:
+ *  - Owner/Admin: Overall reports & all franchise reports
+ *  - Franchise Manager: Only authorized franchise reports
+ *  - Restaurant Manager: Only authorized restaurant branch reports
+ *  - Customer/Delivery: 403 Forbidden
  */
-router.get('/monthly', verifyToken, requireOwnerOrAdmin, async (_req: AuthRequest, res: Response) => {
+router.get('/monthly', verifyToken, async (req: AuthRequest, res: Response) => {
   try {
-    const reports = await CloudflareReportService.listMonthlyReports();
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+      return;
+    }
+
+    const callerRole = (user.role || 'customer').toLowerCase();
+    const isOwner = [
+      'owner', 'admin', 'developer', 'platform_owner'
+    ].includes(callerRole) ||
+      user.email === 'olivepizzarjn@gmail.com' ||
+      user.email === 'webhub2811@gmail.com' ||
+      user.email === 'olivepizzamaker@gmail.com';
+
+    const isFranchiseManager = ['franchise_owner', 'franchise_manager'].includes(callerRole);
+    const isRestaurantManager = ['restaurant_manager', 'manager', 'kitchen_manager'].includes(callerRole);
+
+    if (!isOwner && !isFranchiseManager && !isRestaurantManager) {
+      res.status(403).json({ error: 'Forbidden: Access to internal business reports is restricted.' });
+      return;
+    }
+
+    const allReports = await CloudflareReportService.listMonthlyReports();
+    
+    // Filter reports according to authoritative caller scope
+    const scopedReports = allReports.filter((r: any) => {
+      if (isOwner) return true;
+      if (isFranchiseManager) {
+        return r.franchiseId === user.franchiseId || !r.franchiseId;
+      }
+      if (isRestaurantManager) {
+        return (r.branchId && r.branchId === user.branchId) || (r.restaurantId && r.restaurantId === user.branchId);
+      }
+      return false;
+    });
+
     const spreadsheetId = await GoogleSheetsReportService.getSpreadsheetId();
     const currentSheetTitle = GoogleSheetsReportService.getMonthSheetTitle();
 
     res.json({
       success: true,
-      reports,
-      liveSheet: {
+      reports: scopedReports,
+      liveSheet: isOwner ? {
         spreadsheetId,
         currentSheetTitle,
         url: spreadsheetId ? `https://docs.google.com/spreadsheets/d/${spreadsheetId}` : null,
-      },
+      } : null,
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

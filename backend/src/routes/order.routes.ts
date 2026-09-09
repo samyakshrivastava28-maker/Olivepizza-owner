@@ -148,6 +148,222 @@ router.get('/live', verifyToken, requireRole(['restaurant_manager', 'owner', 'ki
   }
 });
 
+// 2a. GET /bill/:billReference - Dedicated secure customer bill page lookup
+// Strict Server-Side Authorization: Caller must own the order or be authorized staff/owner.
+// Returns HTTP 403 Forbidden on URL manipulation / unauthorized access.
+router.get('/bill/:billReference', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { billReference } = req.params;
+    const user = req.user;
+    if (!user || !user.uid) {
+      res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+      return;
+    }
+
+    // 1. Locate the canonical order by billReference or order ID in Firestore
+    let orderDoc: any = null;
+    let orderId: string = '';
+
+    // Search by billReference field
+    const refQuery = await adminDb.collection('orders')
+      .where('billReference', '==', billReference)
+      .limit(1)
+      .get();
+
+    if (!refQuery.empty) {
+      orderDoc = refQuery.docs[0].data();
+      orderId = refQuery.docs[0].id;
+    } else {
+      // Fallback: check if billReference is actually the Firestore doc ID
+      const directDoc = await adminDb.collection('orders').doc(billReference).get();
+      if (directDoc.exists) {
+        orderDoc = directDoc.data();
+        orderId = directDoc.id;
+      }
+    }
+
+    // Fallback 2: Check PostgreSQL canonical tables if not found in Firestore
+    if (!orderDoc) {
+      const pgRes = await query(
+        `SELECT co.*, cb.permanent_bill_no, cb.bill_number, cb.daily_order_no
+         FROM canonical_orders co
+         LEFT JOIN canonical_bills cb ON cb.order_id = co.id
+         WHERE co.id = $1 OR co.bill_reference = $1 OR cb.bill_reference = $1 OR cb.permanent_bill_no::text = $1
+         LIMIT 1`,
+        [billReference]
+      ).catch(() => ({ rows: [] }));
+
+      if (pgRes.rows.length > 0) {
+        const row = pgRes.rows[0];
+        orderId = row.id;
+        orderDoc = {
+          id: row.id,
+          userId: row.user_id,
+          permanentBillNo: row.permanent_bill_no,
+          billNumber: row.bill_number || `#${row.permanent_bill_no}`,
+          dailyOrderNumber: row.daily_order_no,
+          orderNumber: `#${row.daily_order_no}`,
+          billReference: row.bill_reference || billReference,
+          customerName: row.customer_name,
+          contactPhone: row.customer_phone,
+          deliveryAddress: row.delivery_address,
+          orderType: row.order_type,
+          orderSource: row.order_source,
+          items: typeof row.items === 'string' ? JSON.parse(row.items) : (row.items || []),
+          subtotal: Number(row.subtotal || 0),
+          discountAmount: Number(row.discount_amount || 0),
+          couponCode: row.coupon_code,
+          taxes: Number(row.tax_amount || 0),
+          cgst: Number(row.cgst || 0),
+          sgst: Number(row.sgst || 0),
+          deliveryFee: Number(row.delivery_fee || 0),
+          packagingCharge: Number(row.packaging_charge || 0),
+          totalAmount: Number(row.total_amount || 0),
+          paymentMethod: row.payment_method,
+          paymentStatus: row.payment_status,
+          status: row.order_status,
+          createdAt: row.created_at,
+          branchName: 'Olive Pizza — Rajnandgaon HQ',
+          branchId: row.branch_id
+        };
+      }
+    }
+
+    if (!orderDoc) {
+      res.status(404).json({ error: 'Bill not found' });
+      return;
+    }
+
+    // 2. Authoritative Server-Side Authorization Check
+    const role = (user.role || 'customer').toLowerCase();
+    const isStaff = [
+      'restaurant_manager', 'manager', 'owner', 'developer', 'admin',
+      'platform_owner', 'kitchen_staff', 'cashier', 'franchise_manager', 'franchise_owner'
+    ].includes(role) ||
+      user.email === 'olivepizzarjn@gmail.com' ||
+      user.email === 'webhub2811@gmail.com' ||
+      user.email === 'olivepizzamaker@gmail.com';
+
+    const orderOwnerUid = orderDoc.userId || orderDoc.user_id;
+
+    if (!isStaff) {
+      if (!orderOwnerUid || orderOwnerUid !== user.uid) {
+        res.status(403).json({
+          error: 'Forbidden: You do not have permission to view this bill.',
+          code: 'UNAUTHORIZED_BILL_ACCESS'
+        });
+        return;
+      }
+    }
+
+    // 3. Construct Authoritative Print-Ready Bill Payload
+    const permanentBillNo = Number(orderDoc.permanentBillNo || orderDoc.permanent_bill_no || 1);
+    const dailyOrderNumber = Number(orderDoc.dailyOrderNumber || orderDoc.daily_order_no || 1);
+    const billNumber = orderDoc.billNumber || `#${permanentBillNo}`;
+    const orderNumber = orderDoc.orderNumber || `#${dailyOrderNumber}`;
+
+    const createdDate = orderDoc.createdAt?.toDate ? orderDoc.createdAt.toDate() : new Date(orderDoc.createdAt || Date.now());
+    const orderDate = orderDoc.orderDateLocal || BillingNumberService.getLocalDateString(createdDate);
+    const orderTime = BillingNumberService.getLocalTimeString(createdDate);
+
+    const orderType = (orderDoc.fulfillmentType || orderDoc.deliveryType || orderDoc.orderType || 'delivery').toLowerCase();
+    const orderTypeLabel = orderType === 'pickup' || orderType === 'takeaway' ? 'Pickup / Takeaway' : 'Home Delivery';
+
+    const rawItems = Array.isArray(orderDoc.items) ? orderDoc.items : [];
+    const formattedItems = rawItems.map((it: any) => {
+      const qty = Number(it.quantity || 1);
+      const unitPrice = Number(it.price || it.unitPrice || 0);
+      const addons = Array.isArray(it.addons) ? it.addons : [];
+      const addonPrice = addons.reduce((sum: number, a: any) => sum + Number(a.price || 0), 0);
+      const itemSubtotal = (unitPrice + addonPrice) * qty;
+
+      return {
+        name: String(it.name || it.productName || 'Artisan Pizza'),
+        quantity: qty,
+        size: it.size || it.variant || 'Regular',
+        crust: it.crust || 'Classic Hand Tossed',
+        addons: addons.map((a: any) => typeof a === 'object' ? (a.name || a.title || 'Add-on') : String(a)),
+        price: unitPrice,
+        addonPrice,
+        subtotal: itemSubtotal
+      };
+    });
+
+    const subtotal = Number(orderDoc.subtotal || orderDoc.totalAmount || 0);
+    const discount = Number(orderDoc.discountAmount || orderDoc.discount || 0);
+    const taxes = Number(orderDoc.taxes || orderDoc.taxAmount || 0);
+    const cgst = orderDoc.cgst !== undefined ? Number(orderDoc.cgst) : Number((taxes / 2).toFixed(2));
+    const sgst = orderDoc.sgst !== undefined ? Number(orderDoc.sgst) : Number((taxes - cgst).toFixed(2));
+    const deliveryFee = Number(orderDoc.deliveryFee || 0);
+    const packagingCharge = Number(orderDoc.packagingCharge || 0);
+    const grandTotal = Number(orderDoc.totalAmount || orderDoc.finalTotal || (subtotal - discount + taxes + deliveryFee + packagingCharge));
+
+    const billPayload = {
+      billReference: orderDoc.billReference || billReference,
+      orderId,
+      permanentBillNo,
+      billNumber,
+      dailyOrderNumber,
+      orderNumber,
+      orderDate,
+      orderTime,
+      orderType: orderTypeLabel,
+      fulfillmentType: orderType,
+      orderSource: (orderDoc.orderSource || 'ONLINE').toUpperCase(),
+      status: (orderDoc.status || 'pending').toLowerCase(),
+      restaurant: {
+        name: 'Olive Pizza',
+        branchName: orderDoc.branchName || 'Olive Pizza — Rajnandgaon HQ',
+        address: 'Dongargaon Rd, near Saraswati school, Rajnandgaon, CG 491441',
+        phone: '+91 91799 44445',
+        gstin: '22AAAAA0000A1Z5',
+        fssai: '10522016000123'
+      },
+      customer: {
+        name: orderDoc.customerName || orderDoc.userName || 'Valued Customer',
+        phone: orderDoc.contactPhone || orderDoc.phone || 'N/A',
+        deliveryAddress: typeof orderDoc.deliveryAddress === 'object' 
+          ? (orderDoc.deliveryAddress?.addressLine || orderDoc.deliveryAddress?.address || orderDoc.deliveryAddress?.fullAddress || 'Pickup at Counter')
+          : (orderDoc.deliveryAddress || 'Pickup at Counter'),
+        pickupInfo: (orderType === 'pickup' || orderType === 'takeaway') ? {
+          branchName: 'Olive Pizza — Rajnandgaon HQ',
+          pickupCounter: 'Olive Pizza Store Front Counter',
+          address: 'Dongargaon Rd, near Saraswati school, Rajnandgaon, CG 491441',
+          contactPhone: '+91 91799 44445'
+        } : null
+      },
+      items: formattedItems,
+      pricing: {
+        subtotal,
+        discount,
+        couponCode: orderDoc.couponCode || orderDoc.appliedCouponCode || null,
+        packagingCharge,
+        deliveryFee,
+        taxes,
+        cgst,
+        sgst,
+        total: grandTotal
+      },
+      payment: {
+        method: String(orderDoc.paymentMethod || 'COD').toUpperCase(),
+        status: String(orderDoc.paymentStatus || (orderDoc.paymentMethod === 'COD' ? 'PENDING' : 'PAID')).toUpperCase(),
+        paymentId: orderDoc.paymentId || null
+      },
+      timing: {
+        createdAt: createdDate.toISOString(),
+        acceptedAt: orderDoc.acceptedAt ? (orderDoc.acceptedAt.toDate ? orderDoc.acceptedAt.toDate().toISOString() : orderDoc.acceptedAt) : null,
+        deliveredAt: orderDoc.deliveredAt ? (orderDoc.deliveredAt.toDate ? orderDoc.deliveredAt.toDate().toISOString() : orderDoc.deliveredAt) : null,
+        cancelledAt: orderDoc.cancelledAt ? (orderDoc.cancelledAt.toDate ? orderDoc.cancelledAt.toDate().toISOString() : orderDoc.cancelledAt) : null,
+      }
+    };
+
+    res.json({ success: true, bill: billPayload });
+  } catch (err: any) {
+    console.error('[Orders] Error retrieving bill:', err);
+    res.status(500).json({ error: err.message || 'Failed to retrieve bill' });
+  }
+});
+
 // 2b. GET /:id - Single order lookup with authorized role-based field projection
 router.get('/:id', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -559,6 +775,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     const dailyOrderNumber = canonical.dailyOrderNo;
     const orderNumber = `#${dailyOrderNumber}`;
     const billNumber = `#${permanentBillNo}`;
+    const billReference = 'bill_' + crypto.randomBytes(12).toString('hex');
     const orderDateLocal = canonical.orderDate;
 
     try {
@@ -566,6 +783,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         id: newOrderId,
         permanentBillNo,
         billNumber,
+        billReference,
         dailyOrderNumber,
         orderNumber,
         orderDateLocal,
@@ -615,7 +833,19 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         updatedAt: new Date(),
       });
 
-      trace.steps.push({ step: 'Firestore Write', status: 'success', orderId: newOrderId, dailyOrderNumber, permanentBillNo });
+      trace.steps.push({ step: 'Firestore Write', status: 'success', orderId: newOrderId, dailyOrderNumber, permanentBillNo, billReference });
+
+      // Reset user's active cart upon successful order placement (prevents abandoned cart reminder)
+      adminDb.collection('user_carts').doc(userId).set({
+        userId,
+        items: [],
+        total: 0,
+        itemCount: 0,
+        lastOrderId: newOrderId,
+        lastOrderPlacedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        abandonedCartReminderSentAt: null
+      }, { merge: true }).catch(() => {});
 
       // Asynchronously sync online order to franchise-specific Google Spreadsheet
       FranchiseGoogleSheetsService.syncOrderToFranchise({
@@ -775,18 +1005,36 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
     const { status, cancellationReason, deliveryPartnerId, deliveryPartnerName, deliveryPartnerPhone } = req.body;
     const uid = req.user!.uid;
     const role = (req.user!.role || 'staff').toLowerCase();
+    const emailLower = (req.user?.email || '').toLowerCase();
     const name = (req.user as any)?.name || (req.user as any)?.displayName || req.user?.email || 'Staff';
+    const appTarget = ((req.headers['x-app-target'] || req.headers['x-app-source'] || '') as string).toUpperCase();
 
-    // Backend-level Owner Read-Only Enforcement
-    if (role === 'owner' || role === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
+    // Owner Portal Read-Only Enforcement
+    if (appTarget === 'OWNER') {
       res.status(403).json({
-        error: 'Forbidden: Owner has read-only operational authority. Stage transitions are managed on Restaurant Manager and Delivery terminals.'
+        error: 'Forbidden: Owner portal has read-only operational authority. Stage transitions are managed on Restaurant Manager and Delivery terminals.'
       });
       return;
     }
 
-    const operationalRoles = ['restaurant_manager', 'manager', 'kitchen_staff', 'cashier', 'delivery_partner'];
-    if (!operationalRoles.includes(role)) {
+    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
+    const isDeliveryApp = appTarget === 'DELIVERY';
+
+    let effectiveRole = role;
+    if (role === 'owner' || role === 'admin' || isMasterAccount) {
+      if (isDeliveryApp) {
+        effectiveRole = 'delivery_partner';
+      } else {
+        effectiveRole = 'restaurant_manager';
+      }
+    } else if (role === 'manager' || role === 'kitchen_manager' || role === 'chef') {
+      effectiveRole = 'restaurant_manager';
+    } else if (role === 'rider' || role === 'delivery') {
+      effectiveRole = 'delivery_partner';
+    }
+
+    const operationalRoles = ['restaurant_manager', 'kitchen_staff', 'cashier', 'delivery_partner'];
+    if (!operationalRoles.includes(effectiveRole)) {
       res.status(403).json({ error: 'Forbidden: Operational role required for status mutation' });
       return;
     }
@@ -796,13 +1044,31 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
       return;
     }
 
+    // Pre-check order existence and branch scoping
+    const orderDoc = await adminDb.collection('orders').doc(id).get();
+    if (!orderDoc.exists) {
+      res.status(404).json({ error: 'Order not found' });
+      return;
+    }
+
+    const orderData = orderDoc.data()!;
+    const orderBranchId = orderData.branchId || 'main_branch';
+    const userBranchId = req.user?.branchId;
+
+    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && role !== 'owner' && role !== 'admin') {
+      res.status(403).json({
+        error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`
+      });
+      return;
+    }
+
     const metadata: Record<string, any> = {};
     if (cancellationReason) metadata.cancellationReason = cancellationReason;
     if (deliveryPartnerId) metadata.deliveryPartnerId = deliveryPartnerId;
     if (deliveryPartnerName) metadata.deliveryPartnerName = deliveryPartnerName;
     if (deliveryPartnerPhone) metadata.deliveryPartnerPhone = deliveryPartnerPhone;
 
-    const result = await OrderStateMachine.transition(id, status as any, { uid, role, name }, metadata);
+    const result = await OrderStateMachine.transition(id, status as any, { uid, role: effectiveRole, name, branchId: orderBranchId }, metadata);
     if (!result.success) {
       res.status(400).json({ error: result.error || 'Failed to update order status' });
       return;
@@ -821,20 +1087,30 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
   try {
     const { id } = req.params;
     const userRole = (req.user?.role || '').toLowerCase();
+    const emailLower = (req.user?.email || '').toLowerCase();
     const uid = req.user?.uid;
     const userBranchId = req.user?.branchId;
     const name = (req.user as any)?.name || req.user?.email || 'Manager';
+    const appTarget = ((req.headers['x-app-target'] || req.headers['x-app-source'] || '') as string).toUpperCase();
 
-    // Backend-level Owner Read-Only Enforcement
-    if (userRole === 'owner' || userRole === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
+    // Owner Portal Read-Only Enforcement
+    if (appTarget === 'OWNER') {
       return res.status(403).json({
         success: false,
-        error: 'Forbidden: Owner has read-only operational authority. Kitchen transitions must be executed by restaurant managers.',
+        error: 'Forbidden: Owner portal has read-only operational authority. Kitchen transitions must be executed by restaurant managers.',
         requestId
       });
     }
 
-    const isAuthorizedStaff = ['manager', 'restaurant_manager', 'kitchen_staff', 'cashier'].includes(userRole);
+    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
+    let effectiveRole = userRole;
+    if (userRole === 'owner' || userRole === 'admin' || isMasterAccount) {
+      effectiveRole = 'restaurant_manager';
+    } else if (userRole === 'manager' || userRole === 'kitchen_manager' || userRole === 'chef') {
+      effectiveRole = 'restaurant_manager';
+    }
+
+    const isAuthorizedStaff = ['restaurant_manager', 'kitchen_staff', 'cashier'].includes(effectiveRole);
     if (!isAuthorizedStaff || !uid) {
       return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
     }
@@ -848,7 +1124,7 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
     const orderData = orderDoc.data()!;
     const orderBranchId = orderData.branchId || 'main_branch';
 
-    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all') {
+    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
       return res.status(403).json({
         success: false,
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
@@ -856,9 +1132,9 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
       });
     }
 
-    // Idempotency check: if order was already accepted, return 200 without re-transitioning
+    // Idempotency check: if order was already preparing or beyond, return 200 without re-transitioning
     const currentStatus = orderData.status;
-    if (['accepted', 'preparing', 'ready', 'partner_assigned', 'picked_up', 'out_for_delivery', 'delivered'].includes(currentStatus)) {
+    if (['preparing', 'ready', 'partner_assigned', 'picked_up', 'out_for_delivery', 'delivered'].includes(currentStatus)) {
       return res.json({
         success: true,
         message: `Order #${orderData.orderNumber || id} is already in progress (${currentStatus})`,
@@ -878,14 +1154,16 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
       });
     }
 
-    // Step 1: Transition to accepted
-    const accResult = await OrderStateMachine.transition(id, 'accepted', { uid, role: userRole || 'restaurant_manager', name, branchId: orderBranchId });
-    if (!accResult.success) {
-      return res.status(400).json({ success: false, error: accResult.error, requestId });
+    // Step 1: If pending, transition to accepted
+    if (currentStatus === 'pending' || currentStatus === 'pending_acceptance') {
+      const accResult = await OrderStateMachine.transition(id, 'accepted', { uid, role: effectiveRole, name, branchId: orderBranchId });
+      if (!accResult.success) {
+        return res.status(400).json({ success: false, error: accResult.error, requestId });
+      }
     }
 
     // Step 2: Transition to preparing
-    const prepResult = await OrderStateMachine.transition(id, 'preparing', { uid, role: userRole || 'restaurant_manager', name, branchId: orderBranchId });
+    const prepResult = await OrderStateMachine.transition(id, 'preparing', { uid, role: effectiveRole, name, branchId: orderBranchId });
     if (!prepResult.success) {
       return res.status(400).json({ success: false, error: prepResult.error, requestId });
     }
@@ -910,20 +1188,30 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
   try {
     const { id } = req.params;
     const userRole = (req.user?.role || '').toLowerCase();
+    const emailLower = (req.user?.email || '').toLowerCase();
     const uid = req.user?.uid;
     const userBranchId = req.user?.branchId;
     const name = (req.user as any)?.name || req.user?.email || 'Manager';
+    const appTarget = ((req.headers['x-app-target'] || req.headers['x-app-source'] || '') as string).toUpperCase();
 
-    // Backend-level Owner Read-Only Enforcement
-    if (userRole === 'owner' || userRole === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
+    // Owner Portal Read-Only Enforcement
+    if (appTarget === 'OWNER') {
       return res.status(403).json({
         success: false,
-        error: 'Forbidden: Owner has read-only operational authority. Kitchen order rejection must be executed by restaurant managers.',
+        error: 'Forbidden: Owner portal has read-only operational authority. Kitchen order rejection must be executed by restaurant managers.',
         requestId
       });
     }
 
-    const isAuthorizedStaff = ['manager', 'restaurant_manager', 'cashier'].includes(userRole);
+    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
+    let effectiveRole = userRole;
+    if (userRole === 'owner' || userRole === 'admin' || isMasterAccount) {
+      effectiveRole = 'restaurant_manager';
+    } else if (userRole === 'manager' || userRole === 'kitchen_manager' || userRole === 'chef') {
+      effectiveRole = 'restaurant_manager';
+    }
+
+    const isAuthorizedStaff = ['restaurant_manager', 'cashier'].includes(effectiveRole);
     if (!isAuthorizedStaff || !uid) {
       return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
     }
@@ -936,7 +1224,7 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
     const orderData = orderDoc.data()!;
     const orderBranchId = orderData.branchId || 'main_branch';
 
-    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all') {
+    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
       return res.status(403).json({
         success: false,
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
@@ -954,8 +1242,9 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
       });
     }
 
-    const result = await OrderStateMachine.transition(id, 'cancelled', { uid, role: userRole || 'restaurant_manager', name, branchId: orderBranchId }, {
-      cancellationReason: req.body.reason || 'Restaurant is at full capacity'
+    const result = await OrderStateMachine.transition(id, 'cancelled', { uid, role: effectiveRole, name, branchId: orderBranchId }, {
+      cancellationReason: req.body.reason || 'Restaurant is at full capacity',
+      cancellationSource: 'restaurant_manager'
     });
 
     if (!result.success) {

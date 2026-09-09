@@ -48,9 +48,9 @@ export interface TransitionResult {
 
 // Canonical transition matrix
 const ALLOWED_TRANSITIONS: Record<CanonicalOrderStatus, CanonicalOrderStatus[]> = {
-  pending:          ['accepted', 'cancelled'],
+  pending:          ['accepted', 'preparing', 'cancelled'],
   accepted:         ['preparing', 'cancelled'],
-  preparing:        ['partner_assigned', 'ready', 'cancelled'],
+  preparing:        ['partner_assigned', 'ready', 'delivered', 'cancelled'],
   partner_assigned: ['ready', 'picked_up', 'out_for_delivery', 'cancelled'],
   ready:            ['partner_assigned', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled'],
   picked_up:        ['out_for_delivery', 'delivered', 'cancelled'],
@@ -62,11 +62,13 @@ const ALLOWED_TRANSITIONS: Record<CanonicalOrderStatus, CanonicalOrderStatus[]> 
 // Authority rules per transition — strictly operational roles (Owner has read-only surveillance)
 const ROLE_AUTHORITY: Record<string, StateMachineActorRole[]> = {
   'pending->accepted':          ['restaurant_manager', 'cashier', 'system'],
+  'pending->preparing':         ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
   'pending->cancelled':         ['customer', 'restaurant_manager', 'cashier', 'system'],
   'accepted->preparing':        ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
   'accepted->cancelled':        ['restaurant_manager', 'cashier', 'system'],
   'preparing->partner_assigned': ['restaurant_manager', 'cashier', 'system'],
   'preparing->ready':           ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
+  'preparing->delivered':       ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
   'preparing->cancelled':       ['restaurant_manager', 'cashier', 'system'],
   'partner_assigned->ready':    ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
   'partner_assigned->picked_up': ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
@@ -84,6 +86,17 @@ const ROLE_AUTHORITY: Record<string, StateMachineActorRole[]> = {
   'out_for_delivery->cancelled': ['restaurant_manager', 'system'],
 };
 
+export function normalizeStateMachineRole(role?: string): StateMachineActorRole {
+  const r = (role || 'customer').toLowerCase().trim();
+  if (r === 'manager' || r === 'kitchen_manager' || r === 'chef') {
+    return 'restaurant_manager';
+  }
+  if (r === 'delivery' || r === 'rider') {
+    return 'delivery_partner';
+  }
+  return r as StateMachineActorRole;
+}
+
 export class OrderStateMachine {
   /**
    * Reconciles any legacy status strings into canonical order state.
@@ -99,11 +112,12 @@ export class OrderStateMachine {
 
   public static async transition(
     orderId: string,
-    toState: CanonicalOrderStatus,
+    toStateInput: CanonicalOrderStatus,
     actor: StateMachineActor,
     metadata: Record<string, any> = {}
   ): Promise<TransitionResult> {
-    const normalizedActorRole = (actor.role || 'customer').toLowerCase() as StateMachineActorRole;
+    const toState = OrderStateMachine.reconcileStatus(toStateInput);
+    const normalizedActorRole = normalizeStateMachineRole(actor.role);
     if ((normalizedActorRole === 'owner' || normalizedActorRole === 'admin') && toState !== 'cancelled') {
       return {
         success: false,
@@ -142,8 +156,7 @@ export class OrderStateMachine {
       }
 
       const orderData = docSnap.data()!;
-      let fromState = (orderData.status || 'pending') as CanonicalOrderStatus;
-      if (fromState === ('pending_acceptance' as any)) fromState = 'pending';
+      const fromState = OrderStateMachine.reconcileStatus(orderData.status);
 
       if (fromState === toState) {
         if (metadata && Object.keys(metadata).length > 0) {
@@ -180,7 +193,7 @@ export class OrderStateMachine {
       // Validate actor authority — strictly operational roles
       const transitionKey = `${fromState}->${toState}`;
       const authorizedRoles = ROLE_AUTHORITY[transitionKey] || ['system'];
-      const normalizedActorRole = (actor.role || 'customer').toLowerCase() as StateMachineActorRole;
+      const normalizedActorRole = normalizeStateMachineRole(actor.role);
 
       // Enforce Owner Read-Only Rule at Backend Level
       if (normalizedActorRole === 'owner' || normalizedActorRole === 'admin') {
