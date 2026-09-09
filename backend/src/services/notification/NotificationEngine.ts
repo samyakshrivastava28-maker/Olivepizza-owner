@@ -46,6 +46,8 @@ export interface NotificationEngineOptions {
   collapseKey?: string;
   /** Target client application to prevent cross-app notification leaks */
   targetApp?: 'customer' | 'owner' | 'franchise' | 'restaurant' | 'delivery' | 'pos';
+  /** Deterministic event ID for deduplication/idempotency */
+  eventId?: string;
 }
 
 export interface SendResult {
@@ -56,6 +58,49 @@ export interface SendResult {
 }
 
 export class NotificationEngine {
+  private static recentEventIds = new Map<string, number>();
+  private static schemaInitialized = false;
+
+  constructor() {
+    this.ensureSchema().catch((err) => {
+      console.warn('[NotificationEngine] Schema self-healing notice:', err.message);
+    });
+
+    // Cleanup in-memory cache every 5 minutes
+    const interval = setInterval(() => {
+      const cutoff = Date.now() - 600000;
+      for (const [id, ts] of NotificationEngine.recentEventIds.entries()) {
+        if (ts < cutoff) NotificationEngine.recentEventIds.delete(id);
+      }
+    }, 300000);
+    if (interval.unref) interval.unref();
+  }
+
+  private async ensureSchema(): Promise<void> {
+    if (NotificationEngine.schemaInitialized) return;
+    try {
+      await pgPool.query(`
+        CREATE TABLE IF NOT EXISTS notification_events (
+          event_id VARCHAR(255) PRIMARY KEY,
+          order_id VARCHAR(255),
+          recipient_count INT,
+          processed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_notification_events_processed_at ON notification_events(processed_at);
+
+        ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS device_id VARCHAR(255);
+        ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS role VARCHAR(64);
+        ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS branch_id VARCHAR(128);
+        ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS franchise_id VARCHAR(128);
+        ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS app_name VARCHAR(64);
+        ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW();
+      `);
+      NotificationEngine.schemaInitialized = true;
+    } catch (e: any) {
+      console.warn('[NotificationEngine] Table verification warning:', e.message);
+    }
+  }
+
   /**
    * Send a notification to a single user.
    * Resolves their active FCM tokens from Postgres (with Firestore fallback).
@@ -81,6 +126,35 @@ export class NotificationEngine {
   ): Promise<SendResult> {
     if (!firebaseUserIds || firebaseUserIds.length === 0) {
       return { successCount: 0, failureCount: 0, tokensFound: 0, errors: [] };
+    }
+
+    // ── 0a. Server-Side Idempotency Guard ────────────────────────────────────
+    const eventId = options.eventId || payload.data?.eventId;
+    if (eventId) {
+      const now = Date.now();
+      const existingTime = NotificationEngine.recentEventIds.get(eventId);
+      if (existingTime && (now - existingTime) < 600000) {
+        console.log(`[NotificationEngine][Deduplication] In-memory drop for duplicate eventId: ${eventId}`);
+        return { successCount: 0, failureCount: 0, tokensFound: 0, errors: ['duplicate_event_suppressed'] };
+      }
+
+      try {
+        const dbCheck = await pgPool.query(
+          `INSERT INTO notification_events (event_id, order_id, recipient_count, processed_at)
+           VALUES ($1, $2, $3, NOW())
+           ON CONFLICT (event_id) DO NOTHING
+           RETURNING event_id`,
+          [eventId, options.orderId || payload.data?.orderId || null, firebaseUserIds.length]
+        );
+        if (dbCheck.rowCount === 0) {
+          console.log(`[NotificationEngine][Deduplication] DB drop for duplicate eventId: ${eventId}`);
+          NotificationEngine.recentEventIds.set(eventId, now);
+          return { successCount: 0, failureCount: 0, tokensFound: 0, errors: ['duplicate_event_suppressed'] };
+        }
+        NotificationEngine.recentEventIds.set(eventId, now);
+      } catch (dbErr: any) {
+        NotificationEngine.recentEventIds.set(eventId, now);
+      }
     }
 
     // ── 0. Server-Side Security Guard: Monthly / Financial Reports Safety ──
@@ -142,10 +216,10 @@ export class NotificationEngine {
     // Preserve or set channel from payload
     const channelId = payload.android?.notification?.channelId
       || payload.data?.channelId
-      || 'olive_order_new';
+      || 'olive_order_new_v2';
     const soundName = payload.android?.notification?.sound
       || payload.data?.sound
-      || 'default';
+      || (channelId === 'olive_order_completed_v2' ? 'order_delivered' : 'new_order');
     const clickAction = payload.android?.notification?.clickAction
       || (payload.data?.alert === 'continuous' ? 'olive_alarm' : undefined);
 
@@ -197,10 +271,8 @@ export class NotificationEngine {
     const sanitizedApns = sanitizeApnsConfig(payload.apns, options.category || 'push');
 
     // Category Payload Rule (§2.1):
-    // - alarm_actionable & pinned_live MUST BE DATA-ONLY (NO top-level notification block).
-    //   Otherwise, Android OS intercepts the notification when app is closed/backgrounded,
-    //   renders a default tray banner, and SUPPRESSES onMessageReceived().
-    // - simple_informational uses HYBRID payload (notification + data).
+    // For Restaurant Management and all operational alerts that require OS system tray display
+    // and custom audio alerts when closed/killed, NEVER delete the notification blocks.
     const isDataOnlyCategory = options.category === 'alarm_actionable' || options.category === 'pinned_live';
 
     // ── 4. Chunk and send ────────────────────────────────────────────────────
@@ -223,7 +295,13 @@ export class NotificationEngine {
     await Promise.all(chunks.map(async (chunk) => {
       try {
         const androidConfig = payload.android ? { ...payload.android } : undefined;
-        if (isDataOnlyCategory && androidConfig) {
+        const isRestaurantApp = options.targetApp === 'restaurant' 
+          || payload.data?.role === 'restaurant_manager' 
+          || sanitizedData.type === 'NEW_ORDER' 
+          || sanitizedData.type === 'ORDER_DELIVERED';
+
+        // Do not strip notification block for restaurant app or when OS tray banner is required
+        if (isDataOnlyCategory && androidConfig && !isRestaurantApp) {
           delete androidConfig.notification;
         }
 
@@ -235,8 +313,8 @@ export class NotificationEngine {
           webpush: payload.webpush,
         };
 
-        // Attach top-level notification ONLY for simple_informational / non-custom categories
-        if (!isDataOnlyCategory && payload.notification) {
+        // Attach top-level notification for restaurant app, simple_informational, or whenever payload.notification exists
+        if ((!isDataOnlyCategory || isRestaurantApp) && payload.notification) {
           message.notification = payload.notification;
         }
 

@@ -7,6 +7,8 @@ import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middle
 import { DeliveryDataLifecycleService } from '../services/delivery/DeliveryDataLifecycleService.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
+import { RestaurantTemplates } from '../services/notification/NotificationTemplates.js';
+import { notificationEngine } from '../services/notification/NotificationEngine.js';
 
 const router = Router();
 
@@ -782,6 +784,35 @@ router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promi
           lastDeliveredOrderId: orderId,
           lastDeliveredAt: new Date().toISOString()
         }, { merge: true });
+
+        // Asynchronously notify Restaurant Management of order delivery
+        setImmediate(async () => {
+          try {
+            const branchId = orderData.branchId || 'main_branch';
+            const branchStaffUids = await notificationEngine.resolveBranchStaff(branchId);
+            if (branchStaffUids.length > 0) {
+              const shortId = orderData.dailyOrderNumber ? `#${orderData.dailyOrderNumber}` : (orderData.orderNumber || `#${orderId.slice(-6).toUpperCase()}`);
+              const deliveredPayload = RestaurantTemplates.orderDelivered(orderId, {
+                orderNumber: shortId,
+                customerName: orderData.customerName || 'Customer',
+                totalAmount: Number(orderData.totalAmount || 0),
+                branchId,
+                franchiseId: orderData.franchiseId || 'default',
+                riderName: (req.user as any)?.name || 'Delivery Partner',
+                deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
+                deliveredAt: new Date().toISOString()
+              });
+              await notificationEngine.sendBulk(branchStaffUids, deliveredPayload, {
+                category: 'simple_informational',
+                priority: 'high',
+                orderId,
+                targetApp: 'restaurant'
+              });
+            }
+          } catch (notifErr: any) {
+            console.warn('[RiderDelivery] Failed to notify restaurant of delivery:', notifErr.message);
+          }
+        });
 
         res.json({
           success: true,

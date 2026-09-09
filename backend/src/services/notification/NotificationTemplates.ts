@@ -34,6 +34,18 @@ export type OrderStatus =
   | 'completed'
   | 'cancelled';
 
+export type NotificationType =
+  | 'NEW_ORDER'
+  | 'ORDER_ACCEPTED'
+  | 'ORDER_REJECTED'
+  | 'ORDER_PREPARING'
+  | 'ORDER_READY'
+  | 'ORDER_CANCELLED'
+  | 'DELIVERY_ASSIGNED'
+  | 'DELIVERY_PICKED_UP'
+  | 'ORDER_DELIVERED'
+  | 'PICKUP_READY';
+
 export type NotificationRole =
   | 'customer'
   | 'owner'
@@ -279,6 +291,9 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
   if (opts.actionUrlAccept) safeData.actionUrlAccept = opts.actionUrlAccept;
   if (opts.actionUrlReject) safeData.actionUrlReject = opts.actionUrlReject;
   if (opts.branchId) safeData.branchId = opts.branchId;
+  if (opts.type) safeData.type = opts.type;
+  if (opts.restaurantId) safeData.restaurantId = opts.restaurantId;
+  if (opts.franchiseId) safeData.franchiseId = opts.franchiseId;
 
   // Feature flags
   if (opts.role) safeData.role = opts.role;
@@ -299,12 +314,9 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
     },
   };
 
-  // ── ROOT CAUSE FIX: DATA-ONLY FOR ALARMS AND PINNED LIVE TRACKERS ────────
-  // When a root notification block is present and the app is backgrounded, Android intercepts the message 
-  // and posts a generic system tray notification, entirely skipping our onMessageReceived() handler.
-  // By omitting the root notification block for these specific categories, we force a pure data message,
-  // which forces Android to wake the app and invoke onMessageReceived(), allowing our custom code to construct the UI.
-  if (opts.category !== 'alarm_actionable' && opts.category !== 'pinned_live') {
+  // Always include top-level notification block for restaurant manager and all critical alerts
+  // so the OS tray notification displays and plays the channel sound even when app is closed/killed.
+  if (opts.role === 'restaurant_manager' || (opts.category !== 'alarm_actionable' && opts.category !== 'pinned_live')) {
     basePayload.notification = { title, body };
   }
 
@@ -489,6 +501,7 @@ export class RestaurantTemplates {
       phone?: string;
       orderTime?: string;
       branchId?: string;
+      franchiseId?: string;
       version?: number;
       productImageThumbnail?: string;
       financials?: {
@@ -546,6 +559,9 @@ export class RestaurantTemplates {
       requireInteraction: true,
       stage: 'new_order',
       alert: 'continuous',
+      type: 'NEW_ORDER',
+      restaurantId: payload.branchId || 'main_branch',
+      franchiseId: payload.franchiseId || 'default',
       version: payload.version || 1,
       notificationId: `rest_new_${orderId}`,
       vibrate: [300, 200, 300, 200, 300],
@@ -558,6 +574,49 @@ export class RestaurantTemplates {
       actionUrlAccept: `/api/orders/${orderId}/accept`,
       actionUrlReject: `/api/orders/${orderId}/reject`,
       branchId: payload.branchId || 'main_branch'
+    });
+  }
+
+  /**
+   * Order Delivered for Restaurant Management — celebratory notification with distinct sound.
+   */
+  static orderDelivered(
+    orderId: string,
+    payload: {
+      orderNumber: string;
+      customerName?: string;
+      totalAmount?: number;
+      branchId?: string;
+      franchiseId?: string;
+      riderName?: string;
+      deliveryAddress?: string;
+      deliveredAt?: string;
+      version?: number;
+    }
+  ): NotificationPayload {
+    const title = `🎉 ORDER DELIVERED #${payload.orderNumber}`;
+    const body = `Order #${payload.orderNumber} for ${payload.customerName || 'Customer'} was successfully delivered${payload.riderName ? ` by ${payload.riderName}` : ''}.`;
+
+    return buildPayload(title, body, {
+      tag: `order_delivered_${orderId}`,
+      channelId: ANDROID_CHANNELS.ORDER_COMPLETED,
+      orderId,
+      url: `/restaurant/order-history`,
+      sound: 'delivered',
+      category: 'simple_informational' as any,
+      priority: 'high',
+      role: 'restaurant_manager' as any,
+      stage: 'delivered',
+      alert: 'single',
+      type: 'ORDER_DELIVERED',
+      restaurantId: payload.branchId || 'main_branch',
+      franchiseId: payload.franchiseId || 'default',
+      version: payload.version || 1,
+      notificationId: `rest_deliv_${orderId}`,
+      vibrate: [200, 100, 200],
+      currentStatus: 'delivered',
+      serverTimestamp: new Date().toISOString(),
+      branchId: payload.branchId || 'main_branch',
     });
   }
 }
@@ -852,8 +911,10 @@ export class CustomerTemplates {
       previousStatus?: string;
       eventTimestamp?: string;
       cancellationReason?: string;
+      isPickup?: boolean;
     }
   ): NotificationPayload {
+    const isPickup = payload.isPickup || false;
     const statusConfig: Record<OrderStatus, {
       title: string; body: string;
       sound?: keyof typeof SOUNDS;
@@ -867,28 +928,30 @@ export class CustomerTemplates {
       },
       accepted: {
         title: `✅ Order Confirmed — #${payload.orderNumber}`,
-        body: `Kitchen is preparing your order${payload.eta ? ` • ETA: ${payload.eta}` : ''}\n${progressBar('accepted')}\n${progressSteps('accepted')}`,
+        body: `Your Olive Pizza order has been accepted.${payload.eta ? ` (ETA: ${payload.eta})` : ''}\n${progressBar('accepted')}\n${progressSteps('accepted')}`,
         sound: 'confirmed',
         ongoing: true,
       },
       preparing: {
-        title: `🔥 Your Pizza Is Being Made!`,
-        body: `Order #${payload.orderNumber}${payload.eta ? ` • Est. ${payload.eta}` : ''}\n${progressBar('preparing')}\n${progressSteps('preparing')}`,
+        title: `🔥 Baking in Stone Ovens`,
+        body: `Your order is being prepared.${payload.eta ? ` (Est. ${payload.eta})` : ''}\n${progressBar('preparing')}\n${progressSteps('preparing')}`,
         ongoing: true,
       },
       ready: {
-        title: `🟢 Order Packed & Ready!`,
-        body: `#${payload.orderNumber} • Looking for your delivery partner\n${progressBar('ready')}\n${progressSteps('ready')}`,
+        title: isPickup ? `🍕 Order Ready for Pickup!` : `🟢 Order Ready for Delivery!`,
+        body: isPickup 
+          ? `Your order is ready for pickup at the restaurant counter.` 
+          : `Your order is ready for delivery.\n${progressBar('ready')}\n${progressSteps('ready')}`,
         ongoing: true,
       },
       partner_assigned: {
         title: `🚴 Delivery Partner Assigned`,
-        body: `${payload.deliveryPartnerName || 'Partner'} is on the way to the restaurant\n${progressBar('partner_assigned')}\n${progressSteps('partner_assigned')}`,
+        body: `${payload.deliveryPartnerName || 'Partner'} is assigned and on the way to the restaurant\n${progressBar('partner_assigned')}\n${progressSteps('partner_assigned')}`,
         ongoing: true,
       },
       picked_up: {
         title: `📦 Order Picked Up`,
-        body: `${payload.deliveryPartnerName || 'Partner'} has your order and is heading your way\n${progressBar('picked_up')}\n${progressSteps('picked_up')}`,
+        body: `${payload.deliveryPartnerName || 'Partner'} has picked up your order and is heading your way\n${progressBar('picked_up')}\n${progressSteps('picked_up')}`,
         ongoing: true,
       },
       out_for_delivery: {
@@ -904,10 +967,10 @@ export class CustomerTemplates {
       },
       delivered: {
         title: `✅ Delivered! Enjoy your pizza 🍕`,
-        body: `Order #${payload.orderNumber} delivered. Rate your experience!\n${progressBar('delivered')}`,
+        body: `Your order has been delivered. Enjoy your meal!\n${progressBar('delivered')}`,
         sound: 'delivered',
         requireInteraction: true,
-        ongoing: false, // Unpin on delivery per spec — no longer ongoing after delivered
+        ongoing: false,
       },
       completed: {
         title: `🏁 Order Completed`,
@@ -918,11 +981,9 @@ export class CustomerTemplates {
         title: `Order Cancelled`,
         body: payload.cancellationReason === 'RESTAURANT_ACCEPT_TIMEOUT' || (payload as any).cancellationSource === 'SYSTEM_TIMEOUT'
           ? `Sorry, your Olive Pizza order was cancelled because the restaurant could not accept it in time.`
-          : payload.cancellationReason
-            ? `Your order was cancelled: ${payload.cancellationReason}. Contact us if you need help.`
-            : `Your order has been cancelled. Contact us if you need help.`,
+          : `Sorry, your order was cancelled by the restaurant.${payload.cancellationReason && payload.cancellationReason !== 'CUSTOMER_CANCELLED' ? ` (${payload.cancellationReason})` : ''}`,
         sound: 'cancelled',
-        ongoing: false, // Ended on cancellation — no longer ongoing
+        ongoing: false,
       },
     };
 
@@ -944,8 +1005,22 @@ export class CustomerTemplates {
     const trackingUrl = `/order-tracking/${orderId}?trackingToken=${trackingToken}`;
     const destinationUrl = isCancelled ? `/order-cancelled/${orderId}` : trackingUrl;
 
+    const notificationTypeMap: Record<OrderStatus, NotificationType> = {
+      pending: 'NEW_ORDER',
+      accepted: 'ORDER_ACCEPTED',
+      preparing: 'ORDER_PREPARING',
+      ready: isPickup ? 'PICKUP_READY' : 'ORDER_READY',
+      partner_assigned: 'DELIVERY_ASSIGNED',
+      picked_up: 'DELIVERY_PICKED_UP',
+      out_for_delivery: 'DELIVERY_PICKED_UP',
+      delivered: 'ORDER_DELIVERED',
+      completed: 'ORDER_DELIVERED',
+      cancelled: 'ORDER_CANCELLED',
+    };
+    const notifType: NotificationType = notificationTypeMap[payload.status] || 'ORDER_ACCEPTED';
+
     return buildPayload(cfg.title, cfg.body, {
-      tag: `order_customer_${orderId}`,      // Same tag throughout — updates in place
+      tag: `order_customer_${orderId}`,
       channelId: isDelivered ? ANDROID_CHANNELS.ORDER_COMPLETED
         : isCancelled ? ANDROID_CHANNELS.ORDER_COMPLETED
           : ANDROID_CHANNELS.ORDER_STATUS,
@@ -958,7 +1033,7 @@ export class CustomerTemplates {
       requireInteraction: cfg.requireInteraction,
       stage: payload.status,
       version: payload.version,
-      notificationId: `customer_tracker_${orderId}`, // Same ID throughout
+      notificationId: `customer_tracker_${orderId}`,
       ongoing: cfg.ongoing,
       actions,
       eventId: payload.eventId,
@@ -971,6 +1046,8 @@ export class CustomerTemplates {
       riderName: payload.deliveryPartnerName || '',
       restaurantName: 'Olive Pizza — Rajnandgaon HQ',
       isLive: isTerminal ? 'false' : 'true',
+      type: notifType,
+      notificationType: notifType,
     });
   }
 }

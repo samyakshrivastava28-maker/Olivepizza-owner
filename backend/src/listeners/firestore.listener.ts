@@ -256,6 +256,31 @@ export class FirestoreListener {
                     targetApp: 'delivery',
                   });
                 }
+
+                // If order was delivered, notify the branch restaurant staff with delivery success sound
+                if (currentStatus === 'delivered') {
+                  const branchId = orderData.branchId || 'main_branch';
+                  const branchStaff = await notificationEngine.resolveBranchStaff(branchId);
+                  if (branchStaff.length > 0) {
+                    const deliveredPayload = RestaurantTemplates.orderDelivered(orderData.id, {
+                      orderNumber,
+                      customerName: orderData.customerName || 'Customer',
+                      totalAmount,
+                      branchId,
+                      franchiseId: orderData.franchiseId || 'default',
+                      riderName: orderData.deliveryPartnerName,
+                      deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
+                      deliveredAt: new Date().toISOString(),
+                    });
+                    await notificationEngine.sendBulk(branchStaff, deliveredPayload, {
+                      orderId: orderData.id,
+                      category: 'simple_informational',
+                      priority: 'high',
+                      tag: `order_delivered_${orderData.id}`,
+                      targetApp: 'restaurant'
+                    });
+                  }
+                }
               } catch (notifErr: any) {
                 console.warn(`[FirestoreListener] Status change push notification error:`, notifErr.message);
               }

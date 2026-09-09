@@ -20,6 +20,7 @@
 
 import { adminDb as db, adminAuth, adminMessaging } from '../../config/firebase.js';
 import * as admin from 'firebase-admin';
+import crypto from 'crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { notificationDebugger } from './NotificationDebugger.js';
 import { NotificationLogger } from './NotificationLogger.js';
@@ -254,67 +255,118 @@ export class NotificationQueueService {
       }
 
       if (deviceInfo.oldToken && deviceInfo.oldToken !== token) {
-        await client.query('UPDATE fcm_tokens SET is_active = FALSE WHERE token = $1 AND user_id = $2', [deviceInfo.oldToken, pgUserId]);
+        await client.query('UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW() WHERE token = $1 AND user_id = $2', [deviceInfo.oldToken, pgUserId]);
         db.collection('users').doc(firebaseUserId).update({ fcmTokens: FieldValue.arrayRemove(deviceInfo.oldToken) }).catch(() => { });
       }
 
-      // If deviceName + platform match for this user, deactivate old token for that device
-      if (deviceInfo.deviceName && deviceInfo.platform) {
+      // If deviceId is provided, deactivate previous token for this exact physical device
+      if (deviceInfo.deviceId) {
         await client.query(
-          `UPDATE fcm_tokens SET is_active = FALSE 
+          `UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW() 
+           WHERE user_id = $1 AND device_id = $2 AND token != $3`,
+          [pgUserId, deviceInfo.deviceId, token]
+        );
+      } else if (deviceInfo.deviceName && deviceInfo.platform) {
+        // Fallback: deviceName + platform match
+        await client.query(
+          `UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW() 
            WHERE user_id = $1 AND device_name = $2 AND platform = $3 AND token != $4`,
           [pgUserId, deviceInfo.deviceName, deviceInfo.platform, token]
         );
       }
 
       // Ensure 1 Device Token = 1 User (deactivate token for any previous user)
-      await client.query('UPDATE fcm_tokens SET is_active = FALSE WHERE token = $1 AND user_id != $2', [token, pgUserId]);
+      await client.query('UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW() WHERE token = $1 AND user_id != $2', [token, pgUserId]);
 
-      // Upsert token with application metadata
+      // Upsert token with complete application and RBAC metadata
       await client.query(
-        `INSERT INTO fcm_tokens (user_id, token, device_name, platform, browser, app_version, is_active, last_used_at, app_name)
-         VALUES ($1,$2,$3,$4,$5,$6,TRUE,NOW(),$7)
+        `INSERT INTO fcm_tokens (user_id, token, device_id, device_name, platform, browser, app_version, is_active, last_used_at, app_name, role, branch_id, franchise_id, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,NOW(),$8,$9,$10,$11,NOW())
          ON CONFLICT (user_id, token)
-         DO UPDATE SET is_active = TRUE, last_used_at = NOW(),
-           device_name = EXCLUDED.device_name, platform = EXCLUDED.platform,
-           browser = EXCLUDED.browser, app_version = EXCLUDED.app_version,
-           app_name = COALESCE(EXCLUDED.app_name, fcm_tokens.app_name)`,
-        [pgUserId, token, deviceInfo.deviceName, deviceInfo.platform, deviceInfo.browser, deviceInfo.appVersion, deviceInfo.appName || 'customer']
+         DO UPDATE SET is_active = TRUE, last_used_at = NOW(), updated_at = NOW(),
+           device_id = COALESCE(EXCLUDED.device_id, fcm_tokens.device_id),
+           device_name = COALESCE(EXCLUDED.device_name, fcm_tokens.device_name),
+           platform = COALESCE(EXCLUDED.platform, fcm_tokens.platform),
+           browser = COALESCE(EXCLUDED.browser, fcm_tokens.browser),
+           app_version = COALESCE(EXCLUDED.app_version, fcm_tokens.app_version),
+           app_name = COALESCE(EXCLUDED.app_name, fcm_tokens.app_name),
+           role = COALESCE(EXCLUDED.role, fcm_tokens.role),
+           branch_id = COALESCE(EXCLUDED.branch_id, fcm_tokens.branch_id),
+           franchise_id = COALESCE(EXCLUDED.franchise_id, fcm_tokens.franchise_id)`,
+        [
+          pgUserId,
+          token,
+          deviceInfo.deviceId || null,
+          deviceInfo.deviceName || null,
+          deviceInfo.platform || 'unknown',
+          deviceInfo.browser || null,
+          deviceInfo.appVersion || null,
+          deviceInfo.appName || 'customer',
+          deviceInfo.role || null,
+          deviceInfo.branchId || null,
+          deviceInfo.franchiseId || null
+        ]
       ).catch(async () => {
         // Fallback for older fcm_tokens schema
         await client.query(
-          `INSERT INTO fcm_tokens (user_id, token, device_name, platform, browser, app_version, is_active, last_used_at)
-           VALUES ($1,$2,$3,$4,$5,$6,TRUE,NOW())
+          `INSERT INTO fcm_tokens (user_id, token, device_name, platform, browser, app_version, is_active, last_used_at, app_name)
+           VALUES ($1,$2,$3,$4,$5,$6,TRUE,NOW(),$7)
            ON CONFLICT (user_id, token)
            DO UPDATE SET is_active = TRUE, last_used_at = NOW(),
              device_name = EXCLUDED.device_name, platform = EXCLUDED.platform,
-             browser = EXCLUDED.browser, app_version = EXCLUDED.app_version`,
-          [pgUserId, token, deviceInfo.deviceName, deviceInfo.platform, deviceInfo.browser, deviceInfo.appVersion]
-        );
+             browser = EXCLUDED.browser, app_version = EXCLUDED.app_version,
+             app_name = COALESCE(EXCLUDED.app_name, fcm_tokens.app_name)`,
+          [pgUserId, token, deviceInfo.deviceName, deviceInfo.platform, deviceInfo.browser, deviceInfo.appVersion, deviceInfo.appName || 'customer']
+        ).catch(async () => {
+          await client.query(
+            `INSERT INTO fcm_tokens (user_id, token, device_name, platform, browser, app_version, is_active, last_used_at)
+             VALUES ($1,$2,$3,$4,$5,$6,TRUE,NOW())
+             ON CONFLICT (user_id, token)
+             DO UPDATE SET is_active = TRUE, last_used_at = NOW(),
+               device_name = EXCLUDED.device_name, platform = EXCLUDED.platform,
+               browser = EXCLUDED.browser, app_version = EXCLUDED.app_version`,
+            [pgUserId, token, deviceInfo.deviceName, deviceInfo.platform, deviceInfo.browser, deviceInfo.appVersion]
+          );
+        });
       });
 
-      // Active Token Limit: Enforce MAX 5 active tokens per user
+      // Active Token Limit: Allow up to 10 active devices per user (phone, tablet, POS, desktop, etc.)
       const activeRes = await client.query(
         `SELECT token FROM fcm_tokens WHERE user_id = $1 AND is_active = TRUE ORDER BY last_used_at DESC, id DESC`,
         [pgUserId]
       );
 
       let activeTokensList = activeRes.rows.map((r: any) => r.token);
-      if (activeTokensList.length > 3) {
-        const keepTokens = activeTokensList.slice(0, 3);
-        const deactivateTokens = activeTokensList.slice(3);
+      if (activeTokensList.length > 10) {
+        const keepTokens = activeTokensList.slice(0, 10);
+        const deactivateTokens = activeTokensList.slice(10);
         await client.query(
-          `UPDATE fcm_tokens SET is_active = FALSE WHERE user_id = $1 AND token = ANY($2)`,
+          `UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW() WHERE user_id = $1 AND token = ANY($2)`,
           [pgUserId, deactivateTokens]
         );
         activeTokensList = keepTokens;
       }
 
-      // Update Firestore user document with capped fcmTokens array (max 3)
+      // Update Firestore user document with active tokens array
       db.collection('users').doc(firebaseUserId).set({
         fcmTokens: activeTokensList,
         notificationReady: true,
         lastTokenRefresh: FieldValue.serverTimestamp(),
+      }, { merge: true }).catch(() => { });
+
+      // Mirror device metadata into Firestore users/{userId}/devices/{tokenHash}
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex').slice(0, 16);
+      db.collection('users').doc(firebaseUserId).collection('devices').doc(tokenHash).set({
+        token,
+        deviceId: deviceInfo.deviceId || null,
+        deviceName: deviceInfo.deviceName || null,
+        platform: deviceInfo.platform || 'unknown',
+        appName: deviceInfo.appName || 'customer',
+        role: deviceInfo.role || null,
+        branchId: deviceInfo.branchId || null,
+        franchiseId: deviceInfo.franchiseId || null,
+        lastSeenAt: FieldValue.serverTimestamp(),
+        enabled: true,
       }, { merge: true }).catch(() => { });
 
       // Evict stale cache

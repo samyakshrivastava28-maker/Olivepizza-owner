@@ -911,6 +911,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
             deliveryAddress: userAddress || 'Pickup',
             phone: userPhone,
             branchId: resolvedBranchId,
+            franchiseId: req.body.session?.franchiseId || req.body.franchiseId || 'fra_rajnandgaon',
             orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
             version: 1,
           });

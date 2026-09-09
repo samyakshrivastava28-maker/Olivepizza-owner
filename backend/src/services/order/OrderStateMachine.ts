@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import { PreparationTimeEngine } from './PreparationTimeEngine.js';
 import { RiderDispatchEngine } from '../delivery/RiderDispatchEngine.js';
 import { notificationEngine } from '../notification/NotificationEngine.js';
-import { OwnerTemplates, CustomerTemplates } from '../notification/NotificationTemplates.js';
+import { OwnerTemplates, CustomerTemplates, RestaurantTemplates, DeliveryTemplates } from '../notification/NotificationTemplates.js';
 
 export type CanonicalOrderStatus =
   | 'pending'
@@ -417,76 +417,91 @@ export class OrderStateMachine {
     try {
       const orderNumber = order.orderNumber || ('#' + (order.dailyOrderNumber || orderId.slice(-6)));
       const branchId = order.branchId || 'main_branch';
-      const customerUid = order.userId;
+      const customerUid = order.userId || order.customerId || order.customerUid || order.firebaseUid || order.user_id;
+      const fulfillment = (order.fulfillmentType || order.deliveryType || 'delivery').toLowerCase();
+      const isPickup = fulfillment === 'pickup' || fulfillment === 'dine_in' || fulfillment === 'takeaway';
+      const eventVersion = order.notification_version || 1;
+      const eventId = `notif_${orderId}_${toState}_v${eventVersion}`;
 
-      // 1. Customer In-App / FCM Notification
+      // 1. Customer In-App / FCM Notification (Strict template copy)
       if (customerUid && toState !== 'pending') {
-        let title = 'Olive Pizza Order Update';
-        let body = `Your order ${orderNumber} status is now ${toState}.`;
+        const customerPayload = CustomerTemplates.orderUpdate(orderId, {
+          orderNumber,
+          status: toState as any,
+          eta: order.estimatedPreparationMinutes ? `${order.estimatedPreparationMinutes} mins` : (order.expectedReadyAt ? 'soon' : undefined),
+          deliveryPartnerName: order.deliveryPartnerName,
+          totalAmount: Number(order.totalAmount || 0),
+          version: eventVersion,
+          eventId,
+          previousStatus: fromState,
+          cancellationReason: order.cancellationReason,
+          isPickup,
+        });
 
-        switch (toState) {
-          case 'accepted':
-            title = 'Order Confirmed! 🍕';
-            body = 'The kitchen has accepted your order and will begin handcrafted preparation shortly.';
-            break;
-          case 'preparing':
-            title = 'Baking in Stone Ovens 🔥';
-            body = `Your pizza is being freshly baked (~ ${order.estimatedPreparationMinutes || 15} mins).`;
-            break;
-          case 'partner_assigned':
-            title = 'Rider Assigned 🛵';
-            body = `${order.deliveryPartnerName || 'Your delivery partner'} is assigned to pick up your order.`;
-            break;
-          case 'ready':
-            title = 'Order Ready! ✨';
-            body = 'Your order is hot, packaged, and ready for dispatch.';
-            break;
-          case 'picked_up':
-          case 'out_for_delivery':
-            title = 'Out for Delivery 🚀';
-            body = 'Your delivery partner is on the way with your hot meal!';
-            break;
-          case 'delivered':
-            title = 'Order Delivered! 🎉';
-            body = 'Enjoy your delicious meal! Tap to rate your food and delivery experience.';
-            break;
-          case 'cancelled':
-            title = 'Order Cancelled';
-            if (order.cancellationReason === 'RESTAURANT_ACCEPT_TIMEOUT') {
-              body = `Sorry, your Olive Pizza order ${orderNumber} was cancelled because the restaurant could not accept it in time.`;
-            } else {
-              body = `Your order ${orderNumber} was cancelled. ${order.cancellationExplanation || order.cancellationReason || ''}`;
-            }
-            break;
-          default:
-            break;
-        }
-
-        await notificationEngine.send(customerUid, {
-          notification: { title, body },
-          data: { 
-            orderId, 
-            status: toState, 
-            orderNumber,
-            cancellationReason: order.cancellationReason || '',
-            deepLink: toState === 'cancelled' ? `/order-cancelled/${orderId}` : `/order-tracking/${orderId}`,
-            screen: toState === 'cancelled' ? 'OrderCancelled' : 'OrderTracking'
-          }
-        }, { 
-          category: (toState === 'cancelled' || toState === 'delivered') ? 'simple_informational' : 'pinned_live', 
-          orderId, 
-          targetApp: 'customer' 
+        await notificationEngine.send(customerUid, customerPayload, {
+          category: (toState === 'cancelled' || toState === 'delivered') ? 'simple_informational' : 'pinned_live',
+          orderId,
+          targetApp: 'customer',
+          eventId,
         });
       }
 
-      // 2. Rider Notification
+      // 2. Assigned Rider Notification (Only assigned rider receives alert — no broadcast)
       if (order.deliveryPartnerId && ['ready', 'cancelled'].includes(toState)) {
+        const riderEventId = `notif_rider_${orderId}_${toState}_v${eventVersion}`;
         const title = toState === 'ready' ? '📦 Order Ready for Pickup!' : 'Order Cancelled';
-        const body = toState === 'ready' ? `Order ${orderNumber} is ready at the counter.` : `Order ${orderNumber} was cancelled.`;
+        const body = toState === 'ready'
+          ? `Order #${orderNumber} is hot, packaged, and ready at the counter.`
+          : `Order #${orderNumber} was cancelled. Return to standby.`;
+
         await notificationEngine.send(order.deliveryPartnerId, {
           notification: { title, body },
-          data: { orderId, status: toState }
-        }, { category: 'alarm_actionable', priority: 'high', orderId, targetApp: 'delivery' });
+          data: {
+            orderId,
+            status: toState,
+            orderNumber,
+            type: toState === 'ready' ? 'ORDER_READY' : 'ORDER_CANCELLED',
+            notificationType: toState === 'ready' ? 'ORDER_READY' : 'ORDER_CANCELLED',
+            eventId: riderEventId,
+            deepLink: `/live-orders?orderId=${orderId}`,
+            url: `/live-orders?orderId=${orderId}`,
+            stage: toState,
+            role: 'delivery'
+          }
+        }, {
+          category: 'alarm_actionable',
+          priority: 'high',
+          orderId,
+          targetApp: 'delivery',
+          eventId: riderEventId,
+        });
+      }
+
+      // 3. Restaurant Branch Notification on DELIVERED (Immediate alert + distinct delivered sound)
+      if (toState === 'delivered') {
+        const branchStaffUids = await notificationEngine.resolveBranchStaff(branchId);
+        if (branchStaffUids.length > 0) {
+          const restEventId = `notif_rest_deliv_${orderId}_v${eventVersion}`;
+          const deliveredPayload = RestaurantTemplates.orderDelivered(orderId, {
+            orderNumber,
+            customerName: order.customerName || 'Customer',
+            totalAmount: Number(order.totalAmount || 0),
+            branchId,
+            franchiseId: order.franchiseId || 'default',
+            riderName: order.deliveryPartnerName,
+            deliveryAddress: typeof order.deliveryAddress === 'string' ? order.deliveryAddress : (order.deliveryAddress?.addressLine || 'Address'),
+            deliveredAt: new Date().toISOString(),
+            version: eventVersion,
+          });
+
+          await notificationEngine.sendBulk(branchStaffUids, deliveredPayload, {
+            category: 'simple_informational',
+            priority: 'high',
+            orderId,
+            targetApp: 'restaurant',
+            eventId: restEventId,
+          });
+        }
       }
 
     } catch (notifErr: any) {

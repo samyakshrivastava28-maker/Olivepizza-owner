@@ -21,6 +21,7 @@ import { z } from 'zod';
 import { adminDb as db } from '../config/firebase.js';
 import * as admin from 'firebase-admin';
 import { pgPool } from '../config/postgres.js';
+import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 import { notificationScheduler } from '../services/notification/NotificationScheduler.js';
 import { OwnerTemplates, CustomerTemplates, DeliveryTemplates, MarketingTemplates, type OrderStatus } from '../services/notification/NotificationTemplates.js';
 
@@ -170,9 +171,11 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
 
   // ── Step 1: Verify user exists and has a role ──────────────────────────
   let userRole: string;
+  let userProfileData: any = null;
   try {
     const userDoc = await db.collection('users').doc(userId).get();
     const docData = userDoc.exists ? userDoc.data() : null;
+    userProfileData = docData;
     userRole = (req.user?.role || docData?.role) as string;
 
     if (!userRole && docData) {
@@ -287,13 +290,93 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
       ready: { from: [...ALL_PENDING_STATUSES, 'accepted', 'preparing', 'partner_assigned'], to: 'ready' },
       assign_delivery: { from: ALL_ACTIVE_STATUSES, to: 'partner_assigned' },
       partner_assigned: { from: ALL_ACTIVE_STATUSES, to: 'partner_assigned' },
-      picked_up: { from: ALL_ACTIVE_STATUSES, to: 'out_for_delivery' },
+       picked_up: { from: ALL_ACTIVE_STATUSES, to: 'out_for_delivery' },
       out_for_delivery: { from: ALL_ACTIVE_STATUSES, to: 'out_for_delivery' },
       delivered: { from: ALL_ACTIVE_STATUSES, to: 'delivered' },
     };
 
+    // ── RESTAURANT MANAGEMENT / OPERATIONAL STAFF ACTIONS ─────────────────
+    const normalizedRole = userRole.toLowerCase();
+    const isRestaurantStaff = [
+      'restaurant_manager', 'kitchen_staff', 'cashier', 'manager',
+      'chef', 'franchise_manager', 'franchise_owner'
+    ].includes(normalizedRole);
+
+    if (isRestaurantStaff) {
+      const orderBranchId = orderData.branchId || 'main_branch';
+      const userBranchId = req.user?.branchId || userProfileData?.branchId;
+      const emailLower = (req.user?.email || '').toLowerCase();
+      const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
+
+      if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount) {
+        await releaseOrderLock(orderId);
+        lockReleased = true;
+        res.status(403).json({
+          error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
+          requestId
+        });
+        return;
+      }
+
+      const normalizedAction = action.toUpperCase();
+      let targetState: any = null;
+      let transitionMetadata: Record<string, any> = {};
+
+      if (normalizedAction === 'ACCEPT') {
+        targetState = 'preparing';
+        if (currentStatus === 'pending' || currentStatus === 'pending_acceptance') {
+          await OrderStateMachine.transition(orderId, 'accepted', {
+            uid: userId,
+            role: normalizedRole,
+            name: (req.user as any)?.name || req.user?.email || 'Staff',
+            branchId: orderBranchId
+          });
+        }
+      } else if (normalizedAction === 'REJECT' || normalizedAction === 'CANCEL') {
+        targetState = 'cancelled';
+        transitionMetadata = {
+          cancellationReason: reason || 'Cancelled by restaurant staff',
+          cancellationSource: normalizedRole
+        };
+      } else if (normalizedAction === 'START_COOKING' || normalizedAction === 'PREPARING') {
+        targetState = 'preparing';
+      } else if (normalizedAction === 'READY') {
+        targetState = 'ready';
+      } else if (normalizedAction === 'DELIVERED') {
+        targetState = 'delivered';
+      } else {
+        await releaseOrderLock(orderId);
+        lockReleased = true;
+        res.status(400).json({
+          error: `Unknown action "${action}" for restaurant staff role "${userRole}"`,
+          allowedActions: ['ACCEPT', 'REJECT', 'START_COOKING', 'READY', 'DELIVERED'],
+          requestId
+        });
+        return;
+      }
+
+      // Execute authoritative state machine transition
+      const transitionResult = await OrderStateMachine.transition(orderId, targetState, {
+        uid: userId,
+        role: normalizedRole,
+        name: (req.user as any)?.name || req.user?.email || 'Staff',
+        branchId: orderBranchId
+      }, transitionMetadata);
+
+      if (!transitionResult.success) {
+        await releaseOrderLock(orderId);
+        lockReleased = true;
+        res.status(400).json({ error: transitionResult.error, requestId });
+        return;
+      }
+
+      newStatus = transitionResult.currentStatus;
+      firestoreWriteRequired = false; // Handled authoritatively by OrderStateMachine
+      responseData = { message: `Order #${orderData.orderNumber || orderId} transitioned to ${newStatus}`, version: transitionResult.version };
+    }
+
     // ── OWNER ACTIONS ──────────────────────────────────────────────────────
-    if (userRole === 'owner') {
+    else if (userRole === 'owner') {
       const actionDef = OWNER_TRANSITIONS[action];
 
       if (!actionDef) {
@@ -836,6 +919,9 @@ router.post('/token/deregister', verifyToken, async (req: AuthRequest, res: Resp
 
       try {
         const { FieldValue } = await import('firebase-admin/firestore');
+        const cryptoMod = await import('crypto');
+        const tokenHash = cryptoMod.createHash('sha256').update(token).digest('hex').slice(0, 16);
+        await db.collection('users').doc(userId).collection('devices').doc(tokenHash).delete().catch(() => {});
         await db.collection('users').doc(userId).update({
           fcmTokens: FieldValue.arrayRemove(token),
         });
@@ -956,11 +1042,19 @@ router.patch('/inbox/:id', verifyToken, async (req: AuthRequest, res: Response):
 // =============================================================================
 router.post('/send-custom', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner', 'restaurant_manager', 'manager', 'franchise_owner', 'franchise_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { title, body, audience, targetUser, category, url, couponCode, expiryDate } = req.body;
+    const { title, body, targetUser, category, couponCode, expiryDate } = req.body;
+    const rawAudience = (req.body.targetAudience || req.body.audience || 'customers').toLowerCase();
+    const callerRole = (req.user?.role || 'customer').toLowerCase();
+    const callerBranchId = req.user?.branchId || req.body.branchId;
+    const isRestaurantManager = ['restaurant_manager', 'manager', 'kitchen_staff', 'cashier'].includes(callerRole);
+
     if (!title || !body) {
       res.status(400).json({ error: 'Title and body are required' });
       return;
     }
+
+    let audience = rawAudience;
+    if (audience === 'riders') audience = 'delivery';
 
     const isReportCategory = category === 'monthly_report' || category === 'report';
     if (isReportCategory && (audience === 'customers' || audience === 'delivery')) {
@@ -968,43 +1062,94 @@ router.post('/send-custom', verifyToken, requireRole(['owner', 'admin', 'develop
       return;
     }
 
-    const client = await pgPool.connect();
     let targetUids: string[] = [];
 
-    try {
-      if (audience === 'customers') {
-        targetUids = await notificationEngine.resolveByRole('customer');
-      } else if (audience === 'delivery') {
-        targetUids = await notificationEngine.resolveByRole('delivery_partner');
-      } else if (audience === 'owners') {
-        targetUids = await notificationEngine.resolveByRole('owner');
-      } else if (audience === 'specific' && targetUser) {
-        const queryStr = String(targetUser).trim();
-        if (queryStr.includes('@')) {
-          const userSnap = await db.collection('users').where('email', '==', queryStr).limit(1).get();
-          if (!userSnap.empty) targetUids = [userSnap.docs[0].id];
-        } else {
-          targetUids = [queryStr];
-        }
-      } else {
-        const res = await client.query("SELECT DISTINCT user_id as firebase_uid FROM fcm_tokens");
-        targetUids = res.rows.map(r => r.firebase_uid);
-        if (targetUids.length === 0) {
-          const allUsersSnap = await db.collection('users').get();
-          targetUids = allUsersSnap.docs.map(d => d.id);
-        }
+    if (isRestaurantManager) {
+      if (!callerBranchId) {
+        res.status(403).json({ error: 'Restaurant staff must have a valid branch assignment to broadcast notifications.' });
+        return;
       }
-    } finally {
-      client.release();
+
+      if (audience === 'customers') {
+        const branchOrdersSnap = await db.collection('orders')
+          .where('branchId', '==', callerBranchId)
+          .limit(250)
+          .get();
+        const uids = new Set<string>();
+        branchOrdersSnap.docs.forEach(d => {
+          const u = d.data()?.userId || d.data()?.customerId || d.data()?.customerUid;
+          if (u) uids.add(u);
+        });
+        targetUids = Array.from(uids);
+      } else if (audience === 'delivery') {
+        const branchRidersSnap = await db.collection('users')
+          .where('role', 'in', ['delivery', 'delivery_partner'])
+          .where('branchId', '==', callerBranchId)
+          .get();
+        targetUids = branchRidersSnap.docs.map(d => d.id);
+      } else if (audience === 'staff') {
+        targetUids = await notificationEngine.resolveBranchStaff(callerBranchId);
+      } else {
+        // 'all' within this branch
+        const staff = await notificationEngine.resolveBranchStaff(callerBranchId);
+        const branchRidersSnap = await db.collection('users')
+          .where('role', 'in', ['delivery', 'delivery_partner'])
+          .where('branchId', '==', callerBranchId)
+          .get();
+        const riderUids = branchRidersSnap.docs.map(d => d.id);
+        const branchOrdersSnap = await db.collection('orders')
+          .where('branchId', '==', callerBranchId)
+          .limit(250)
+          .get();
+        const custUids = new Set<string>();
+        branchOrdersSnap.docs.forEach(d => {
+          const u = d.data()?.userId || d.data()?.customerId || d.data()?.customerUid;
+          if (u) custUids.add(u);
+        });
+        targetUids = Array.from(new Set([...staff, ...riderUids, ...Array.from(custUids)]));
+      }
+    } else {
+      // Owner / Admin / Developer
+      const client = await pgPool.connect();
+      try {
+        if (audience === 'customers') {
+          targetUids = await notificationEngine.resolveByRole('customer');
+        } else if (audience === 'delivery') {
+          targetUids = await notificationEngine.resolveByRole('delivery_partner');
+        } else if (audience === 'owners') {
+          targetUids = await notificationEngine.resolveByRole('owner');
+        } else if (audience === 'staff') {
+          targetUids = await notificationEngine.resolveByRole('restaurant_manager');
+        } else if (audience === 'specific' && targetUser) {
+          const queryStr = String(targetUser).trim();
+          if (queryStr.includes('@')) {
+            const userSnap = await db.collection('users').where('email', '==', queryStr).limit(1).get();
+            if (!userSnap.empty) targetUids = [userSnap.docs[0].id];
+          } else {
+            targetUids = [queryStr];
+          }
+        } else {
+          const res = await client.query("SELECT DISTINCT user_id as firebase_uid FROM fcm_tokens WHERE is_active = TRUE");
+          targetUids = res.rows.map(r => r.firebase_uid);
+          if (targetUids.length === 0) {
+            const allUsersSnap = await db.collection('users').get();
+            targetUids = allUsersSnap.docs.map(d => d.id);
+          }
+        }
+      } finally {
+        client.release();
+      }
     }
 
     let payload: any;
     const isAlarmTest = category === 'alarm_actionable' || req.body.priority === 'critical' || req.body.alert === 'continuous';
+    const effectiveUrl = req.body.deepLink || req.body.url || '/';
+    const imageUrl = req.body.imageUrl || req.body.image;
 
     if (category === 'coupon' && couponCode) {
       payload = MarketingTemplates.couponAlert({ title, body, couponCode, expiryDate: expiryDate || 'soon' });
     } else if (category === 'announcement') {
-      payload = MarketingTemplates.announcement({ title, body, url });
+      payload = MarketingTemplates.announcement({ title, body, url: effectiveUrl });
     } else if (isAlarmTest) {
       if (audience === 'delivery') {
         payload = DeliveryTemplates.newAssignment(`test_${Date.now()}`, {
@@ -1030,8 +1175,18 @@ router.post('/send-custom', verifyToken, requireRole(['owner', 'admin', 'develop
       }
     } else {
       payload = {
-        notification: { title, body },
-        data: { title, body, url: url || '/', category: category || 'marketing', source: 'owner_broadcast' }
+        notification: { title, body, ...(imageUrl ? { image: imageUrl } : {}) },
+        data: {
+          title,
+          body,
+          url: effectiveUrl,
+          deepLink: effectiveUrl,
+          category: category || 'marketing',
+          source: isRestaurantManager ? 'restaurant_broadcast' : 'owner_broadcast',
+          branchId: callerBranchId || undefined,
+          ...(imageUrl ? { image: imageUrl } : {})
+        },
+        ...(imageUrl ? { apns: { fcmOptions: { image: imageUrl } } } : {})
       };
     }
 

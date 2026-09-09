@@ -5,7 +5,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { orderEventService } from '../services/order/OrderEventService.js';
 import { pgPool } from '../config/postgres.js';
 import { z } from 'zod';
-import { CustomerTemplates } from '../services/notification/NotificationTemplates.js';
+import { CustomerTemplates, RestaurantTemplates } from '../services/notification/NotificationTemplates.js';
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
 
 import { DeliveryCapacityService } from '../services/delivery/DeliveryCapacityService.js';
@@ -189,6 +189,31 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
           });
           const category = status === 'delivered' ? 'simple_informational' : 'pinned_live';
           await notificationEngine.send(customerFirebaseUid, cPayload, { category, priority: 'high', orderId: id });
+        }
+
+        // Notify Restaurant Management when order is successfully delivered
+        if (status === 'delivered') {
+          const branchId = orderData.branchId || 'main_branch';
+          const branchStaffUids = await notificationEngine.resolveBranchStaff(branchId);
+          if (branchStaffUids.length > 0) {
+            const shortId = orderData.dailyOrderNumber ? `#${orderData.dailyOrderNumber}` : (orderData.orderNumber || `#${id.slice(-6).toUpperCase()}`);
+            const deliveredPayload = RestaurantTemplates.orderDelivered(id, {
+              orderNumber: shortId,
+              customerName: orderData.customerName || 'Customer',
+              totalAmount: Number(orderData.totalAmount || 0),
+              branchId,
+              franchiseId: orderData.franchiseId || 'default',
+              riderName: orderData.deliveryPartnerName,
+              deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
+              deliveredAt: new Date().toISOString()
+            });
+            await notificationEngine.sendBulk(branchStaffUids, deliveredPayload, {
+              category: 'simple_informational',
+              priority: 'high',
+              orderId: id,
+              targetApp: 'restaurant'
+            });
+          }
         }
       } catch (e: any) {
         console.error('[Delivery Routes] Async notification failed:', e.message);
