@@ -299,6 +299,9 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
   if (opts.role) safeData.role = opts.role;
   if (opts.alert) safeData.alert = opts.alert;
   if (opts.stage) safeData.stage = opts.stage;
+  if (opts.eventType) safeData.eventType = opts.eventType;
+  if (opts.totalAmount) safeData.totalAmount = String(opts.totalAmount);
+  if (opts.itemsSummary) safeData.itemsSummary = opts.itemsSummary;
   if (opts.notificationId) safeData.notificationId = opts.notificationId;
   if (opts.groupKey) safeData.groupKey = opts.groupKey;
   if (opts.ongoing) safeData.ongoing = 'true';
@@ -560,14 +563,19 @@ export class RestaurantTemplates {
       stage: 'new_order',
       alert: 'continuous',
       type: 'NEW_ORDER',
+      eventType: 'NEW_ORDER',
+      eventId: `NEW_ORDER_${orderId}`,
+      orderNumber: payload.orderNumber,
+      totalAmount: String(payload.totalAmount || 0),
       restaurantId: payload.branchId || 'main_branch',
       franchiseId: payload.franchiseId || 'default',
       version: payload.version || 1,
       notificationId: `rest_new_${orderId}`,
       vibrate: [300, 200, 300, 200, 300],
       actions: [
-        { action: 'ACCEPT', title: 'ACCEPT' },
+        { action: 'ACCEPT', title: 'ACCEPT ORDER' },
         { action: 'REJECT', title: 'REJECT' },
+        { action: 'VIEW', title: 'VIEW ORDER' },
       ],
       currentStatus: 'pending',
       serverTimestamp: new Date().toISOString(),

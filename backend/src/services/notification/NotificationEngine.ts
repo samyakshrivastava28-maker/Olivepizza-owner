@@ -587,15 +587,21 @@ export class NotificationEngine {
    */
   public async resolveBranchStaff(
     branchId: string,
-    roles: string[] = ['restaurant_manager', 'kitchen_staff', 'manager']
+    roles: string[] = ['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef', 'franchise_manager']
   ): Promise<string[]> {
+    if (!branchId || typeof branchId !== 'string' || branchId.trim() === '') {
+      console.warn('[NotificationEngine] Cannot resolve branch staff: invalid or empty branchId');
+      return [];
+    }
+
+    const cleanBranchId = branchId.trim();
     const uidsSet = new Set<string>();
 
     try {
       // 1. Query Firestore users by branchId + role
       for (const r of roles) {
         const snap = await db.collection('users')
-          .where('branchId', '==', branchId)
+          .where('branchId', '==', cleanBranchId)
           .where('role', '==', r)
           .get();
         snap.docs.forEach(doc => {
@@ -607,7 +613,7 @@ export class NotificationEngine {
 
       // 2. Also check branchIds array (multi-branch managers)
       const multiSnap = await db.collection('users')
-        .where('branchIds', 'array-contains', branchId)
+        .where('branchIds', 'array-contains', cleanBranchId)
         .get();
       multiSnap.docs.forEach(doc => {
         const d = doc.data();
@@ -615,8 +621,25 @@ export class NotificationEngine {
           uidsSet.add(doc.id);
         }
       });
+
+      // 3. Also check PostgreSQL fcm_tokens table for tokens registered directly under this branch
+      try {
+        const pgRes = await pgPool.query(
+          `SELECT DISTINCT user_id 
+           FROM fcm_tokens 
+           WHERE is_active = TRUE 
+             AND branch_id = $1 
+             AND role = ANY($2)`,
+          [cleanBranchId, roles]
+        );
+        pgRes.rows.forEach((r: any) => {
+          if (r.user_id) uidsSet.add(r.user_id);
+        });
+      } catch (pgErr: any) {
+        // Postgres query non-fatal fallback
+      }
     } catch (e: any) {
-      console.warn(`[NotificationEngine] Branch staff lookup failed for branch ${branchId}:`, e.message);
+      console.warn(`[NotificationEngine] Branch staff lookup failed for branch ${cleanBranchId}:`, e.message);
     }
 
     return Array.from(uidsSet);
