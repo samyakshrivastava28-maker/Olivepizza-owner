@@ -22,6 +22,8 @@ android {
             storePassword System.getenv("KEYSTORE_PASSWORD") ?: "olivepizza"
             keyAlias System.getenv("KEY_ALIAS") ?: "olivepizza"
             keyPassword System.getenv("KEY_PASSWORD") ?: "olivepizza"
+            v1SigningEnabled true
+            v2SigningEnabled true
         }
     }
     buildTypes {

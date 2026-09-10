@@ -81,8 +81,8 @@
         <service
             android:name=".OliveMessagingService"
             android:directBootAware="true"
-            android:exported="true">
-            <intent-filter android:priority="999">
+            android:exported="false">
+            <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT" />
             </intent-filter>
         </service>
