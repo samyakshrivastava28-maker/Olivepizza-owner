@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -37,48 +39,50 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Package macOS DMG
+        run: |
+          mkdir -p artifact
+          COMMIT_NUM=$(git rev-list --count HEAD)
+          TARGET_NAME="olivepizza-owner-${COMMIT_NUM}.dmg"
+          cp dist-electron/*.dmg "artifact/${TARGET_NAME}" || true
+          echo "Packaged ${TARGET_NAME}"
       - uses: actions/upload-artifact@v4
         with:
-          name: OlivePizza-Owner-macOS-DMG
-          path: dist-electron/*.dmg
+          name: OlivePizzaOwner-macOS-Installer
+          path: artifact/*.dmg
           retention-days: 14
-      # Create or Update Unified GitHub Release (All Platforms)
-      - name: Create or Update Unified GitHub Release
-        id: create_unified_release
-        continue-on-error: true
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          name: "Olive Pizza Owner — Latest Release (All Platforms)"
-          tag_name: "latest"
-          files: dist-electron/*.dmg
-          clobber: true
-          draft: false
-          prerelease: false
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Create Versioned GitHub Release
-      - name: Create Versioned GitHub Release
-        id: create_release
-        continue-on-error: true
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          name: "Olive Pizza Owner macOS v1.0.${{ github.run_number }}"
-          tag_name: "v1.0.${{ github.run_number }}-mac"
-          files: dist-electron/*.dmg
-          draft: false
-          prerelease: false
-          make_latest: false
-          generate_release_notes: true
+      # Publish to GitHub Release (Only Latest Commit Files)
+      - name: Publish to GitHub Release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        run: |
+          COMMIT_NUM=$(git rev-list --count HEAD)
+          TARGET_NAME="olivepizza-owner-${COMMIT_NUM}.dmg"
+          echo "Publishing ${TARGET_NAME} to release tag 'latest'..."
+
+          # Ensure 'latest' release exists or create it
+          gh release view latest --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
+            gh release create latest --repo "${GITHUB_REPOSITORY}" --title "Olive Pizza Owner — Latest Release" --notes "Latest official builds for Olive Pizza Owner."
+
+          # Delete ANY old .dmg assets from 'latest' release so only the latest commit file exists
+          OLD_DMGS=$(gh release view latest --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[] | select(.name | test("\\.dmg$")) | .name')
+          for old in $OLD_DMGS; do
+            echo "Deleting old release asset: ${old}"
+            gh release delete-asset latest "${old}" --repo "${GITHUB_REPOSITORY}" --yes || true
+          done
+
+          # Upload the new commit's DMG
+          if ls artifact/*.dmg 1>/dev/null 2>&1; then
+            gh release upload latest "artifact/${TARGET_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber
+          fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build status
         run: |
-          if ls dist-electron/*.dmg 2>/dev/null; then
-            echo "## macOS Build: MACOS_BUILD_READY — MACOS_SIGNING_NOT_CONFIGURED" >> $GITHUB_STEP_SUMMARY
+          COMMIT_NUM=$(git rev-list --count HEAD)
+          if ls artifact/*.dmg 2>/dev/null; then
+            echo "## macOS Build: MACOS_BUILD_READY — **File**: olivepizza-owner-${COMMIT_NUM}.dmg" >> $GITHUB_STEP_SUMMARY
           else
             echo "## macOS Build: MACOS_BUILD_FAILED" >> $GITHUB_STEP_SUMMARY
           fi

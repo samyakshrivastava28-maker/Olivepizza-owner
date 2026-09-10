@@ -16,6 +16,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -36,50 +38,64 @@ jobs:
       - run: npx electron-builder --win --x64 --config electron-builder.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Package Windows Installer
+        shell: pwsh
+        run: |
+          $COMMIT_NUM = (git rev-list --count HEAD).Trim()
+          $TARGET_NAME = "olivepizza-owner-$COMMIT_NUM.exe"
+          New-Item -ItemType Directory -Force -Path artifact
+          $builtExe = Get-ChildItem dist-electron -Filter *.exe | Select-Object -First 1
+          if ($builtExe) {
+            Copy-Item $builtExe.FullName "artifact\$TARGET_NAME"
+            Write-Host "Packaged $TARGET_NAME"
+          }
       - uses: actions/upload-artifact@v4
         with:
-          name: OlivePizza-Owner-Windows-Installer
-          path: dist-electron/*.exe
+          name: OlivePizzaOwner-Windows-Installer
+          path: artifact/*.exe
           retention-days: 30
-      # Create or Update Unified GitHub Release (All Platforms)
-      - name: Create or Update Unified GitHub Release
-        id: create_unified_release
-        continue-on-error: true
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          name: "Olive Pizza Owner — Latest Release (All Platforms)"
-          tag_name: "latest"
-          files: dist-electron/*.exe
-          clobber: true
-          draft: false
-          prerelease: false
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Create Versioned GitHub Release
-      - name: Create Versioned GitHub Release
-        id: create_release
-        continue-on-error: true
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          name: "Olive Pizza Owner Windows v1.0.${{ github.run_number }}"
-          tag_name: "v1.0.${{ github.run_number }}-win"
-          files: dist-electron/*.exe
-          draft: false
-          prerelease: false
-          make_latest: false
-          generate_release_notes: true
+      # Publish to GitHub Release (Only Latest Commit Files)
+      - name: Publish to GitHub Release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $COMMIT_NUM = (git rev-list --count HEAD).Trim()
+          $TARGET_NAME = "olivepizza-owner-$COMMIT_NUM.exe"
+          Write-Host "Publishing $TARGET_NAME to release tag 'latest'..."
+
+          # Ensure 'latest' release exists
+          gh release view latest --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create latest --repo $env:GITHUB_REPOSITORY --title "Olive Pizza Owner — Latest Release" --notes "Latest official builds for Olive Pizza Owner."
+          }
+
+          # Delete old .exe assets
+          $oldAssets = gh release view latest --repo $env:GITHUB_REPOSITORY --json assets --jq '.assets[] | select(.name | test("\\.exe$")) | .name'
+          if ($oldAssets) {
+            $oldAssets -split "`n" | ForEach-Object {
+              $a = $_.Trim()
+              if ($a) {
+                Write-Host "Deleting old asset: $a"
+                gh release delete-asset latest $a --repo $env:GITHUB_REPOSITORY --yes
+              }
+            }
+          }
+
+          # Upload new commit asset
+          if (Test-Path "artifact\$TARGET_NAME") {
+            gh release upload latest "artifact\$TARGET_NAME" --repo $env:GITHUB_REPOSITORY --clobber
+          }
+
       - name: Build status
         shell: pwsh
         run: |
-          $files = Get-ChildItem dist-electron -Filter *.exe -ErrorAction SilentlyContinue
+          $COMMIT_NUM = (git rev-list --count HEAD).Trim()
+          $files = Get-ChildItem artifact -Filter *.exe -ErrorAction SilentlyContinue
           if ($files) {
-            "## Windows Build: WINDOWS_BUILD_READY`n**Files**: $($files.Name -join ', ')" | Out-File $env:GITHUB_STEP_SUMMARY -Append
+            "## Windows Build: WINDOWS_BUILD_READY`n**File**: olivepizza-owner-$COMMIT_NUM.exe" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           } else {
             "## Windows Build: WINDOWS_BUILD_FAILED" | Out-File $env:GITHUB_STEP_SUMMARY -Append
           }
