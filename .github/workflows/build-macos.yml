@@ -44,7 +44,11 @@ jobs:
           mkdir -p artifact
           COMMIT_NUM=$(git rev-list --count HEAD)
           TARGET_NAME="olivepizza-owner-${COMMIT_NUM}.dmg"
-          cp dist-electron/*.dmg "artifact/${TARGET_NAME}" || true
+          FIRST_DMG=$(ls dist-electron/*.dmg 2>/dev/null | head -n 1)
+          if [ -n "$FIRST_DMG" ] && [ -f "$FIRST_DMG" ]; then
+            cp "$FIRST_DMG" "artifact/${TARGET_NAME}"
+            echo "Packaged ${TARGET_NAME} from ${FIRST_DMG}"
+          fi
           echo "Packaged ${TARGET_NAME}"
       - uses: actions/upload-artifact@v4
         with:
