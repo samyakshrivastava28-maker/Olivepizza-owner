@@ -62,11 +62,11 @@ export default function ApkBuildStatus() {
       // 3. Fetch Release APK URL if completed successfully
       let downloadUrl = null;
       if (latestRun.status === "completed" && latestRun.conclusion === "success") {
-        const relRes = await fetch("https://api.github.com/repos/samyakshrivastava28-maker/Olive-Pizza/releases/tags/android-latest");
+        const relRes = await fetch("https://api.github.com/repos/samyakshrivastava28-maker/Olive-Pizza/releases/latest");
         if (relRes.ok) {
           const relData = await relRes.json();
           const asset = relData.assets?.find((a: any) => a.name.endsWith('.apk'));
-          if (asset) downloadUrl = '/api/github/download-apk';
+          if (asset) downloadUrl = asset.browser_download_url || '/api/github/download-apk';
         }
       }
 

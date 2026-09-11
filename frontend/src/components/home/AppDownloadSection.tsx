@@ -17,14 +17,25 @@ export default function AppDownloadSection() {
     // Fetch latest GitHub APK release link from backend endpoint
     const fetchLatestRelease = async () => {
       try {
-        const res = await fetch("/api/github/latest-release");
+        const res = await fetch("/api/github/latest-release?app=owner");
         if (res.ok) {
           const data = await res.json();
-          if (data?.apk?.downloadUrl) {
-            setApkUrl(data.apk.downloadUrl);
+          if (data?.apk?.download_url || data?.apk?.downloadUrl) {
+            setApkUrl(data.apk.download_url || data.apk.downloadUrl);
           }
           if (data?.apk?.size) {
             setApkSize((data.apk.size / (1024 * 1024)).toFixed(1) + " MB");
+          }
+        } else {
+          // Direct fallback to GitHub releases latest
+          const ghRes = await fetch("https://api.github.com/repos/samyakshrivastava28-maker/Olivepizza-owner/releases/latest");
+          if (ghRes.ok) {
+            const ghData = await ghRes.json();
+            const apkAsset = ghData.assets?.find((a: any) => a.name?.endsWith('.apk'));
+            if (apkAsset) {
+              setApkUrl(apkAsset.browser_download_url);
+              setApkSize((apkAsset.size / (1024 * 1024)).toFixed(1) + " MB");
+            }
           }
         }
       } catch (err) {

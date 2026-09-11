@@ -24,26 +24,30 @@ export default function AutoUpdater() {
         if (isNaN(currentVersionCode)) return;
 
         // 2. Fetch latest release from GitHub
-        const res = await fetch("https://api.github.com/repos/samyakshrivastava28-maker/Olive-Pizza/releases/tags/android-latest");
+        const res = await fetch("https://api.github.com/repos/samyakshrivastava28-maker/Olivepizza-owner/releases/latest");
         if (!res.ok) return;
         
         const data = await res.json();
         
-        // 3. Extract version code from release body
-        // Body format: "Version Code: 123"
-        const match = data.body?.match(/Version Code:\s*(\d+)/i);
-        if (match && match[1]) {
-          const githubVersionCode = parseInt(match[1], 10);
+        // 3. Extract version code from release assets or body
+        const asset = data.assets?.find((a: any) => a.name.endsWith('.apk'));
+        if (asset) {
+          const nameMatch = asset.name.match(/olivepizza-[a-z]+-(\d+)\.apk/i);
+          const bodyMatch = data.body?.match(/Version Code:\s*(\d+)/i);
           
+          let githubVersionCode = 0;
+          if (nameMatch && nameMatch[1]) {
+            const num = parseInt(nameMatch[1], 10);
+            githubVersionCode = num > 10000 ? num : (10000 + num);
+          } else if (bodyMatch && bodyMatch[1]) {
+            githubVersionCode = parseInt(bodyMatch[1], 10);
+          }
+
           if (githubVersionCode > currentVersionCode) {
-            // Find the APK download URL
-            const asset = data.assets?.find((a: any) => a.name.endsWith('.apk'));
-            if (asset) {
-              setDownloadUrl('/api/github/download-apk');
-              setLatestVersion(`Build ${githubVersionCode}`);
-              setUpdateAvailable(true);
-              setIsVisible(true);
-            }
+            setDownloadUrl(asset.browser_download_url || '/api/github/download-apk?app=owner');
+            setLatestVersion(`Build ${nameMatch ? nameMatch[1] : githubVersionCode}`);
+            setUpdateAvailable(true);
+            setIsVisible(true);
           }
         }
       } catch (error) {

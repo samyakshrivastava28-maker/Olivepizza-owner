@@ -34,7 +34,19 @@ public class OliveMessagingService extends MessagingService {
         Map<String, String> data = remoteMessage.getData();
         if (data == null) data = new HashMap<>();
 
+        String category = data.get("category");
+        String stage = data.get("stage");
         String alertType = data.get("alert");
+
+        // Owner app must never trigger full-screen sirens for incoming orders.
+        // New order sirens are handled strictly by Restaurant Management & Delivery apps.
+        if ("alarm_actionable".equalsIgnoreCase(category) || 
+            "new_order".equalsIgnoreCase(stage) ||
+            "NEW_ORDER".equalsIgnoreCase(data.get("type")) ||
+            "NEW_ORDER".equalsIgnoreCase(data.get("eventType"))) {
+            alertType = "standard";
+        }
+
         boolean isContinuousAlarm = "continuous".equalsIgnoreCase(alertType);
         boolean isOngoing = "true".equalsIgnoreCase(data.get("ongoing"));
 
