@@ -88,6 +88,20 @@ export class NotificationEngine {
         );
         CREATE INDEX IF NOT EXISTS idx_notification_events_processed_at ON notification_events(processed_at);
 
+        CREATE TABLE IF NOT EXISTS order_activity_tokens (
+          id SERIAL PRIMARY KEY,
+          order_id VARCHAR(255) NOT NULL,
+          user_id VARCHAR(255) NOT NULL,
+          token TEXT NOT NULL,
+          device_id VARCHAR(255),
+          platform VARCHAR(32) DEFAULT 'ios',
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          CONSTRAINT uq_order_activity_token UNIQUE (order_id, token)
+        );
+        CREATE INDEX IF NOT EXISTS idx_order_activity_tokens_order_id ON order_activity_tokens(order_id);
+        CREATE INDEX IF NOT EXISTS idx_order_activity_tokens_user_id ON order_activity_tokens(user_id);
+
         ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS device_id VARCHAR(255);
         ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS role VARCHAR(64);
         ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS branch_id VARCHAR(128);
@@ -295,13 +309,17 @@ export class NotificationEngine {
     await Promise.all(chunks.map(async (chunk) => {
       try {
         const androidConfig = payload.android ? { ...payload.android } : undefined;
-        const isRestaurantApp = options.targetApp === 'restaurant' 
-          || payload.data?.role === 'restaurant_manager' 
-          || sanitizedData.type === 'NEW_ORDER' 
-          || sanitizedData.type === 'ORDER_DELIVERED';
+        const isUrgentStaffApp = options.targetApp === 'restaurant'
+          || options.targetApp === 'delivery'
+          || payload.data?.role === 'restaurant_manager'
+          || payload.data?.role === 'delivery'
+          || sanitizedData.type === 'NEW_ORDER'
+          || sanitizedData.type === 'ORDER_DELIVERED'
+          || sanitizedData.type === 'DELIVERY_ASSIGNED'
+          || sanitizedData.stage === 'delivery_assigned';
 
-        // Do not strip notification block for restaurant app or when OS tray banner is required
-        if (isDataOnlyCategory && androidConfig && !isRestaurantApp) {
+        // Do not strip notification block for restaurant/delivery apps or when OS tray banner is required
+        if (isDataOnlyCategory && androidConfig && !isUrgentStaffApp) {
           delete androidConfig.notification;
         }
 
@@ -313,9 +331,12 @@ export class NotificationEngine {
           webpush: payload.webpush,
         };
 
-        // Attach top-level notification for restaurant app, simple_informational, or whenever payload.notification exists
-        if ((!isDataOnlyCategory || isRestaurantApp) && payload.notification) {
-          message.notification = payload.notification;
+        // Attach top-level notification for urgent staff apps, simple_informational, or whenever payload.notification exists
+        if ((!isDataOnlyCategory || isUrgentStaffApp) && (payload.notification || sanitizedData.title)) {
+          message.notification = payload.notification || {
+            title: sanitizedData.title || 'Olive Pizza Alert',
+            body: sanitizedData.body || 'Immediate action required'
+          };
         }
 
         const response = await adminMessaging.sendEachForMulticast(message);
@@ -398,6 +419,76 @@ export class NotificationEngine {
       `[NotificationEngine] Result: ${totalSuccess} sent, ${totalFailure} failed, ` +
       `${tokens.length} tokens, ${Date.now() - startTime}ms`
     );
+
+    return {
+      successCount: totalSuccess,
+      failureCount: totalFailure,
+      tokensFound: tokens.length,
+      errors,
+    };
+  }
+
+  /**
+   * Send notification directly to a list of raw tokens (e.g. ActivityKit APNs tokens or FCM tokens).
+   */
+  public async sendToTokens(
+    tokens: string[],
+    payload: NotificationPayload,
+    options: NotificationEngineOptions = {}
+  ): Promise<SendResult> {
+    if (!tokens || tokens.length === 0) {
+      return { successCount: 0, failureCount: 0, tokensFound: 0, errors: [] };
+    }
+
+    const startTime = Date.now();
+    const sanitizedData: Record<string, string> = {};
+    if (payload.data && typeof payload.data === 'object') {
+      for (const [k, v] of Object.entries(payload.data)) {
+        if (v !== undefined && v !== null) {
+          sanitizedData[k] = typeof v === 'string' ? v : typeof v === 'object' ? JSON.stringify(v) : String(v);
+        }
+      }
+    }
+
+    const sanitizedApns = sanitizeApnsConfig(payload.apns, options.category || 'push');
+    const chunkSize = 500;
+    const chunks: string[][] = [];
+    for (let i = 0; i < tokens.length; i += chunkSize) {
+      chunks.push(tokens.slice(i, i + chunkSize));
+    }
+
+    let totalSuccess = 0;
+    let totalFailure = 0;
+    const errors: string[] = [];
+
+    await Promise.all(chunks.map(async (chunk) => {
+      try {
+        const message: admin.messaging.MulticastMessage = {
+          tokens: chunk,
+          data: sanitizedData,
+          android: payload.android,
+          apns: sanitizedApns,
+          webpush: payload.webpush,
+        };
+        if (payload.notification) {
+          message.notification = payload.notification;
+        }
+
+        const response = await adminMessaging.sendEachForMulticast(message);
+        totalSuccess += response.successCount;
+        totalFailure += response.failureCount;
+
+        response.responses.forEach((r) => {
+          if (r.error) {
+            errors.push(`${r.error.code}: ${r.error.message}`);
+          }
+        });
+      } catch (err: any) {
+        console.error('[NotificationEngine] sendToTokens chunk failed:', err.message);
+        errors.push(err.message);
+        totalFailure += chunk.length;
+      }
+    }));
 
     return {
       successCount: totalSuccess,

@@ -25,25 +25,12 @@ class OwnerAlarmManagerClass {
   private PAUSE_DURATION = 30000; // 30 seconds pause
 
   /**
-   * Start listening to Firestore for pending orders.
-   * This should be called once on OwnerLayout mount.
+   * Deactivated: Owner app no longer alarms on pending new orders.
+   * New order alarms are handled exclusively by Restaurant Management & Delivery apps.
    */
   public init() {
-    if (this.unsubscribe) return; // Already initialized
-
-    const q = query(collection(db, "orders"), where("status", "==", "pending"));
-    
-    // First, try a direct fetch to instantly catch unhandled orders on reload
-    getDocs(q).then((snapshot) => {
-      this.handleCountChange(snapshot.size);
-    }).catch(console.error);
-
-    // Then start the live listener
-    this.unsubscribe = onSnapshot(q, (snapshot) => {
-      this.handleCountChange(snapshot.size);
-    }, (error) => {
-      console.error("[OwnerAlarmManager] Firestore listener error:", error);
-    });
+    // No-op: new order alarms are removed from owner app
+    return;
   }
 
   /**

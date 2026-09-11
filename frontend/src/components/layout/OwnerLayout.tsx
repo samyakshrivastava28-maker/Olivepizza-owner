@@ -4,14 +4,9 @@ import { Outlet, NavLink, useLocation, useNavigate } from 'react-router';
 import { Header } from './Header';
 import { MobileNav } from './MobileNav';
 import { PizzaLoader } from '../ui/PizzaLoader';
-import OwnerAlertManager from '../owner/OwnerAlertManager';
-import NewOrderEmergencyOverlay from '../owner/NewOrderEmergencyOverlay';
-import { db } from '../../lib/firebase';
-import { collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
-import { Order } from '../../types/models';
 import { useAuthStore } from '../../lib/store';
+import { AppLogo } from '../common/AppLogo';
 import {
-  Sparkles,
   BarChart3,
   Clock,
   Bike,
@@ -20,57 +15,18 @@ import {
   Mail,
   FolderOpen,
   Pizza,
-  Store,
-  Users,
   Building2,
-  Settings,
-  Shield,
   LayoutTemplate,
   X,
   Menu,
 } from 'lucide-react';
-import { AppLogo } from '../common/AppLogo';
 
 export const OwnerLayout: React.FC = () => {
   const user = useAuthStore((s) => s.user);
   const location = useLocation();
   const navigate = useNavigate();
-  const [emergencyOrder, setEmergencyOrder] = useState<Order | null>(null);
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-
-  // Firestore real-time listener for high-priority incoming orders
-  useEffect(() => {
-    if (!user) return;
-    const q = query(
-      collection(db, 'orders'),
-      orderBy('createdAt', 'desc'),
-      limit(10)
-    );
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        snapshot.docChanges().forEach((change) => {
-          if (change.type === 'added' || change.type === 'modified') {
-            const data = change.doc.data() as Order;
-            const orderStatus = (data.status || 'pending').toLowerCase();
-            const orderTime = new Date(data.createdAt?.toDate ? data.createdAt.toDate() : data.createdAt || 0).getTime();
-            const isRecent = Date.now() - orderTime < 5 * 60 * 1000;
-
-            if (orderStatus === 'pending' && isRecent) {
-              setEmergencyOrder({ id: change.doc.id, ...data });
-            }
-          }
-        });
-      },
-      (error) => {
-        console.warn('[OwnerLayout] Order stream error:', error);
-      }
-    );
-
-    return () => unsubscribe();
-  }, [user]);
 
   // Core Canonical Navigation Items including Home Page Manager
   const navItems = [
@@ -190,14 +146,6 @@ export const OwnerLayout: React.FC = () => {
         </div>
       )}
 
-      {/* System Overlays */}
-      <OwnerAlertManager />
-      {emergencyOrder && (
-        <NewOrderEmergencyOverlay
-          order={emergencyOrder}
-          onClose={() => setEmergencyOrder(null)}
-        />
-      )}
     </div>
   );
 };

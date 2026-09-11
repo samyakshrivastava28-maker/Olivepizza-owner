@@ -940,6 +940,90 @@ router.post('/token/deregister', verifyToken, async (req: AuthRequest, res: Resp
 });
 
 // =============================================================================
+// POST /notifications/activity-token (Register iOS ActivityKit APNs Push Token)
+// =============================================================================
+router.post('/activity-token', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { orderId, token, deviceId } = req.body;
+    const userId = req.user!.uid;
+
+    if (!orderId || !token) {
+      res.status(400).json({ error: 'orderId and token are required' });
+      return;
+    }
+
+    // Verify order ownership
+    let isOwner = true; // default true if checks pass
+    try {
+      const canonOrder = await pgPool.query('SELECT user_id, customer_id FROM canonical_orders WHERE id = $1', [orderId]);
+      if (canonOrder.rows.length > 0) {
+        isOwner = canonOrder.rows[0].user_id === userId || canonOrder.rows[0].customer_id === userId;
+      } else {
+        const orderSnap = await db.collection('orders').doc(orderId).get();
+        if (orderSnap.exists) {
+          const d = orderSnap.data() || {};
+          isOwner = d.userId === userId || d.customerId === userId || d.customerUid === userId || d.firebaseUid === userId;
+        }
+      }
+    } catch (verErr: any) {
+      console.warn('[ActivityToken] Ownership check failed:', verErr.message);
+    }
+
+    if (!isOwner) {
+      res.status(403).json({ error: 'Not authorized for this order' });
+      return;
+    }
+
+    // Upsert token in order_activity_tokens
+    await pgPool.query(
+      `INSERT INTO order_activity_tokens (order_id, user_id, token, device_id, platform, updated_at)
+       VALUES ($1, $2, $3, $4, 'ios', NOW())
+       ON CONFLICT (order_id, token) DO UPDATE
+       SET updated_at = NOW(), device_id = EXCLUDED.device_id`,
+      [orderId, userId, token, deviceId || null]
+    );
+
+    console.log(`[ActivityToken] Registered Live Activity push token for order ${orderId} (user: ${userId})`);
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('[NotificationRoutes] Activity token registration error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================================================
+// DELETE /notifications/activity-token (Deregister iOS ActivityKit Push Token)
+// =============================================================================
+router.delete('/activity-token', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { orderId, token } = req.body;
+    const userId = req.user!.uid;
+
+    if (!orderId) {
+      res.status(400).json({ error: 'orderId is required' });
+      return;
+    }
+
+    if (token) {
+      await pgPool.query(
+        `DELETE FROM order_activity_tokens WHERE order_id = $1 AND token = $2`,
+        [orderId, token]
+      );
+    } else {
+      await pgPool.query(
+        `DELETE FROM order_activity_tokens WHERE order_id = $1 AND user_id = $2`,
+        [orderId, userId]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('[NotificationRoutes] Activity token deletion error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================================================
 // POST /notifications/track
 // =============================================================================
 router.post('/track', async (req: Request, res: Response): Promise<void> => {

@@ -78,22 +78,21 @@ public class OliveMessagingService extends MessagingService {
                 String stage = data.get("stage");
                 String action = data.get("action");
 
-                boolean isStaff = "owner".equalsIgnoreCase(data.get("role")) || "delivery_partner".equalsIgnoreCase(data.get("role")) || "delivery".equalsIgnoreCase(data.get("role")) ||
-                                  "owner".equalsIgnoreCase(data.get("targetRole")) || "delivery_partner".equalsIgnoreCase(data.get("targetRole")) || "delivery".equalsIgnoreCase(data.get("targetRole")) ||
-                                  "alarm_actionable".equalsIgnoreCase(category);
-
-                boolean isContinuousAlert = isStaff && ("continuous".equals(alert) || 
-                                            "alarm_actionable".equals(category) || 
-                                            "new_order".equals(stage) || 
-                                            "delivery_assigned".equals(stage));
+                // Owner app must never trigger emergency alarms or wake screen for new orders.
+                // New order alarms are handled strictly by Restaurant Management & Delivery apps.
+                if ("alarm_actionable".equalsIgnoreCase(category) || 
+                    "new_order".equalsIgnoreCase(stage) ||
+                    "NEW_ORDER".equalsIgnoreCase(data.get("type")) ||
+                    "NEW_ORDER".equalsIgnoreCase(data.get("eventType")) ||
+                    "continuous".equalsIgnoreCase(alert)) {
+                    Log.d(TAG, "Ignoring new order emergency alarm in owner app");
+                    return;
+                }
 
                 if ("stop_alert".equals(action)) {
                     stopNativeAlarm(data);
                     handledNatively = true;
                 } else {
-                    if (isContinuousAlert) {
-                        wakeScreenOnEmergency(powerManager);
-                    }
                     showNativeNotification(data);
                     handledNatively = true;
                 }
@@ -178,14 +177,8 @@ public class OliveMessagingService extends MessagingService {
 
         String role = data.get("role");
         String targetRole = data.get("targetRole");
-        boolean isStaff = "owner".equalsIgnoreCase(role) || "delivery_partner".equalsIgnoreCase(role) || "delivery".equalsIgnoreCase(role) ||
-                          "owner".equalsIgnoreCase(targetRole) || "delivery_partner".equalsIgnoreCase(targetRole) || "delivery".equalsIgnoreCase(targetRole) ||
-                          "alarm_actionable".equalsIgnoreCase(category);
-
-        boolean isContinuous = isStaff && ("continuous".equals(alertType) || 
-                               "alarm_actionable".equals(category) || 
-                               "new_order".equals(stage) || 
-                               "delivery_assigned".equals(stage));
+        // Owner app never triggers continuous emergency alarms
+        boolean isContinuous = false;
 
         int notificationId = (orderId != null) 
             ? (isOngoing ? orderId.hashCode() : (orderId.hashCode() + 1000))

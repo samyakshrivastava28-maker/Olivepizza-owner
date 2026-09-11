@@ -425,11 +425,28 @@ export class OrderStateMachine {
 
       // 1. Customer In-App / FCM Notification (Strict template copy)
       if (customerUid && toState !== 'pending') {
+        let itemsSummary = '';
+        if (Array.isArray(order.items) && order.items.length > 0) {
+          itemsSummary = order.items.map((i: any) => typeof i === 'string' ? i : `${i.quantity || 1}× ${i.name || 'Item'}`).join(', ');
+        } else if (order.itemsSummary) {
+          itemsSummary = String(order.itemsSummary);
+        }
+
+        const stepMap: Record<string, number> = {
+          pending: 1, accepted: 2, preparing: 3, ready: 4, partner_assigned: 5, picked_up: 5, out_for_delivery: 6, delivered: 7, completed: 7, cancelled: 0
+        };
+        const currentStep = stepMap[toState] || 1;
+        const etaMinutes = order.estimatedPreparationMinutes || (order.etaMinutes ? Number(order.etaMinutes) : undefined);
+
         const customerPayload = CustomerTemplates.orderUpdate(orderId, {
           orderNumber,
           status: toState as any,
-          eta: order.estimatedPreparationMinutes ? `${order.estimatedPreparationMinutes} mins` : (order.expectedReadyAt ? 'soon' : undefined),
+          step: currentStep,
+          eta: etaMinutes ? `${etaMinutes} mins` : (order.expectedReadyAt ? 'soon' : undefined),
+          etaMinutes,
           deliveryPartnerName: order.deliveryPartnerName,
+          riderPhone: order.deliveryPartnerPhone || order.riderPhone,
+          itemsSummary,
           totalAmount: Number(order.totalAmount || 0),
           version: eventVersion,
           eventId,
@@ -444,6 +461,43 @@ export class OrderStateMachine {
           targetApp: 'customer',
           eventId,
         });
+
+        // 1.1 Dispatch ActivityKit Live Activity update to registered iOS tokens
+        try {
+          const activityRes = await pgPool.query(
+            `SELECT token FROM order_activity_tokens WHERE order_id = $1`,
+            [orderId]
+          );
+          if (activityRes.rows.length > 0) {
+            const isEnd = toState === 'delivered' || toState === 'cancelled';
+            const livePayload = CustomerTemplates.liveActivityUpdate(orderId, {
+              event: isEnd ? 'end' : (toState === 'accepted' ? 'start' : 'update'),
+              status: toState as any,
+              step: currentStep,
+              orderNumber,
+              itemsSummary: itemsSummary || 'Olive Pizza Order',
+              totalAmount: Number(order.totalAmount || 0),
+              etaMinutes: etaMinutes || 0,
+              riderName: order.deliveryPartnerName || '',
+              riderPhone: order.deliveryPartnerPhone || order.riderPhone || '',
+              restaurantName: 'Olive Pizza',
+              dismissalDate: isEnd ? Math.floor(Date.now() / 1000) + 300 : undefined,
+            });
+
+            const tokens = activityRes.rows.map(r => r.token);
+            await notificationEngine.sendToTokens(tokens, livePayload, {
+              category: 'pinned_live',
+              orderId,
+              targetApp: 'customer',
+            });
+
+            if (isEnd) {
+              await pgPool.query(`DELETE FROM order_activity_tokens WHERE order_id = $1`, [orderId]).catch(() => {});
+            }
+          }
+        } catch (actErr: any) {
+          console.warn('[OrderStateMachine] ActivityKit push dispatch warning:', actErr.message);
+        }
       }
 
       // 2. Assigned Rider Notification (Only assigned rider receives alert — no broadcast)

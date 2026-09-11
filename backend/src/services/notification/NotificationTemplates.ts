@@ -74,10 +74,11 @@ export type NotificationCategory =
 
 // ─── Android Channel IDs ──────────────────────────────────────────────────────
 export const ANDROID_CHANNELS = {
-  ORDER_NEW: 'olive_order_new_v2',
+  ORDER_NEW: 'olive_order_alarm_v3',
   ORDER_STATUS: 'olive_order_status',
+  ORDER_TRACKING: 'olive_order_tracking',
   ORDER_COMPLETED: 'olive_order_completed_v2',
-  DELIVERY_ASSIGNMENT: 'olive_delivery_assignment',
+  DELIVERY_ASSIGNMENT: 'olive_delivery_alarm_v3',
   DELIVERY_UPDATES: 'olive_delivery_updates',
   MARKETING: 'olive_marketing',
   SYSTEM: 'olive_system',
@@ -317,9 +318,14 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
     },
   };
 
-  // Always include top-level notification block for restaurant manager and all critical alerts
+  // Always include top-level notification block for restaurant manager, delivery partner, and critical alarms
   // so the OS tray notification displays and plays the channel sound even when app is closed/killed.
-  if (opts.role === 'restaurant_manager' || (opts.category !== 'alarm_actionable' && opts.category !== 'pinned_live')) {
+  if (
+    opts.role === 'restaurant_manager' ||
+    opts.role === 'delivery' ||
+    opts.alert === 'continuous' ||
+    (opts.category !== 'alarm_actionable' && opts.category !== 'pinned_live')
+  ) {
     basePayload.notification = { title, body };
   }
 
@@ -351,7 +357,10 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
     opts.role === 'restaurant_manager' || (opts.actions && opts.actions.length > 0 && opts.role !== 'delivery')
       ? 'ORDER_ACTION_CATEGORY'
       : opts.role === 'delivery'
-        ? 'DELIVERY_ASSIGNMENT_CATEGORY'
+        ? (opts.stage === 'picked_up' ? 'DELIVERY_ORDER_PICKED_UP'
+           : opts.stage === 'out_for_delivery' || opts.stage === 'arrived_customer' ? 'DELIVERY_ORDER_OUT_FOR_DELIVERY'
+           : opts.stage === 'arrived_restaurant' || opts.stage === 'navigate_restaurant' ? 'DELIVERY_ORDER_ACCEPTED'
+           : 'DELIVERY_ASSIGNMENT_CATEGORY')
         : opts.category === 'marketing' || opts.category === 'coupon'
           ? 'PROMO_CATEGORY'
           : opts.category === 'system' || opts.role === 'owner'
@@ -373,9 +382,10 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
   const apnsPayload: any = {
     aps: {
       alert: { title, body },
-      sound: apnsSound,
+      sound: opts.alert === 'continuous' ? { critical: 1, name: apnsSound, volume: 1.0 } : apnsSound,
       badge: 1,
       'mutable-content': 1,
+      'content-available': 1,
       category: apnsCategory,
       'interruption-level': interruptionLevel,
     },
@@ -816,8 +826,8 @@ export class DeliveryTemplates {
       notificationId: `delivery_assign_${orderId}`,
       vibrate: [200, 100, 200, 100, 400],
       actions: [
-        { action: 'ACCEPT', title: 'ACCEPT' },
-        { action: 'DECLINE', title: 'DECLINE' },
+        { action: 'ACCEPT_DELIVERY', title: '✅ Accept' },
+        { action: 'DECLINE_DELIVERY', title: '❌ Decline' },
       ],
       actionUrlAccept: `/api/delivery/rider/orders/${orderId}/accept`,
       actionUrlReject: `/api/delivery/rider/orders/${orderId}/decline`,
@@ -846,11 +856,11 @@ export class DeliveryTemplates {
     }
   ): NotificationPayload {
     const stageConfig: Record<string, { title: string; actions: Array<{ action: string; title: string }> }> = {
-      navigate_restaurant: { title: '📍 Navigate to Restaurant', actions: [{ action: 'arrived_restaurant', title: '✅ Arrived' }] },
-      arrived_restaurant: { title: '🍕 At Restaurant — Pick Up Order', actions: [{ action: 'picked_up', title: '📦 Picked Up' }] },
-      picked_up: { title: '🚴 Order Picked Up', actions: [{ action: 'call_customer', title: '📞 Call' }, { action: 'navigate_customer', title: '🗺️ Navigate' }] },
-      out_for_delivery: { title: `🛵 Delivering to ${payload.customerName}`, actions: [{ action: 'arrived_customer', title: '📍 Arrived' }, { action: 'call_customer', title: '📞 Call' }] },
-      arrived_customer: { title: '🏁 Arrived at Customer', actions: [{ action: 'delivered', title: '✅ Delivered' }, { action: 'report_issue', title: '⚠️ Issue' }] },
+      navigate_restaurant: { title: '📍 Navigate to Restaurant', actions: [{ action: 'PICKED_UP', title: '📦 Picked Up' }] },
+      arrived_restaurant: { title: '🍕 At Restaurant — Pick Up Order', actions: [{ action: 'PICKED_UP', title: '📦 Picked Up' }] },
+      picked_up: { title: '🚴 Order Picked Up', actions: [{ action: 'OUT_FOR_DELIVERY', title: '🛵 Out for Delivery' }] },
+      out_for_delivery: { title: `🛵 Delivering to ${payload.customerName}`, actions: [{ action: 'DELIVERED', title: '✅ Delivered' }] },
+      arrived_customer: { title: '🏁 Arrived at Customer', actions: [{ action: 'DELIVERED', title: '✅ Delivered' }] },
       delivered: { title: '🎉 Delivery Complete', actions: [] },
     };
 
@@ -903,15 +913,19 @@ export class CustomerTemplates {
 
   /**
    * Live order tracker — ONE notification per order, updated in-place.
-   * Uses `ongoing: true` for Android pinned notification.
+   * Uses `ongoing: true` for Android pinned notification and channel `olive_order_tracking`.
    */
   static orderUpdate(
     orderId: string,
     payload: {
       orderNumber: string;
       status: OrderStatus;
+      step?: number;
       eta?: string;
+      etaMinutes?: number;
       deliveryPartnerName?: string;
+      riderPhone?: string;
+      itemsSummary?: string;
       totalAmount: number;
       version?: number;
       notificationId?: string;
@@ -923,6 +937,7 @@ export class CustomerTemplates {
     }
   ): NotificationPayload {
     const isPickup = payload.isPickup || false;
+    const stepNumber = payload.step || PROGRESS_STEPS[payload.status] || 1;
     const statusConfig: Record<OrderStatus, {
       title: string; body: string;
       sound?: keyof typeof SOUNDS;
@@ -1002,7 +1017,7 @@ export class CustomerTemplates {
 
     const actions: Array<{ action: string; title: string }> =
       payload.status === 'out_for_delivery' || payload.status === 'partner_assigned'
-        ? [{ action: 'track', title: '📍 Track Order' }, { action: 'call_partner', title: '📞 Call Partner' }]
+        ? [{ action: 'track', title: '📍 Track Order' }, ...(payload.riderPhone ? [{ action: 'call_partner', title: '📞 Call Rider' }] : [])]
         : isDelivered
           ? [{ action: 'rate', title: '⭐ Rate Order' }, { action: 'reorder', title: '🔄 Reorder' }]
           : isCancelled
@@ -1014,7 +1029,7 @@ export class CustomerTemplates {
     const destinationUrl = isCancelled ? `/order-cancelled/${orderId}` : trackingUrl;
 
     const notificationTypeMap: Record<OrderStatus, NotificationType> = {
-      pending: 'NEW_ORDER',
+      pending: 'ORDER_ACCEPTED',
       accepted: 'ORDER_ACCEPTED',
       preparing: 'ORDER_PREPARING',
       ready: isPickup ? 'PICKUP_READY' : 'ORDER_READY',
@@ -1027,11 +1042,13 @@ export class CustomerTemplates {
     };
     const notifType: NotificationType = notificationTypeMap[payload.status] || 'ORDER_ACCEPTED';
 
+    const calculatedEta = payload.etaMinutes !== undefined 
+      ? String(payload.etaMinutes)
+      : (payload.eta ? String(parseInt(payload.eta) || 0) : '0');
+
     return buildPayload(cfg.title, cfg.body, {
       tag: `order_customer_${orderId}`,
-      channelId: isDelivered ? ANDROID_CHANNELS.ORDER_COMPLETED
-        : isCancelled ? ANDROID_CHANNELS.ORDER_COMPLETED
-          : ANDROID_CHANNELS.ORDER_STATUS,
+      channelId: isTerminal ? ANDROID_CHANNELS.ORDER_COMPLETED : ANDROID_CHANNELS.ORDER_TRACKING,
       orderId,
       url: destinationUrl,
       sound: cfg.sound,
@@ -1050,13 +1067,39 @@ export class CustomerTemplates {
       eventTimestamp: payload.eventTimestamp,
       serverTimestamp: new Date().toISOString(),
       orderNumber: payload.orderNumber,
-      etaMinutes: payload.eta || '',
+      step: String(stepNumber),
+      etaMinutes: calculatedEta,
       riderName: payload.deliveryPartnerName || '',
+      riderPhone: payload.riderPhone || '',
+      itemsSummary: payload.itemsSummary || '',
+      totalAmount: String(payload.totalAmount),
       restaurantName: 'Olive Pizza — Rajnandgaon HQ',
       isLive: isTerminal ? 'false' : 'true',
       type: notifType,
       notificationType: notifType,
     });
+  }
+
+  /**
+   * Helper for ActivityKit APNs Live Activity payload
+   */
+  static liveActivityUpdate(
+    orderId: string,
+    state: {
+      event: 'start' | 'update' | 'end';
+      status: OrderStatus;
+      step: number;
+      orderNumber: string;
+      itemsSummary: string;
+      totalAmount: number;
+      etaMinutes?: number;
+      riderName?: string;
+      riderPhone?: string;
+      restaurantName?: string;
+      dismissalDate?: number;
+    }
+  ): NotificationPayload {
+    return buildLiveActivityPayload(orderId, state);
   }
 }
 

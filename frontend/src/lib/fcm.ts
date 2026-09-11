@@ -42,7 +42,7 @@ export const initFCMNotifications = async (userId?: string): Promise<string | nu
 
         // Attach listener for foreground alerts
         onMessage(messaging, (payload) => {
-          soundPlayer.playNewOrderAlarm();
+          soundPlayer.playStatusUpdate();
           const title = payload.notification?.title || 'New Notification';
           const body = payload.notification?.body || '';
           const message = body ? `${title}: ${body}` : title;

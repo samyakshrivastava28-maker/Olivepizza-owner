@@ -258,6 +258,14 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
   }
 });
 
+// Forward action endpoint for delivery riders (/api/delivery/orders/:id/action)
+router.post('/orders/:id/action', requireRole(['delivery', 'delivery_partner', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  const { default: riderDeliveryRoutes } = await import('./riderDelivery.routes.js');
+  // Re-route to riderDelivery action handler
+  req.url = `/orders/${req.params.id}/action`;
+  riderDeliveryRoutes(req, res, () => {});
+});
+
 // Update rider availability status (online/offline/busy)
 router.patch('/partner-status', requireRole(['delivery', 'delivery_partner', 'owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {

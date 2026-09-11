@@ -3,11 +3,6 @@ import { Outlet, NavLink, useLocation, useNavigate } from 'react-router';
 import { Header } from './Header';
 import { MobileNav } from './MobileNav';
 import { PizzaLoader } from '../ui/PizzaLoader';
-import { EmergencyOrderModal } from '../orders/EmergencyOrderModal';
-import { db } from '../../lib/firebase';
-import { collection, query, orderBy, limit, onSnapshot, doc, updateDoc } from 'firebase/firestore';
-import { Order } from '../../types/models';
-import { soundPlayer } from '../../lib/audio';
 import { initFCMNotifications } from '../../lib/fcm';
 import { useAuthStore } from '../../lib/store';
 import {
@@ -44,7 +39,6 @@ export const OwnerLayout: React.FC = () => {
   const user = useAuthStore((s) => s.user);
   const location = useLocation();
   const navigate = useNavigate();
-  const [emergencyOrder, setEmergencyOrder] = useState<Order | null>(null);
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
@@ -54,43 +48,6 @@ export const OwnerLayout: React.FC = () => {
       initFCMNotifications(user.uid);
     }
   }, [user]);
-
-  // Real-time listener for incoming customer orders (triggering emergency audio/modal)
-  useEffect(() => {
-    let isInitial = true;
-    const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(1));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      if (isInitial) {
-        isInitial = false;
-        return;
-      }
-      snapshot.docChanges().forEach((change) => {
-        if (change.type === 'added') {
-          const newOrder = { id: change.doc.id, ...change.doc.data() } as Order;
-          const status = (newOrder.status || '').toLowerCase();
-          if (['pending', 'placed', 'created', 'new_order'].includes(status)) {
-            soundPlayer.playNewOrderAlarm();
-            setEmergencyOrder(newOrder);
-          }
-        }
-      });
-    });
-    return () => unsubscribe();
-  }, []);
-
-  const handleAcceptOrder = async (orderId: string) => {
-    try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        status: 'preparing',
-        updatedAt: new Date(),
-      });
-      setEmergencyOrder(null);
-      toast.success('Order accepted! Moving to Preparing state.');
-      navigate('/orders');
-    } catch (e: any) {
-      toast.error('Failed to accept order: ' + e.message);
-    }
-  };
 
   const navGroups = [
     {

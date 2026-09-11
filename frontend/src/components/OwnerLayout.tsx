@@ -5,8 +5,6 @@ import { db } from '../lib/firebase';
 import { collection, query, orderBy, limit, onSnapshot, doc, getDoc } from 'firebase/firestore';
 import { PremiumBackground } from './ui/glass/PremiumBackground';
 import { GlassPanel } from './ui/glass/GlassSystem';
-import OwnerAlertManager from './owner/OwnerAlertManager';
-import NewOrderEmergencyOverlay from './owner/NewOrderEmergencyOverlay';
 import PixelSnow from './ui/PixelSnow';
 
 export default function OwnerLayout() {
@@ -16,7 +14,6 @@ export default function OwnerLayout() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [profilePic, setProfilePic] = useState('https://ui-avatars.com/api/?name=Owner&background=random');
   const [ownerName, setOwnerName] = useState(user?.name || 'Restaurant Owner');
-  const [emergencyOrder, setEmergencyOrder] = useState<any | null>(null);
 
   useEffect(() => {
     // Attempt to load custom profile pic if available
@@ -35,38 +32,7 @@ export default function OwnerLayout() {
     fetchProfile();
   }, [user]);
 
-  // Real-time listener for NEW incoming customer orders (triggers emergency overlay for pending orders only)
-  useEffect(() => {
-    let isInitial = true;
-    const q = query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(1));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      if (isInitial) {
-        isInitial = false;
-        return;
-      }
-      snapshot.docChanges().forEach((change) => {
-        if (change.type === 'added') {
-          const newOrderData = { id: change.doc.id, ...change.doc.data() } as any;
-          const status = (newOrderData.status || '').toLowerCase();
-          if (['pending', 'placed', 'created', 'new_order'].includes(status)) {
-            let isRecent = true;
-            if (newOrderData.createdAt) {
-              const cTime = typeof newOrderData.createdAt?.toDate === 'function'
-                ? newOrderData.createdAt.toDate().getTime()
-                : new Date(newOrderData.createdAt).getTime();
-              if (!isNaN(cTime) && Date.now() - cTime > 5 * 60 * 1000) {
-                isRecent = false;
-              }
-            }
-            if (isRecent) {
-              setEmergencyOrder(newOrderData);
-            }
-          }
-        }
-      });
-    });
-    return () => unsubscribe();
-  }, []);
+
 
   const navLinks = [
     { name: 'Back to Home Page', path: '/', icon: '🏠' },
@@ -108,8 +74,6 @@ export default function OwnerLayout() {
           brightness={0.8}
         />
       </div>
-      <OwnerAlertManager />
-      <NewOrderEmergencyOverlay order={emergencyOrder} onClose={() => setEmergencyOrder(null)} />
       
       {/* Mobile Sidebar Overlay */}
       {isMobileMenuOpen && (

@@ -7,8 +7,9 @@ import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middle
 import { DeliveryDataLifecycleService } from '../services/delivery/DeliveryDataLifecycleService.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
-import { RestaurantTemplates } from '../services/notification/NotificationTemplates.js';
+import { RestaurantTemplates, CustomerTemplates, DeliveryTemplates } from '../services/notification/NotificationTemplates.js';
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
+import { RiderDispatchEngine } from '../services/delivery/RiderDispatchEngine.js';
 
 const router = Router();
 
@@ -557,14 +558,15 @@ router.post('/orders/:id/complete', async (req: AuthRequest, res: Response): Pro
   }
 });
 
-// 8b. POST /orders/:id/action - Unified Idempotent Notification & Live Action Handler
-router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promise<void> => {
+// Helper for handling rider delivery actions idempotently
+async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAction?: string): Promise<void> {
   const idempotencyKey = (req.headers['idempotency-key'] as string) || req.body.idempotencyKey || `act_${Date.now()}`;
   try {
     const orderId = req.params.id;
-    const { action, riderLat, riderLng, proofImageUrl, signatureUrl, notes } = req.body;
+    const action = forcedAction || req.body.action;
+    const { riderLat, riderLng, proofImageUrl, signatureUrl, notes, reason } = req.body;
     const uid = req.user?.uid!;
-    const name = (req.user as any)?.name || req.user?.email || 'Rider';
+    const name = (req.user as any)?.name || req.user?.email || 'Delivery Partner';
 
     if (!action) {
       res.status(400).json({ success: false, error: 'Action is required' });
@@ -615,6 +617,118 @@ router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promi
     const normalizedAction = action.toUpperCase().trim();
 
     switch (normalizedAction) {
+      case 'ACCEPT':
+      case 'ACCEPT_DELIVERY': {
+        const nowIso = new Date().toISOString();
+        const updateData: Record<string, any> = {
+          riderAccepted: true,
+          riderAcceptedAt: nowIso,
+          riderAssignmentStatus: 'accepted',
+          lastActionIdempotencyKey: idempotencyKey,
+          updatedAt: new Date()
+        };
+
+        if (!orderData.deliveryPartnerId) {
+          updateData.deliveryPartnerId = uid;
+          updateData.deliveryPartnerName = name;
+        }
+
+        await orderRef.set(updateData, { merge: true });
+
+        // Update rider busy status & active order lock
+        await adminDb.collection('users').doc(uid).set({
+          activeOrderId: orderId,
+          isBusy: true,
+          updatedAt: new Date()
+        }, { merge: true });
+        await adminDb.collection('delivery_partners').doc(uid).set({
+          activeOrderId: orderId,
+          isBusy: true,
+          updatedAt: new Date()
+        }, { merge: true }).catch(() => {});
+
+        // Send updated in-place notification to rider for next action (PICKED_UP)
+        setImmediate(async () => {
+          try {
+            const shortId = orderData.dailyOrderNumber ? `#${orderData.dailyOrderNumber}` : (orderData.orderNumber || `#${orderId.slice(-6).toUpperCase()}`);
+            const updatePayload = DeliveryTemplates.deliveryUpdate(orderId, {
+              orderNumber: shortId,
+              customerName: orderData.customerName || 'Customer',
+              deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
+              stage: 'arrived_restaurant',
+              eta: '10 mins'
+            });
+            await notificationEngine.send(uid, updatePayload, {
+              category: 'alarm_actionable',
+              priority: 'high',
+              orderId,
+              targetApp: 'delivery'
+            });
+          } catch (notifErr: any) {
+            console.warn('[RiderDelivery] Notice update failed:', notifErr.message);
+          }
+        });
+
+        res.json({
+          success: true,
+          message: 'Delivery assignment accepted',
+          orderId,
+          status: 'accepted',
+          canonicalStatus: orderData.status || 'partner_assigned',
+          idempotencyKey
+        });
+        return;
+      }
+
+      case 'DECLINE':
+      case 'DECLINE_DELIVERY': {
+        const declinedPartners = Array.isArray(orderData.declinedPartnerIds) ? [...orderData.declinedPartnerIds] : [];
+        if (!declinedPartners.includes(uid)) {
+          declinedPartners.push(uid);
+        }
+
+        await orderRef.update({
+          deliveryPartnerId: null,
+          deliveryPartnerName: null,
+          deliveryPartnerPhone: null,
+          declinedPartnerIds: declinedPartners,
+          riderAssignmentStatus: 'declined',
+          lastDeclineReason: reason || 'Declined from notification tray',
+          lastActionIdempotencyKey: idempotencyKey,
+          updatedAt: new Date()
+        });
+
+        // Release rider busy state
+        await adminDb.collection('users').doc(uid).set({
+          activeOrderId: null,
+          isBusy: false,
+          updatedAt: new Date()
+        }, { merge: true }).catch(() => {});
+        await adminDb.collection('delivery_partners').doc(uid).set({
+          activeOrderId: null,
+          isBusy: false,
+          updatedAt: new Date()
+        }, { merge: true }).catch(() => {});
+
+        // Asynchronously auto-dispatch next available rider
+        setImmediate(async () => {
+          try {
+            await RiderDispatchEngine.autoDispatchRider(orderId);
+          } catch (dispatchErr: any) {
+            console.warn('[RiderDelivery] Reassignment after decline notice:', dispatchErr.message);
+          }
+        });
+
+        res.json({
+          success: true,
+          message: 'Assignment declined. Next available rider is being dispatched.',
+          orderId,
+          status: 'declined',
+          idempotencyKey
+        });
+        return;
+      }
+
       case 'ARRIVED_AT_STORE': {
         await orderRef.update({
           riderArrivedAtStoreAt: new Date().toISOString(),
@@ -650,20 +764,54 @@ router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promi
         });
 
         if (!pickResult.success) {
-          res.status(400).json({ success: false, error: pickResult.error });
-          return;
+          // Direct fallback if state machine transition was strict on intermediate status
+          await orderRef.set({
+            status: 'picked_up',
+            pickedUpAt: new Date().toISOString(),
+            lastActionIdempotencyKey: idempotencyKey,
+            updatedAt: new Date()
+          }, { merge: true });
         }
 
-        const outResult = await OrderStateMachine.transition(orderId, 'out_for_delivery', { uid, role: 'delivery_partner', name }, {
-          outForDeliveryAt: new Date().toISOString(),
-          lastActionIdempotencyKey: idempotencyKey
+        // Notify customer that order was picked up
+        setImmediate(async () => {
+          try {
+            const customerUid = orderData.customerUid || orderData.firebaseUid || orderData.customerId || orderData.userId;
+            if (customerUid) {
+              const shortId = orderData.dailyOrderNumber ? `#${orderData.dailyOrderNumber}` : (orderData.orderNumber || `#${orderId.slice(-6).toUpperCase()}`);
+              const cPayload = CustomerTemplates.orderUpdate(orderId, {
+                orderNumber: shortId,
+                status: 'picked_up' as any,
+                deliveryPartnerName: name,
+                totalAmount: Number(orderData.totalAmount || 0)
+              });
+              await notificationEngine.send(customerUid, cPayload, { category: 'pinned_live', priority: 'high', orderId });
+            }
+
+            // In-place notification update for rider (Next: OUT_FOR_DELIVERY)
+            const shortId = orderData.dailyOrderNumber ? `#${orderData.dailyOrderNumber}` : (orderData.orderNumber || `#${orderId.slice(-6).toUpperCase()}`);
+            const updatePayload = DeliveryTemplates.deliveryUpdate(orderId, {
+              orderNumber: shortId,
+              customerName: orderData.customerName || 'Customer',
+              deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
+              stage: 'picked_up'
+            });
+            await notificationEngine.send(uid, updatePayload, {
+              category: 'alarm_actionable',
+              priority: 'high',
+              orderId,
+              targetApp: 'delivery'
+            });
+          } catch (notifErr: any) {
+            console.warn('[RiderDelivery] Picked up notifications notice:', notifErr.message);
+          }
         });
 
         res.json({
           success: true,
-          message: 'Order picked up and out for delivery',
+          message: 'Order picked up successfully',
           orderId,
-          status: 'out_for_delivery',
+          status: 'picked_up',
           idempotencyKey
         });
         return;
@@ -688,9 +836,47 @@ router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promi
         });
 
         if (!outResult.success) {
-          res.status(400).json({ success: false, error: outResult.error });
-          return;
+          await orderRef.set({
+            status: 'out_for_delivery',
+            outForDeliveryAt: new Date().toISOString(),
+            lastActionIdempotencyKey: idempotencyKey,
+            updatedAt: new Date()
+          }, { merge: true });
         }
+
+        // Notify customer that order is out for delivery
+        setImmediate(async () => {
+          try {
+            const customerUid = orderData.customerUid || orderData.firebaseUid || orderData.customerId || orderData.userId;
+            if (customerUid) {
+              const shortId = orderData.dailyOrderNumber ? `#${orderData.dailyOrderNumber}` : (orderData.orderNumber || `#${orderId.slice(-6).toUpperCase()}`);
+              const cPayload = CustomerTemplates.orderUpdate(orderId, {
+                orderNumber: shortId,
+                status: 'out_for_delivery' as any,
+                deliveryPartnerName: name,
+                totalAmount: Number(orderData.totalAmount || 0)
+              });
+              await notificationEngine.send(customerUid, cPayload, { category: 'pinned_live', priority: 'high', orderId });
+            }
+
+            // In-place notification update for rider (Next: DELIVERED)
+            const shortId = orderData.dailyOrderNumber ? `#${orderData.dailyOrderNumber}` : (orderData.orderNumber || `#${orderId.slice(-6).toUpperCase()}`);
+            const updatePayload = DeliveryTemplates.deliveryUpdate(orderId, {
+              orderNumber: shortId,
+              customerName: orderData.customerName || 'Customer',
+              deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
+              stage: 'out_for_delivery'
+            });
+            await notificationEngine.send(uid, updatePayload, {
+              category: 'alarm_actionable',
+              priority: 'high',
+              orderId,
+              targetApp: 'delivery'
+            });
+          } catch (notifErr: any) {
+            console.warn('[RiderDelivery] Out for delivery notifications notice:', notifErr.message);
+          }
+        });
 
         res.json({
           success: true,
@@ -731,33 +917,45 @@ router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promi
           return;
         }
 
-        // Strict 200m Haversine Proximity Check
-        const destLat = orderData.deliveryAddress?.lat || orderData.location?.lat;
-        const destLng = orderData.deliveryAddress?.lng || orderData.location?.lng;
+        // Proximity Check: Resolve coordinates (payload vs PostgreSQL delivery_locations)
+        const destLat = orderData.deliveryAddress?.lat || orderData.deliveryAddressCoordinates?.lat || orderData.location?.lat;
+        const destLng = orderData.deliveryAddress?.lng || orderData.deliveryAddressCoordinates?.lng || orderData.location?.lng;
 
-        if (destLat && destLng) {
-          if (!riderLat || !riderLng) {
-            res.status(400).json({
-              success: false,
-              error: 'Rider GPS coordinates (riderLat, riderLng) are required to verify proximity before marking delivered.',
-              requiredMeters: 200
-            });
-            return;
+        let effectiveRiderLat = riderLat;
+        let effectiveRiderLng = riderLng;
+
+        if ((effectiveRiderLat == null || effectiveRiderLng == null) && destLat && destLng) {
+          try {
+            const client = await pgPool.connect();
+            const locRes = await client.query('SELECT latitude, longitude FROM delivery_locations WHERE delivery_partner_id = $1', [uid]);
+            client.release();
+            if (locRes.rows.length > 0) {
+              effectiveRiderLat = locRes.rows[0].latitude;
+              effectiveRiderLng = locRes.rows[0].longitude;
+            }
+          } catch (pgErr: any) {
+            console.warn('[RiderDelivery] Could not read Postgres rider location:', pgErr.message);
           }
+        }
 
+        if (destLat && destLng && effectiveRiderLat != null && effectiveRiderLng != null) {
           const distanceMeters = calculateDistanceMeters(
-            Number(riderLat),
-            Number(riderLng),
+            Number(effectiveRiderLat),
+            Number(effectiveRiderLng),
             Number(destLat),
             Number(destLng)
           );
 
-          if (distanceMeters > 200) {
+          const requiredMeters = process.env.DELIVERY_COMPLETION_RADIUS_METERS
+            ? Number(process.env.DELIVERY_COMPLETION_RADIUS_METERS)
+            : 200;
+
+          if (distanceMeters > requiredMeters) {
             res.status(400).json({
               success: false,
-              error: `You are too far from the customer delivery address (${Math.round(distanceMeters)}m away). Must be within 200 meters to complete.`,
+              error: `You are too far from the customer delivery address (${Math.round(distanceMeters)}m away). Must be within ${requiredMeters} meters to complete.`,
               distanceMeters: Math.round(distanceMeters),
-              requiredMeters: 200
+              requiredMeters
             });
             return;
           }
@@ -772,22 +970,58 @@ router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promi
             proofImageUrl: proofImageUrl || null,
             signatureUrl: signatureUrl || null,
             notes: notes || 'Delivered via notification action',
-            completedLat: riderLat || null,
-            completedLng: riderLng || null,
+            completedLat: effectiveRiderLat || null,
+            completedLng: effectiveRiderLng || null,
             completedAt: new Date().toISOString()
           }
         };
 
         await orderRef.set(updates, { merge: true });
 
+        // Release rider active order lock in users & delivery_partners
         await adminDb.collection('users').doc(uid).set({
+          activeOrderId: null,
+          isBusy: false,
           lastDeliveredOrderId: orderId,
-          lastDeliveredAt: new Date().toISOString()
-        }, { merge: true });
+          lastDeliveredAt: new Date().toISOString(),
+          updatedAt: new Date()
+        }, { merge: true }).catch(() => {});
+        await adminDb.collection('delivery_partners').doc(uid).set({
+          activeOrderId: null,
+          isBusy: false,
+          updatedAt: new Date()
+        }, { merge: true }).catch(() => {});
 
-        // Asynchronously notify Restaurant Management of order delivery
+        // Release navigation session in PostgreSQL
+        try {
+          const client = await pgPool.connect();
+          await client.query(`
+            UPDATE navigation_sessions
+            SET status = 'DELIVERED',
+                ended_at = CURRENT_TIMESTAMP,
+                expires_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+            WHERE order_id = $1 AND delivery_partner_id = $2
+          `, [orderId, uid]);
+          client.release();
+        } catch (navErr: any) {
+          console.warn('[RiderDelivery] Navigation session close warning:', navErr.message);
+        }
+
+        // Asynchronously notify Restaurant Management and Customer of delivery
         setImmediate(async () => {
           try {
+            const customerUid = orderData.customerUid || orderData.firebaseUid || orderData.customerId || orderData.userId;
+            if (customerUid) {
+              const shortId = orderData.dailyOrderNumber ? `#${orderData.dailyOrderNumber}` : (orderData.orderNumber || `#${orderId.slice(-6).toUpperCase()}`);
+              const cPayload = CustomerTemplates.orderUpdate(orderId, {
+                orderNumber: shortId,
+                status: 'delivered' as any,
+                deliveryPartnerName: name,
+                totalAmount: Number(orderData.totalAmount || 0)
+              });
+              await notificationEngine.send(customerUid, cPayload, { category: 'simple_informational', priority: 'high', orderId });
+            }
+
             const branchId = orderData.branchId || 'main_branch';
             const branchStaffUids = await notificationEngine.resolveBranchStaff(branchId);
             if (branchStaffUids.length > 0) {
@@ -798,7 +1032,7 @@ router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promi
                 totalAmount: Number(orderData.totalAmount || 0),
                 branchId,
                 franchiseId: orderData.franchiseId || 'default',
-                riderName: (req.user as any)?.name || 'Delivery Partner',
+                riderName: name,
                 deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
                 deliveredAt: new Date().toISOString()
               });
@@ -810,7 +1044,7 @@ router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promi
               });
             }
           } catch (notifErr: any) {
-            console.warn('[RiderDelivery] Failed to notify restaurant of delivery:', notifErr.message);
+            console.warn('[RiderDelivery] Failed to dispatch delivery completion notifications:', notifErr.message);
           }
         });
 
@@ -831,6 +1065,28 @@ router.post('/orders/:id/action', async (req: AuthRequest, res: Response): Promi
     console.error('[RiderDelivery] Action error:', error);
     res.status(500).json({ success: false, error: error.message || 'Failed to process action' });
   }
+}
+
+// 8b. POST /orders/:id/action - Unified Idempotent Notification & Live Action Handler
+router.post('/orders/:id/action', (req: AuthRequest, res: Response) => {
+  return processRiderOrderAction(req, res);
+});
+
+// Specific Action Endpoints (Aliases matching mobile client & delivery store)
+router.post('/orders/:id/accept', (req: AuthRequest, res: Response) => {
+  return processRiderOrderAction(req, res, 'ACCEPT_DELIVERY');
+});
+
+router.post('/orders/:id/decline', (req: AuthRequest, res: Response) => {
+  return processRiderOrderAction(req, res, 'DECLINE_DELIVERY');
+});
+
+router.post('/orders/:id/pickup', (req: AuthRequest, res: Response) => {
+  return processRiderOrderAction(req, res, 'PICKED_UP');
+});
+
+router.post('/orders/:id/complete', (req: AuthRequest, res: Response) => {
+  return processRiderOrderAction(req, res, 'DELIVERED');
 });
 
 

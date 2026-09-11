@@ -373,6 +373,8 @@ import franchiseRoutes from './routes/franchise.routes.js';
 import riderDeliveryRoutes from './routes/riderDelivery.routes.js';
 app.use('/delivery/rider', riderDeliveryRoutes);
 app.use('/api/delivery/rider', riderDeliveryRoutes);
+app.use('/api/rider-delivery', riderDeliveryRoutes);
+app.use('/rider-delivery', riderDeliveryRoutes);
 app.use('/franchises', franchiseRoutes);
 app.use('/api/franchises', franchiseRoutes);
 app.use('/restaurant-managers', restaurantManagerRoutes);

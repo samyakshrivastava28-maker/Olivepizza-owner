@@ -221,11 +221,28 @@ export class FirestoreListener {
               try {
                 const customerUid = orderData.customerUid || orderData.firebaseUid || orderData.customerId || orderData.userId || orderData.user_id;
                 if (customerUid) {
+                  let itemsSummary = '';
+                  if (Array.isArray(orderData.items) && orderData.items.length > 0) {
+                    itemsSummary = orderData.items.map((i: any) => typeof i === 'string' ? i : `${i.quantity || 1}× ${i.name || 'Item'}`).join(', ');
+                  } else if (orderData.itemsSummary) {
+                    itemsSummary = String(orderData.itemsSummary);
+                  }
+                  const stepMap: Record<string, number> = {
+                    pending: 1, accepted: 2, preparing: 3, ready: 4, packed: 4, partner_assigned: 5, picked_up: 5, out_for_delivery: 6, delivered: 7, cancelled: 0
+                  };
+                  const currentStep = stepMap[currentStatus] || 1;
+                  const etaMinutes = orderData.estimatedDeliveryMinutes || (orderData.estimatedDeliveryTime ? parseInt(orderData.estimatedDeliveryTime) : 25);
+
                   const customerPayload = CustomerTemplates.orderUpdate(orderData.id, {
                     orderNumber,
                     status: currentStatus as any,
+                    step: currentStep,
+                    eta: orderData.estimatedDeliveryTime || `${etaMinutes} mins`,
+                    etaMinutes,
                     totalAmount,
                     deliveryPartnerName: orderData.deliveryPartnerName,
+                    riderPhone: orderData.deliveryPartnerPhone || orderData.riderPhone,
+                    itemsSummary,
                     cancellationReason: orderData.cancellationReason,
                   });
                   await notificationEngine.send(customerUid, customerPayload, {
@@ -234,6 +251,43 @@ export class FirestoreListener {
                     tag: `order_${orderData.id}`,
                     targetApp: 'customer',
                   });
+
+                  // ActivityKit APNs Dispatch
+                  try {
+                    const activityRes = await pgPool.query(
+                      `SELECT token FROM order_activity_tokens WHERE order_id = $1`,
+                      [orderData.id]
+                    );
+                    if (activityRes.rows.length > 0) {
+                      const isEnd = currentStatus === 'delivered' || currentStatus === 'cancelled';
+                      const livePayload = CustomerTemplates.liveActivityUpdate(orderData.id, {
+                        event: isEnd ? 'end' : (currentStatus === 'accepted' ? 'start' : 'update'),
+                        status: currentStatus as any,
+                        step: currentStep,
+                        orderNumber,
+                        itemsSummary: itemsSummary || 'Olive Pizza Order',
+                        totalAmount,
+                        etaMinutes,
+                        riderName: orderData.deliveryPartnerName || '',
+                        riderPhone: orderData.deliveryPartnerPhone || orderData.riderPhone || '',
+                        restaurantName: 'Olive Pizza',
+                        dismissalDate: isEnd ? Math.floor(Date.now() / 1000) + 300 : undefined,
+                      });
+
+                      const tokens = activityRes.rows.map(r => r.token);
+                      await notificationEngine.sendToTokens(tokens, livePayload, {
+                        category: 'pinned_live',
+                        orderId: orderData.id,
+                        targetApp: 'customer',
+                      });
+
+                      if (isEnd) {
+                        await pgPool.query(`DELETE FROM order_activity_tokens WHERE order_id = $1`, [orderData.id]).catch(() => {});
+                      }
+                    }
+                  } catch (actErr: any) {
+                    console.warn('[FirestoreListener] ActivityKit push dispatch warning:', actErr.message);
+                  }
                 }
 
                 // If partner assigned / ready, notify assigned delivery partner
