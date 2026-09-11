@@ -73,20 +73,20 @@ router.get('/me', async (req: AuthRequest, res: Response): Promise<void> => {
         id: uid,
         name: userData.name || userData.displayName || 'Rider',
         email: userData.email || req.user?.email || '',
-        phone: userData.phone || userData.phoneNumber || '+91 91799 44445',
+        phone: userData.phone || userData.phoneNumber || null,
         role: 'delivery_partner',
-        vehicleType: userData.vehicleType || 'Motorcycle / Scooter',
-        vehicleNumber: userData.vehicleNumber || 'CG-08-AB-1234',
+        vehicleType: userData.vehicleType || null,
+        vehicleNumber: userData.vehicleNumber || null,
         organizationId: userData.organizationId || 'org_olive_pizza',
         franchiseId: userData.franchiseId || 'fra_primary',
         branchId,
-        branchName: branchData?.name || 'Olive Pizza — Rajnandgaon (Main Branch)',
-        branchAddress: branchData?.address || 'Dongargaon Rd, Gokul Nagar, Rajnandgaon',
-        branchPhone: branchData?.phone || '+91 91799 44445',
+        branchName: branchData?.name || null,
+        branchAddress: branchData?.address || null,
+        branchPhone: branchData?.phone || null,
         isOnline: userData.isOnline !== false,
         workingSchedule,
-        joiningDate: userData.createdAt || '2026-01-15T10:00:00.000Z',
-        emergencyContact: userData.emergencyContact || { name: 'Support Hotline', phone: '+91 91799 44445' }
+        joiningDate: userData.createdAt || null,
+        emergencyContact: userData.emergencyContact || (branchData?.phone ? { name: 'Support Hotline', phone: branchData.phone } : null)
       }
     });
   } catch (error: any) {
@@ -131,17 +131,7 @@ router.get('/today', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     });
 
-    // Provide clean defaults if fresh day
-    if (assignedCount === 0) {
-      assignedCount = 6;
-      completedCount = 5;
-      activeCount = 1;
-      totalDistanceKm = 28.4;
-      totalMinutes = 5 * 22;
-      totalEarnings = 240;
-    }
-
-    const avgTime = completedCount > 0 ? Math.round(totalMinutes / completedCount) : 22;
+    const avgTime = completedCount > 0 ? Math.round(totalMinutes / completedCount) : 0;
 
     res.json({
       success: true,
@@ -219,354 +209,36 @@ router.get('/history', async (req: AuthRequest, res: Response): Promise<void> =>
   }
 });
 
-// 6. POST /orders/:id/accept - Accept Assigned Delivery (Idempotent & Scoped)
-router.post('/orders/:id/accept', async (req: AuthRequest, res: Response): Promise<void> => {
-  const requestId = `req_acc_dlv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  try {
-    const orderId = req.params.id;
-    const userRole = (req.user?.role || '').toLowerCase();
-    const uid = req.user?.uid!;
-    const name = (req.user as any)?.name || req.user?.email || 'Rider';
-
-    // Backend-level Owner Read-Only Enforcement
-    if (userRole === 'owner' || userRole === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
-      res.status(403).json({
-        success: false,
-        error: 'Forbidden: Owner has read-only operational authority. Deliveries must be accepted by assigned delivery partners.',
-        requestId
-      });
-      return;
-    }
-
-    if (userRole !== 'delivery_partner' && userRole !== 'delivery') {
-      res.status(403).json({ success: false, error: 'Forbidden: Delivery partner authorization required', requestId });
-      return;
-    }
-
-    const orderRef = adminDb.collection('orders').doc(orderId);
-    const orderDoc = await orderRef.get();
-    if (!orderDoc.exists) {
-      res.status(404).json({ success: false, error: 'Order not found', requestId });
-      return;
-    }
-
-    const orderData = orderDoc.data()!;
-
-    // Idempotency: if already accepted by this rider, return 200
-    if (orderData.deliveryPartnerId === uid && ['partner_assigned', 'ready', 'picked_up', 'out_for_delivery'].includes(orderData.status)) {
-      res.json({
-        success: true,
-        message: 'Delivery already accepted by you',
-        orderId,
-        status: orderData.status,
-        duplicate: true,
-        requestId
-      });
-      return;
-    }
-
-    // Stale check: if already assigned to another rider
-    if (orderData.deliveryPartnerId && orderData.deliveryPartnerId !== uid) {
-      res.status(409).json({
-        success: false,
-        error: 'Action no longer available: This delivery has already been assigned to another partner.',
-        requestId
-      });
-      return;
-    }
-
-    const userDoc = await adminDb.collection('users').doc(uid).get().catch(() => null);
-    const userData = userDoc && userDoc.exists ? userDoc.data() : {};
-    const deliveryPartnerDetails = {
-      id: uid,
-      name,
-      phone: userData?.phone || userData?.phoneNumber || (req.user as any)?.phone || '+91 91799 44445',
-      photoUrl: userData?.photoUrl || userData?.avatar || null,
-      vehicleType: userData?.vehicleType || 'Scooter',
-      vehicleNumber: userData?.vehicleNumber || ''
-    };
-
-    const result = await OrderStateMachine.transition(orderId, 'partner_assigned', { uid, role: 'delivery_partner', name }, {
-      deliveryPartnerId: uid,
-      deliveryPartnerName: name,
-      deliveryPartnerPhone: deliveryPartnerDetails.phone,
-      deliveryPartnerDetails,
-      acceptedAt: new Date().toISOString()
-    });
-
-    if (!result.success) {
-      res.status(400).json({ success: false, error: result.error, requestId });
-      return;
-    }
-
-    res.json({
-      success: true,
-      message: 'Delivery accepted successfully',
-      orderId,
-      status: 'partner_assigned',
-      requestId
-    });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message || 'Failed to accept delivery', requestId });
-  }
-});
-
-// 6b. POST /orders/:id/decline - Decline Assigned Delivery & Trigger Next Rider Reassignment
-router.post('/orders/:id/decline', async (req: AuthRequest, res: Response): Promise<void> => {
-  const requestId = `req_dec_dlv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  try {
-    const orderId = req.params.id;
-    const uid = req.user?.uid!;
-    const userRole = (req.user?.role || '').toLowerCase();
-
-    if (userRole === 'owner' || userRole === 'admin') {
-      res.status(403).json({
-        success: false,
-        error: 'Forbidden: Owner has read-only authority. Rejection/decline must be performed by delivery partners.',
-        code: 'OWNER_READ_ONLY_FORBIDDEN',
-        requestId
-      });
-      return;
-    }
-
-    if (userRole !== 'delivery_partner' && userRole !== 'delivery') {
-      res.status(403).json({ success: false, error: 'Forbidden: Delivery partner authorization required', requestId });
-      return;
-    }
-
-    const orderRef = adminDb.collection('orders').doc(orderId);
-    const orderDoc = await orderRef.get();
-    if (!orderDoc.exists) {
-      res.status(404).json({ success: false, error: 'Order not found', requestId });
-      return;
-    }
-
-    const orderData = orderDoc.data()!;
-
-    // Stale check: cannot decline an order that is already picked up or out for delivery
-    if (['picked_up', 'out_for_delivery', 'delivered'].includes(orderData.status)) {
-      res.status(409).json({
-        success: false,
-        error: `Cannot decline order #${orderData.orderNumber || orderId} because it is already ${orderData.status}`,
-        requestId
-      });
-      return;
-    }
-
-    const { FieldValue } = await import('firebase-admin/firestore');
-    await orderRef.update({
-      declinedPartnerIds: FieldValue.arrayUnion(uid),
-      deliveryPartnerId: null,
-      deliveryPartnerName: null,
-      deliveryPartnerPhone: null,
-      status: 'ready',
-      updatedAt: new Date()
-    });
-
-    // Release rider lock upon decline
-    adminDb.collection('users').doc(uid).set({ activeOrderId: null }, { merge: true }).catch(() => {});
-    adminDb.collection('delivery_partners').doc(uid).set({ activeOrderId: null }, { merge: true }).catch(() => {});
-
-    // Auto-dispatch to next candidate
-    const { RiderDispatchEngine } = await import('../services/delivery/RiderDispatchEngine.js');
-    RiderDispatchEngine.autoDispatchRider(orderId).catch((err: any) => {
-      console.warn('[RiderDecline] Reassignment autoDispatch notice:', err.message);
-    });
-
-    res.json({
-      success: true,
-      message: 'Delivery assignment declined. Reassigning to next available partner.',
-      orderId,
-      reassigned: true,
-      requestId
-    });
-  } catch (error: any) {
-    console.error('[RiderDelivery] Decline error:', error);
-    res.status(500).json({ success: false, error: error.message || 'Failed to decline delivery', requestId });
-  }
-});
-
-// 7. POST /orders/:id/pickup - Confirm Pickup from Restaurant
-router.post('/orders/:id/pickup', async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const orderId = req.params.id;
-    const uid = req.user?.uid!;
-    const userRole = (req.user?.role || '').toLowerCase();
-    const name = (req.user as any)?.name || req.user?.email || 'Rider';
-
-    if (userRole === 'owner' || userRole === 'admin') {
-      res.status(403).json({
-        success: false,
-        error: 'Forbidden: Owner has read-only authority. Pickup must be performed by delivery partners.',
-        code: 'OWNER_READ_ONLY_FORBIDDEN'
-      });
-      return;
-    }
-
-    if (userRole !== 'delivery_partner' && userRole !== 'delivery') {
-      res.status(403).json({ success: false, error: 'Forbidden: Delivery partner authorization required' });
-      return;
-    }
-
-    const orderDoc = await adminDb.collection('orders').doc(orderId).get();
-    if (!orderDoc.exists) {
-      res.status(404).json({ error: 'Order not found' });
-      return;
-    }
-
-    const orderData = orderDoc.data()!;
-    // Ownership check: partner can only pick up their own assigned order
-    if (
-      orderData.deliveryPartnerId &&
-      orderData.deliveryPartnerId !== uid
-    ) {
-      res.status(403).json({ error: 'Forbidden: This order is assigned to a different delivery partner.' });
-      return;
-    }
-
-    // Step 1: Transition to picked_up
-    const pickResult = await OrderStateMachine.transition(orderId, 'picked_up', { uid, role: 'delivery_partner', name });
-    if (!pickResult.success) {
-      res.status(400).json({ error: pickResult.error });
-      return;
-    }
-
-    // Step 2: Transition to out_for_delivery
-    const outResult = await OrderStateMachine.transition(orderId, 'out_for_delivery', { uid, role: 'delivery_partner', name });
-    if (!outResult.success) {
-      res.status(400).json({ error: outResult.error });
-      return;
-    }
-
-    res.json({ success: true, message: 'Order picked up and out for delivery', orderId, status: 'out_for_delivery' });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to confirm pickup' });
-  }
-});
-
-// 8. POST /orders/:id/complete - Complete Delivery (Strict 100m Proximity Check + Proof)
-router.post('/orders/:id/complete', async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const orderId = req.params.id;
-    const { riderLat, riderLng, proofImageUrl, signatureUrl, notes } = req.body;
-    const uid = req.user?.uid!;
-    const userRole = (req.user?.role || '').toLowerCase();
-
-    if (userRole === 'owner' || userRole === 'admin') {
-      res.status(403).json({
-        success: false,
-        error: 'Forbidden: Owner has read-only authority. Delivery completion must be performed by delivery partners.',
-        code: 'OWNER_READ_ONLY_FORBIDDEN'
-      });
-      return;
-    }
-
-    if (userRole !== 'delivery_partner' && userRole !== 'delivery') {
-      res.status(403).json({ success: false, error: 'Forbidden: Delivery partner authorization required' });
-      return;
-    }
-
-    const orderRef = adminDb.collection('orders').doc(orderId);
-    const orderDoc = await orderRef.get();
-
-    if (!orderDoc.exists) {
-      res.status(404).json({ error: 'Order not found' });
-      return;
-    }
-
-    const orderData = orderDoc.data()!;
-
-    // Ownership check: delivery partner can only complete their own assigned order
-    if (
-      orderData.deliveryPartnerId &&
-      orderData.deliveryPartnerId !== uid
-    ) {
-      res.status(403).json({ error: 'Forbidden: This order is assigned to a different delivery partner.' });
-      return;
-    }
-
-    // Strict 100-meter proximity rule (server-side Haversine, no silent tolerance).
-    // Requires rider GPS coordinates when delivery destination GPS is available.
-    const destLat = orderData.deliveryAddress?.lat || orderData.location?.lat;
-    const destLng = orderData.deliveryAddress?.lng || orderData.location?.lng;
-
-    if (destLat && destLng) {
-      if (!riderLat || !riderLng) {
-        res.status(400).json({
-          error: 'Rider GPS coordinates (riderLat, riderLng) are required to verify proximity before marking delivered.',
-          requiredMeters: 200
-        });
-        return;
-      }
-
-      const distanceMeters = calculateDistanceMeters(
-        Number(riderLat),
-        Number(riderLng),
-        Number(destLat),
-        Number(destLng)
-      );
-
-      // Strict 100m condition — plan v2.1, Section 8.
-      // No GPS drift tolerance is applied server-side. Any tolerance must be
-      // an explicit approved business requirement and documented in the plan.
-      if (distanceMeters > 200) {
-        res.status(400).json({
-          error: `You are too far from the customer delivery address (${Math.round(distanceMeters)}m away). Must be within 200 meters of the delivery address to complete.`,
-          distanceMeters: Math.round(distanceMeters),
-          requiredMeters: 200
-        });
-        return;
-      }
-    }
-
-    const proofOfDelivery = {
-      proofImageUrl: proofImageUrl || null,
-      signatureUrl: signatureUrl || null,
-      notes: notes || 'Delivered to customer',
-      completedLat: riderLat || null,
-      completedLng: riderLng || null,
-      completedAt: new Date().toISOString()
-    };
-
-    const transResult = await OrderStateMachine.transition(
-      orderId,
-      'delivered',
-      { uid, role: 'delivery_partner', name: (req.user as any)?.name || req.user?.email || 'Rider' },
-      { proofOfDelivery }
-    );
-
-    if (!transResult.success) {
-      res.status(400).json({ success: false, error: transResult.error || 'Failed to transition order to delivered' });
-      return;
-    }
-
-    // Update rider daily stats in user doc
-    await adminDb.collection('users').doc(uid).set({
-      lastDeliveredOrderId: orderId,
-      lastDeliveredAt: new Date().toISOString()
-    }, { merge: true }).catch(() => {});
-
-    res.json({
-      success: true,
-      message: 'Delivery successfully completed and verified',
-      orderId,
-      status: 'delivered',
-      version: transResult.version
-    });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to complete delivery' });
-  }
-});
-
 // Helper for handling rider delivery actions idempotently
 async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAction?: string): Promise<void> {
-  const idempotencyKey = (req.headers['idempotency-key'] as string) || req.body.idempotencyKey || `act_${Date.now()}`;
+  const idempotencyKey = (req.headers['idempotency-key'] as string) || req.body.requestId || req.body.idempotencyKey || `act_${Date.now()}`;
   try {
     const orderId = req.params.id;
     const action = forcedAction || req.body.action;
-    const { riderLat, riderLng, proofImageUrl, signatureUrl, notes, reason } = req.body;
+    const { riderLat, riderLng, proofImageUrl, signatureUrl, notes, reason, expectedVersion } = req.body;
     const uid = req.user?.uid!;
     const name = (req.user as any)?.name || req.user?.email || 'Delivery Partner';
+    const userRole = (req.user?.role || '').toLowerCase();
+    const userEmail = req.user?.email?.toLowerCase() || '';
+
+    // Backend-level Owner Read-Only Enforcement
+    if (userRole === 'owner' || userRole === 'admin' || userEmail === 'olivepizzarjn@gmail.com' || userEmail === 'webhub2811@gmail.com') {
+      res.status(403).json({
+        success: false,
+        error: 'Forbidden: Owner has read-only operational authority. Deliveries must be handled by assigned delivery partners.',
+        code: 'OWNER_READ_ONLY_FORBIDDEN'
+      });
+      return;
+    }
+
+    if (userRole !== 'delivery_partner' && userRole !== 'delivery') {
+      res.status(403).json({
+        success: false,
+        error: 'Forbidden: Delivery partner authorization required',
+        code: 'DELIVERY_PARTNER_REQUIRED'
+      });
+      return;
+    }
 
     if (!action) {
       res.status(400).json({ success: false, error: 'Action is required' });
@@ -582,6 +254,17 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
     }
 
     const orderData = orderDoc.data()!;
+
+    // Optimistic Concurrency / Version Check
+    if (expectedVersion !== undefined && orderData.version !== undefined && Number(orderData.version) !== Number(expectedVersion)) {
+      res.status(409).json({
+        success: false,
+        error: `Version conflict: order is at version ${orderData.version}, expected ${expectedVersion}`,
+        code: 'VERSION_CONFLICT',
+        currentVersion: orderData.version
+      });
+      return;
+    }
 
     // Ownership check: delivery partner can only execute actions on their own assigned order
     if (
@@ -619,6 +302,18 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
     switch (normalizedAction) {
       case 'ACCEPT':
       case 'ACCEPT_DELIVERY': {
+        // Concurrency check: if already accepted by another rider
+        if (orderData.deliveryPartnerId && orderData.deliveryPartnerId !== uid) {
+          res.status(409).json({
+            success: false,
+            error: 'Order already accepted by another delivery partner.',
+            code: 'ORDER_ALREADY_ACCEPTED',
+            orderId,
+            assignedPartnerId: orderData.deliveryPartnerId
+          });
+          return;
+        }
+
         const nowIso = new Date().toISOString();
         const updateData: Record<string, any> = {
           riderAccepted: true,
