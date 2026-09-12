@@ -26,6 +26,8 @@ export interface AuthRequest extends Request {
   user?: {
     uid: string;
     email?: string;
+    email_verified?: boolean;
+    phone_number?: string;
     role: string;
     organizationId?: string;
     franchiseId?: string;
@@ -137,6 +139,8 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
     req.user = {
       uid,
       email: decodedToken.email,
+      email_verified: decodedToken.email_verified,
+      phone_number: decodedToken.phone_number,
       role,
       organizationId,
       franchiseId,

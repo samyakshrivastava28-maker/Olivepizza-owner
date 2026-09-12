@@ -1,5 +1,6 @@
 import { Router, Response } from 'express';
-import { adminDb } from '../config/firebase.js';
+import crypto from 'crypto';
+import { adminDb, adminAuth } from '../config/firebase.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { FranchisePinService } from '../services/franchise/FranchisePinService.js';
@@ -339,9 +340,15 @@ router.post('/:id/branches', requireRole(['owner', 'admin', 'developer', 'platfo
 });
 
 // ─── 5. RESTAURANT MANAGERS SCOPED TO FRANCHISE ─────────────────────────────
-router.get('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'franchise_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
+    const isOwner = FranchiseScopeService.isGlobalOwner(req.user?.email, req.user?.role);
+    if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
+      res.status(403).json({ error: 'Cross-franchise access denied' });
+      return;
+    }
+
     const bSnap = await adminDb.collection('franchises').get();
     const branchIds = bSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
@@ -351,7 +358,8 @@ router.get('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platfor
     const mgrSnap = await adminDb.collection('restaurant_managers').get();
     const managers: any[] = mgrSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
-      .filter(m => m.franchiseId === id || branchIds.includes(m.branchId));
+      .filter(m => m.franchiseId === id || branchIds.includes(m.branchId))
+      .map(({ pinHash, ...safe }) => safe);
 
     res.json({ success: true, managers });
   } catch (error: any) {
@@ -359,87 +367,231 @@ router.get('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platfor
   }
 });
 
-router.post('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+// GET /:id/restaurant-managers/pending - Owner Approval Queue
+router.get('/:id/restaurant-managers/pending', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const { name, email, phone, branchId, permissions, pin } = req.body;
+    const snap = await adminDb.collection('restaurant_managers').where('status', '==', 'PENDING_OWNER_APPROVAL').get();
+    let pending = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    if (id !== 'all') {
+      pending = pending.filter(m => m.franchiseId === id);
+    }
+    const safePending = pending.map(({ pinHash, ...safe }) => safe);
+    res.json({ success: true, pending: safePending });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Failed to fetch pending managers' });
+  }
+});
 
-    if (!name || !email || !branchId) {
-      res.status(400).json({ error: 'Manager name, email, and branch assignment are required' });
+// POST /:id/restaurant-managers/:managerId/approve - Owner Approves Restaurant Manager
+router.post('/:id/restaurant-managers/:managerId/approve', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, managerId } = req.params;
+    const mgrRef = adminDb.collection('restaurant_managers').doc(managerId);
+    const mgrDoc = await mgrRef.get();
+
+    if (!mgrDoc.exists) {
+      res.status(404).json({ error: 'Restaurant Manager record not found' });
       return;
     }
 
-    let pinHash: string | undefined = undefined;
-    if (pin) {
-      try {
-        pinHash = await FranchisePinService.hashPin(pin);
-      } catch (pinErr: any) {
-        res.status(400).json({ error: pinErr.message || 'Invalid PIN' });
-        return;
-      }
+    const now = new Date().toISOString();
+    await mgrRef.set({
+      status: 'APPROVED',
+      approvedAt: now,
+      approvedByUid: req.user?.uid || 'owner',
+      approvedByEmail: req.user?.email || 'owner@olivepizza.in',
+      updatedAt: now
+    }, { merge: true });
+
+    // Also update users collection if exists
+    const uid = mgrDoc.data()?.uid || managerId;
+    await adminDb.collection('users').doc(uid).set({
+      role: 'restaurant_manager',
+      status: 'APPROVED',
+      isActive: true,
+      updatedAt: now
+    }, { merge: true }).catch(() => {});
+
+    await FranchiseScopeService.logFranchiseAudit({
+      franchiseId: id,
+      actorUid: req.user?.uid || 'owner',
+      actorEmail: req.user?.email || 'owner@olivepizza.in',
+      actionType: 'RESTAURANT_MANAGER_APPROVED',
+      entityType: 'restaurant_manager',
+      entityId: managerId,
+      details: { managerId, email: mgrDoc.data()?.email }
+    });
+
+    res.json({ success: true, message: 'Restaurant Manager approved successfully' });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Failed to approve restaurant manager' });
+  }
+});
+
+// POST /:id/restaurant-managers/:managerId/reject - Owner Rejects Restaurant Manager
+router.post('/:id/restaurant-managers/:managerId/reject', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, managerId } = req.params;
+    const { reason } = req.body;
+    const mgrRef = adminDb.collection('restaurant_managers').doc(managerId);
+    const mgrDoc = await mgrRef.get();
+
+    if (!mgrDoc.exists) {
+      res.status(404).json({ error: 'Restaurant Manager record not found' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    await mgrRef.set({
+      status: 'REJECTED',
+      rejectionReason: reason || 'Application rejected by platform owner',
+      rejectedAt: now,
+      rejectedByUid: req.user?.uid || 'owner',
+      rejectedByEmail: req.user?.email || 'owner@olivepizza.in',
+      updatedAt: now
+    }, { merge: true });
+
+    await FranchiseScopeService.logFranchiseAudit({
+      franchiseId: id,
+      actorUid: req.user?.uid || 'owner',
+      actorEmail: req.user?.email || 'owner@olivepizza.in',
+      actionType: 'RESTAURANT_MANAGER_REJECTED',
+      entityType: 'restaurant_manager',
+      entityId: managerId,
+      details: { managerId, reason }
+    });
+
+    res.json({ success: true, message: 'Restaurant Manager request rejected' });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Failed to reject restaurant manager' });
+  }
+});
+
+// POST /:id/managers - Provision Restaurant Manager (Max 1 per franchise)
+router.post('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const isOwner = FranchiseScopeService.isGlobalOwner(req.user?.email, req.user?.role);
+    if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
+      res.status(403).json({ error: 'Cross-franchise access denied' });
+      return;
+    }
+
+    const { name, email, phone, branchId, permissions, pin } = req.body;
+
+    if (!name || !email) {
+      res.status(400).json({ error: 'Manager name and email are required' });
+      return;
+    }
+
+    if (!pin || !/^\d{4}$/.test(String(pin).trim())) {
+      res.status(400).json({ error: 'A 4-digit PIN is strictly required' });
+      return;
+    }
+
+    let pinHash: string;
+    try {
+      pinHash = await FranchisePinService.hashPin(String(pin).trim());
+    } catch (pinErr: any) {
+      res.status(400).json({ error: pinErr.message || 'Invalid PIN' });
+      return;
+    }
+
+    // Atomic Uniqueness Constraint: Max 1 active/pending Restaurant Manager account per franchise
+    const existingMgrsSnap = await adminDb.collection('restaurant_managers')
+      .where('franchiseId', '==', id)
+      .get();
+    const existingActive = existingMgrsSnap.docs.filter(d => {
+      const data = d.data();
+      return data.isActive !== false && ['APPROVED', 'PENDING_OWNER_APPROVAL'].includes(data.status || 'APPROVED');
+    });
+
+    if (existingActive.length > 0) {
+      res.status(409).json({
+        error: 'A Restaurant Manager account already exists for this franchise. Maximum 1 account permitted.',
+        code: 'LIMIT_EXCEEDED'
+      });
+      return;
     }
 
     const cleanEmail = email.trim().toLowerCase();
     const mgrId = `mgr_${cleanEmail.replace(/[^a-z0-9]/g, '_')}`;
     const now = new Date().toISOString();
 
+    let targetUid = mgrId;
+    try {
+      const existingAuth = await adminAuth.getUserByEmail(cleanEmail);
+      targetUid = existingAuth.uid;
+    } catch (err: any) {
+      if (err.code === 'auth/user-not-found') {
+        const secureRandomPassword = crypto.randomBytes(12).toString('base64url') + '!OP9';
+        const createdAuth = await adminAuth.createUser({
+          email: cleanEmail,
+          password: secureRandomPassword,
+          displayName: name.trim()
+        });
+        targetUid = createdAuth.uid;
+      }
+    }
+
+    const initialStatus = isOwner ? 'APPROVED' : 'PENDING_OWNER_APPROVAL';
+
     const managerData: Record<string, any> = {
       id: mgrId,
+      uid: targetUid,
       name: name.trim(),
       email: cleanEmail,
       phone: phone || '',
       role: 'restaurant_manager',
+      status: initialStatus,
       organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
       franchiseId: id,
-      branchId,
+      branchId: branchId || 'main_branch',
       permissions: permissions || ['dashboard.view', 'orders.live', 'orders.history', 'inventory.view', 'notifications.send'],
       isActive: true,
-      hasPin: Boolean(pinHash),
+      hasPin: true,
+      pinHash,
+      failedPinAttempts: 0,
       createdAt: now,
       updatedAt: now,
-      invitedBy: req.user?.uid || 'owner'
+      invitedBy: req.user?.uid || 'franchise_manager',
+      invitedByEmail: req.user?.email || 'manager@olivepizza.in'
     };
 
-    if (pinHash) {
-      managerData.pinHash = pinHash;
-      managerData.failedPinAttempts = 0;
-      managerData.pinUpdatedAt = now;
+    await adminDb.collection('restaurant_managers').doc(mgrId).set(managerData, { merge: true });
+    if (targetUid !== mgrId) {
+      await adminDb.collection('restaurant_managers').doc(targetUid).set(managerData, { merge: true });
     }
 
-    await adminDb.collection('restaurant_managers').doc(mgrId).set(managerData, { merge: true });
-
-    // Also sync to franchise_users for franchise app lookup
-    await adminDb.collection('franchise_users').doc(mgrId).set({
-      id: mgrId,
+    await adminDb.collection('users').doc(targetUid).set({
+      uid: targetUid,
       name: managerData.name,
       email: cleanEmail,
-      phone: phone || '',
-      role: 'franchise_manager',
+      role: 'restaurant_manager',
+      status: initialStatus,
       franchiseId: id,
-      branchIds: [branchId],
+      branchId: managerData.branchId,
       isActive: true,
-      hasPin: Boolean(pinHash),
-      ...(pinHash ? { pinHash, failedPinAttempts: 0, pinUpdatedAt: now } : {}),
       updatedAt: now
     }, { merge: true }).catch(() => {});
 
     await FranchiseScopeService.logFranchiseAudit({
       organizationId: managerData.organizationId,
       franchiseId: id,
-      branchId,
-      actorUid: req.user?.uid || 'owner',
-      actorEmail: req.user?.email || 'owner@olivepizza.in',
+      branchId: managerData.branchId,
+      actorUid: req.user?.uid || 'franchise_manager',
+      actorEmail: req.user?.email || 'manager@olivepizza.in',
       actionType: 'MANAGER_PROVISIONED',
       entityType: 'restaurant_manager',
       entityId: mgrId,
-      details: { name: managerData.name, email: cleanEmail, branchId, hasPin: Boolean(pinHash) }
+      details: { name: managerData.name, email: cleanEmail, status: initialStatus, branchId: managerData.branchId }
     });
 
-    // Strip pinHash from response
     const { pinHash: _omitted, ...safeManagerData } = managerData;
     res.status(201).json({ success: true, manager: safeManagerData });
   } catch (error: any) {
-    res.status(500).json({ error: 'Failed to provision restaurant manager' });
+    res.status(500).json({ error: error.message || 'Failed to provision restaurant manager' });
   }
 });
 
@@ -631,9 +783,15 @@ router.post('/verify-pin', async (req: AuthRequest, res: Response): Promise<void
 });
 
 // ─── 6. DELIVERY PARTNERS SCOPED TO FRANCHISE ───────────────────────────────
-router.get('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_manager', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
+    const isOwner = FranchiseScopeService.isGlobalOwner(req.user?.email, req.user?.role);
+    if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
+      res.status(403).json({ error: 'Cross-franchise access denied' });
+      return;
+    }
+
     const riderSnap = await adminDb.collection('delivery_partners').get();
     const riders: any[] = riderSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
@@ -645,9 +803,15 @@ router.get('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform_
   }
 });
 
-router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_manager', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
+    const isOwner = FranchiseScopeService.isGlobalOwner(req.user?.email, req.user?.role);
+    if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
+      res.status(403).json({ error: 'Cross-franchise access denied' });
+      return;
+    }
+
     const { name, email, phone, branchId, vehicleNumber } = req.body;
 
     if (!name || !phone) {
@@ -655,47 +819,131 @@ router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform
       return;
     }
 
-    const riderId = `rider_${phone.replace(/[^0-9]/g, '').slice(-6)}_${Date.now().toString().slice(-4)}`;
+    const cleanPhone = phone.trim().replace(/[^\d+]/g, '');
+    const cleanEmail = email ? email.trim().toLowerCase() : `rider.${cleanPhone.replace(/\D/g, '')}@olivepizza.in`;
+    const riderId = `rider_${cleanPhone.replace(/\D/g, '').slice(-6)}_${Date.now().toString().slice(-4)}`;
     const now = new Date().toISOString();
+
+    let targetUid = riderId;
+    try {
+      const existingAuth = await adminAuth.getUserByEmail(cleanEmail);
+      targetUid = existingAuth.uid;
+    } catch (err: any) {
+      if (err.code === 'auth/user-not-found') {
+        const secureRandomPassword = crypto.randomBytes(12).toString('base64url') + '!OP9';
+        const createdAuth = await adminAuth.createUser({
+          email: cleanEmail,
+          password: secureRandomPassword,
+          displayName: name.trim()
+        });
+        targetUid = createdAuth.uid;
+      }
+    }
 
     const riderData = {
       id: riderId,
+      uid: targetUid,
       name: name.trim(),
-      email: email ? email.trim().toLowerCase() : `rider.${riderId}@olivepizza.in`,
-      phone: phone.trim(),
+      email: cleanEmail,
+      phone: cleanPhone,
+      role: 'delivery_partner',
+      phoneVerified: true,
       franchiseId: id,
       branchId: branchId || 'main_branch',
-      vehicleNumber: vehicleNumber || 'CG-08-XX-0000',
+      vehicleNumber: vehicleNumber || '',
       isActive: true,
+      status: 'ACTIVE',
       isOnline: false,
       rating: 5.0,
       totalDeliveries: 0,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      createdBy: req.user?.uid || 'franchise_manager',
+      createdByEmail: req.user?.email || 'manager@olivepizza.in'
     };
 
     await adminDb.collection('delivery_partners').doc(riderId).set(riderData, { merge: true });
+    if (targetUid !== riderId) {
+      await adminDb.collection('delivery_partners').doc(targetUid).set(riderData, { merge: true });
+    }
+
+    await adminDb.collection('users').doc(targetUid).set({
+      uid: targetUid,
+      name: riderData.name,
+      email: cleanEmail,
+      phone: cleanPhone,
+      phoneVerified: true,
+      role: 'delivery_partner',
+      franchiseId: id,
+      branchId: riderData.branchId,
+      isActive: true,
+      vehicleNumber: riderData.vehicleNumber,
+      updatedAt: now
+    }, { merge: true }).catch(() => {});
 
     await FranchiseScopeService.logFranchiseAudit({
       organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
       franchiseId: id,
       branchId: riderData.branchId,
-      actorUid: req.user?.uid || 'owner',
-      actorEmail: req.user?.email || 'owner@olivepizza.in',
+      actorUid: req.user?.uid || 'franchise_manager',
+      actorEmail: req.user?.email || 'manager@olivepizza.in',
       actionType: 'RIDER_PROVISIONED',
       entityType: 'delivery_partner',
       entityId: riderId,
-      details: riderData
+      details: { name: riderData.name, email: cleanEmail, phone: cleanPhone, franchiseId: id }
     });
 
     res.status(201).json({ success: true, rider: riderData });
   } catch (error: any) {
-    res.status(500).json({ error: 'Failed to provision delivery partner' });
+    res.status(500).json({ error: error.message || 'Failed to provision delivery partner' });
+  }
+});
+
+// PATCH /:id/riders/:riderId/status - Toggle Rider Status
+router.patch('/:id/riders/:riderId/status', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_manager', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, riderId } = req.params;
+    const isOwner = FranchiseScopeService.isGlobalOwner(req.user?.email, req.user?.role);
+    if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
+      res.status(403).json({ error: 'Cross-franchise access denied' });
+      return;
+    }
+
+    const { isActive } = req.body;
+    const now = new Date().toISOString();
+
+    await adminDb.collection('delivery_partners').doc(riderId).set({
+      isActive: Boolean(isActive),
+      status: isActive ? 'ACTIVE' : 'INACTIVE',
+      updatedAt: now,
+      updatedBy: req.user?.email || 'manager'
+    }, { merge: true });
+
+    res.json({ success: true, message: `Rider ${isActive ? 'activated' : 'deactivated'} successfully` });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update rider status' });
+  }
+});
+
+// DELETE /:id/riders/:riderId - Delete Rider
+router.delete('/:id/riders/:riderId', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, riderId } = req.params;
+    const isOwner = FranchiseScopeService.isGlobalOwner(req.user?.email, req.user?.role);
+    if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
+      res.status(403).json({ error: 'Cross-franchise access denied' });
+      return;
+    }
+
+    await adminDb.collection('delivery_partners').doc(riderId).delete();
+    res.json({ success: true, message: 'Rider deleted successfully' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to delete rider' });
   }
 });
 
 // ─── 7. POS TERMINAL MANAGEMENT (REGISTER / GENERATE CODE / REVOKE) ────────
-router.get('/:id/pos-terminals', requireRole(['owner', 'admin', 'developer', 'franchise_owner', 'manager', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/:id/pos-terminals', requireRole(['owner', 'admin', 'developer', 'franchise_owner', 'franchise_manager', 'manager', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
     const bSnap = await adminDb.collection('franchises').get();
@@ -729,8 +977,22 @@ router.post('/:id/pos-terminals/register', requireRole(['owner', 'admin', 'devel
       return;
     }
 
+    // Atomic Uniqueness Constraint: Max 1 active/pending POS terminal per franchise
+    const posSnap = await adminDb.collection('pos_terminals').where('franchiseId', '==', id).get();
+    const activeTerminals = posSnap.docs.filter(d => {
+      const data = d.data();
+      return data.isActive !== false && data.activationStatus !== 'REVOKED';
+    });
+
+    if (activeTerminals.length >= 1) {
+      res.status(409).json({
+        error: 'A POS terminal is already provisioned for this franchise. Maximum 1 POS terminal permitted.',
+        code: 'LIMIT_EXCEEDED'
+      });
+      return;
+    }
+
     const termId = `pos_${branchId}_${Date.now().toString().slice(-4)}`;
-    // Generate cryptographically random 6-digit activation code (NOT Math.random())
     const activationCode = FranchisePinService.generateSecureActivationCode();
     const now = new Date().toISOString();
 
@@ -764,7 +1026,92 @@ router.post('/:id/pos-terminals/register', requireRole(['owner', 'admin', 'devel
 
     res.status(201).json({ success: true, terminal: terminalData });
   } catch (error: any) {
-    res.status(500).json({ error: 'Failed to register POS terminal' });
+    res.status(500).json({ error: error.message || 'Failed to register POS terminal' });
+  }
+});
+
+// POST /:id/pos-terminals/:termId/activate - Franchise Manager activates Owner-provisioned POS with PIN
+router.post('/:id/pos-terminals/:termId/activate', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, termId } = req.params;
+    const { pin } = req.body;
+    const isOwner = FranchiseScopeService.isGlobalOwner(req.user?.email, req.user?.role);
+
+    if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
+      res.status(403).json({ error: 'Cross-franchise access denied' });
+      return;
+    }
+
+    if (!pin || !/^\d{4}$/.test(String(pin).trim())) {
+      res.status(400).json({ error: 'Franchise 4-digit PIN is required to activate POS' });
+      return;
+    }
+
+    // Verify caller's PIN
+    const callerUid = req.user!.uid;
+    let userDoc = await adminDb.collection('franchise_users').doc(callerUid).get();
+    if (!userDoc.exists) {
+      userDoc = await adminDb.collection('restaurant_managers').doc(callerUid).get();
+    }
+    if (!userDoc.exists) {
+      userDoc = await adminDb.collection('users').doc(callerUid).get();
+    }
+    if (!userDoc.exists && req.user?.email) {
+      const snap = await adminDb.collection('franchise_users').where('email', '==', req.user.email.toLowerCase()).limit(1).get();
+      if (!snap.empty) userDoc = snap.docs[0];
+      else {
+        const uSnap = await adminDb.collection('users').where('email', '==', req.user.email.toLowerCase()).limit(1).get();
+        if (!uSnap.empty) userDoc = uSnap.docs[0];
+      }
+    }
+
+    if (!userDoc.exists) {
+      res.status(404).json({ error: 'Franchise manager account not found' });
+      return;
+    }
+
+    const pinHash = userDoc.data()?.pinHash;
+    if (!pinHash) {
+      res.status(400).json({ error: 'No PIN configured for your account. Please set a PIN first.' });
+      return;
+    }
+
+    const isMatch = await FranchisePinService.verifyPin(String(pin).trim(), pinHash);
+    if (!isMatch) {
+      res.status(401).json({ error: 'Incorrect Franchise PIN' });
+      return;
+    }
+
+    const termRef = adminDb.collection('pos_terminals').doc(termId);
+    const termDoc = await termRef.get();
+    if (!termDoc.exists) {
+      res.status(404).json({ error: 'POS terminal not found' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    await termRef.set({
+      activationStatus: 'ACTIVATED',
+      isActive: true,
+      activatedAt: now,
+      activatedByUid: callerUid,
+      activatedByEmail: req.user?.email || '',
+      updatedAt: now
+    }, { merge: true });
+
+    await FranchiseScopeService.logFranchiseAudit({
+      franchiseId: id,
+      actorUid: callerUid,
+      actorEmail: req.user?.email || 'manager@olivepizza.in',
+      actionType: 'POS_ACTIVATED',
+      entityType: 'pos_terminal',
+      entityId: termId,
+      details: { activatedAt: now }
+    });
+
+    res.json({ success: true, message: 'POS Terminal activated successfully' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to activate POS terminal' });
   }
 });
 
@@ -1220,26 +1567,8 @@ router.get('/:id/restaurants/:restaurantSlug', async (req: AuthRequest, res: Res
       success: true,
       restaurant: {
         ...branch,
-        managers: branchManagers.length > 0 ? branchManagers : [
-          {
-            id: `mgr_${branch.id}_1`,
-            name: 'Primary Branch Manager',
-            email: branch.restaurantManagerEmail || 'webhub2811@gmail.com',
-            phone: branch.phone || '+91 91799 44445',
-            permissions: ['orders.live', 'orders.history', 'kitchen.kds', 'inventory.view', 'notifications.send'],
-            isActive: true
-          }
-        ],
-        posTerminals: branchTerminals.length > 0 ? branchTerminals : [
-          {
-            id: `pos_${branch.id}_1`,
-            terminalName: `${branch.name} Counter 1`,
-            activationCode: '741852',
-            activationStatus: 'ACTIVATED',
-            isActive: true,
-            isOnline: true
-          }
-        ],
+        managers: branchManagers.map(({ pinHash, ...safe }) => safe),
+        posTerminals: branchTerminals.map(({ activationCode, ...safe }) => safe),
         liveOrdersCount: liveOrders.length,
         operationalAppUrl: 'http://localhost:5176'
       }

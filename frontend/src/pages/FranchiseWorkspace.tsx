@@ -75,6 +75,7 @@ export default function FranchiseWorkspace() {
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [reportsData, setReportsData] = useState<any>(null);
   const [accessAccounts, setAccessAccounts] = useState<any[]>([]);
+  const [pendingManagers, setPendingManagers] = useState<any[]>([]);
 
   // Modals
   const [showAddBranchModal, setShowAddBranchModal] = useState<boolean>(false);
@@ -168,6 +169,12 @@ export default function FranchiseWorkspace() {
       fetchApi(`/api/franchises/${fId}/audit-logs`)
         .then(async (r) => (r.ok ? r.json() : {}))
         .then((d) => setAuditLogs(Array.isArray(d.auditLogs) ? d.auditLogs : []))
+        .catch(() => {});
+
+      // 8. Fetch Pending Restaurant Managers for Owner Approval Queue
+      fetchApi(`/api/franchises/${fId}/restaurant-managers/pending`)
+        .then(async (r) => (r.ok ? r.json() : {}))
+        .then((d) => setPendingManagers(Array.isArray(d.pending) ? d.pending : []))
         .catch(() => {});
 
       setLoading(false);
@@ -353,6 +360,49 @@ export default function FranchiseWorkspace() {
     }
   };
 
+  // Handler: Approve Restaurant Manager (Owner Gate)
+  const handleApproveManager = async (managerId: string) => {
+    if (!franchise) return;
+    setActionLoading(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${franchise.id}/restaurant-managers/${managerId}/approve`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to approve manager');
+
+      toast.success('Restaurant Manager approved successfully! Account is now active.');
+      loadFranchiseWorkspace();
+    } catch (err: any) {
+      toast.error(err.message || 'Approval failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Handler: Reject Restaurant Manager (Owner Gate)
+  const handleRejectManager = async (managerId: string) => {
+    if (!franchise) return;
+    const reason = window.prompt('Enter rejection reason (optional):') || 'Owner discretion';
+    setActionLoading(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${franchise.id}/restaurant-managers/${managerId}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rejectionReason: reason }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to reject manager');
+
+      toast.success('Restaurant Manager application rejected.');
+      loadFranchiseWorkspace();
+    } catch (err: any) {
+      toast.error(err.message || 'Rejection failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[70vh] text-center p-6">
@@ -465,6 +515,7 @@ export default function FranchiseWorkspace() {
       <div className="flex items-center gap-1 overflow-x-auto pb-1 border-b border-slate-800 scrollbar-none text-xs font-semibold">
         {[
           { id: 'overview', label: 'Overview & Analytics', icon: TrendingUp },
+          { id: 'approvals', label: `Manager Approvals (${pendingManagers.length})`, icon: CheckCircle2, badge: pendingManagers.length > 0 ? pendingManagers.length : null },
           { id: 'access', label: `Access Control (${accessAccounts.length})`, icon: ShieldCheck },
           { id: 'live-orders', label: `Live Orders (${liveOrders.length})`, icon: Flame, badge: liveOrders.length > 0 ? liveOrders.length : null },
           { id: 'orders', label: 'Orders History', icon: History },
@@ -497,6 +548,106 @@ export default function FranchiseWorkspace() {
           );
         })}
       </div>
+
+      {/* ─── 2.5 TAB: PENDING RESTAURANT MANAGER APPROVALS ──────────────────────── */}
+      {activeTab === 'approvals' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-amber-500" />
+                <span>Restaurant Manager Approval Queue ({pendingManagers.length})</span>
+              </h3>
+              <p className="text-xs text-slate-400">
+                Franchise-provisioned branch managers require Master Owner authorization before kitchen and restaurant operations access is granted.
+              </p>
+            </div>
+            <button
+              onClick={() => loadFranchiseWorkspace()}
+              className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs transition flex items-center gap-1"
+            >
+              <RefreshCw className="w-3.5 h-3.5" /> Refresh Queue
+            </button>
+          </div>
+
+          {pendingManagers.length === 0 ? (
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center max-w-lg mx-auto space-y-3">
+              <CheckCircle2 className="w-10 h-10 mx-auto text-emerald-500/60" />
+              <h4 className="text-sm font-bold text-white">All Clear — No Pending Approvals</h4>
+              <p className="text-xs text-slate-400">
+                When a Franchise Manager provisions a candidate for Restaurant Manager, their verification profile will appear here for Master Owner review and approval.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {pendingManagers.map((mgr) => (
+                <div key={mgr.id} className="bg-slate-900 border border-amber-500/30 rounded-2xl p-5 space-y-4 shadow-xl relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/5 rounded-full blur-xl pointer-events-none" />
+                  
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h4 className="text-sm font-bold text-white tracking-tight">{mgr.name}</h4>
+                      <p className="text-xs text-slate-400 font-mono mt-0.5">{mgr.email}</p>
+                      {mgr.phone && (
+                        <p className="text-xs text-slate-400 font-mono mt-0.5">{mgr.phone}</p>
+                      )}
+                    </div>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                      PENDING REVIEW
+                    </span>
+                  </div>
+
+                  <div className="bg-slate-950/70 p-3 rounded-xl border border-slate-800 space-y-1.5 text-xs text-slate-300">
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Franchise:</span>
+                      <span className="text-amber-400 font-medium">{franchise.name}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Assigned Branch:</span>
+                      <span className="text-white font-medium">{mgr.branchName || mgr.branchId || 'Primary Branch'}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Email Verification:</span>
+                      <span className={mgr.emailVerified ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold'}>
+                        {mgr.emailVerified ? '✓ Verified' : 'Pending Verification'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Security PIN:</span>
+                      <span className="text-slate-400 font-mono">Hashed (bcrypt 12 rounds)</span>
+                    </div>
+                    {mgr.createdAt && (
+                      <div className="flex justify-between text-[11px] text-slate-500">
+                        <span>Provisioned:</span>
+                        <span>{new Date(mgr.createdAt).toLocaleDateString()}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
+                    <button
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={() => handleRejectManager(mgr.id)}
+                      className="flex-1 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 rounded-xl text-xs font-bold transition disabled:opacity-50"
+                    >
+                      Reject
+                    </button>
+                    <button
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={() => handleApproveManager(mgr.id)}
+                      className="flex-1 py-2 bg-emerald-500 hover:bg-emerald-600 text-black font-bold rounded-xl text-xs transition shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+                    >
+                      Approve Account
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ─── 3. TAB: ACCESS CONTROL ───────────────────────────────────────────── */}
       {activeTab === 'access' && (

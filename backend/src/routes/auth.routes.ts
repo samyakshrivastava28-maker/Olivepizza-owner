@@ -90,7 +90,30 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       emailLower === 'webhub2811@gmail.com' ||
       emailLower === 'olivepizzamaker@gmail.com';
 
-    if (isMasterOwner) {
+    // 1. Enforce Owner Privacy & Operational Isolation
+    // Owner accounts MUST NOT have operational access or impersonation capabilities for Restaurant Management or Delivery
+    if ((isMasterOwner || req.user?.role === 'owner') && (targetApp === 'RESTAURANT_MANAGER' || targetApp === 'DELIVERY')) {
+      await logSecurityEventServer({
+        action: 'owner_operational_access_blocked',
+        route: '/api/auth/authorize-app',
+        uid: user.uid,
+        email: user.email,
+        role: 'owner',
+        branchId: 'main_branch',
+        ip: req.ip
+      });
+      res.status(403).json({
+        authorized: false,
+        app: targetApp,
+        email: user.email,
+        reason: targetApp === 'RESTAURANT_MANAGER'
+          ? 'Owner accounts are restricted from operational restaurant management access to preserve operational boundaries and branch privacy.'
+          : 'Owner accounts are restricted from operational delivery rider access.'
+      });
+      return;
+    }
+
+    if (isMasterOwner && (targetApp === 'OWNER' || targetApp === 'FRANCHISE_MANAGER' || targetApp === 'POS')) {
       res.json({
         authorized: true,
         app: targetApp,
@@ -109,7 +132,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       return;
     }
 
-    // 1. Fetch user document
+    // 2. Fetch user document
     let userData: any = null;
     const userDocSnap = await adminDb.collection('users').doc(user.uid).get();
     if (userDocSnap.exists) {
@@ -121,7 +144,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       }
     }
 
-    // 2. Active status check
+    // 3. Active status check
     if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended')) {
       await logSecurityEventServer({
         action: 'deactivated_account_access_attempt',
@@ -149,11 +172,13 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     let permissions = userData?.permissions || [];
     let allowedApps: string[] = Array.isArray(userData?.allowedApps) ? userData.allowedApps : [];
     let isAuthorized = false;
+    let requiresPin = false;
+    let isProfileComplete = true;
     let denialReason = 'This account is not authorized to use this Olive Pizza application.';
 
-    // 3. App-specific permission verification
+    // 4. App-specific permission verification & gates
     if (targetApp === 'POS') {
-      const allowedRoles = ['owner', 'admin', 'developer', 'cashier', 'staff', 'manager', 'restaurant_manager'];
+      const allowedRoles = ['owner', 'admin', 'developer', 'cashier', 'staff', 'manager', 'restaurant_manager', 'pos_user'];
       if (allowedRoles.includes(role) || allowedApps.includes('POS')) {
         isAuthorized = true;
         // Check terminal binding
@@ -180,95 +205,214 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
         }
       }
     } else if (targetApp === 'RESTAURANT_MANAGER') {
-      const allowedRoles = ['owner', 'admin', 'developer', 'restaurant_manager', 'manager', 'chef', 'kitchen_manager'];
-      if (allowedRoles.includes(role) || allowedApps.includes('RESTAURANT_MANAGER')) {
-        isAuthorized = true;
-      } else {
-        // Check restaurant_managers collection
-        try {
-          const mgrDoc = await adminDb.collection('restaurant_managers').doc(user.uid).get();
-          if (mgrDoc.exists && mgrDoc.data()?.isActive !== false) {
-            const mData = mgrDoc.data()!;
-            role = mData.role || 'restaurant_manager';
-            branchId = mData.branchId || branchId;
-            branchName = mData.branchName || branchName;
-            permissions = mData.permissions || permissions;
-            isAuthorized = true;
-            adminDb.collection('users').doc(user.uid).set({ role, branchId, branchName, permissions }, { merge: true }).catch(() => {});
-          } else if (emailLower) {
-            const mgrSnap = await adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get();
-            if (!mgrSnap.empty && mgrSnap.docs[0].data().isActive !== false) {
-              const mData = mgrSnap.docs[0].data();
-              role = mData.role || 'restaurant_manager';
-              branchId = mData.branchId || branchId;
-              branchName = mData.branchName || branchName;
-              permissions = mData.permissions || permissions;
-              isAuthorized = true;
-              adminDb.collection('users').doc(user.uid).set({ role, branchId, branchName, permissions }, { merge: true }).catch(() => {});
-            }
-          }
-        } catch (mgrErr) {
-          console.warn('[AuthorizeApp] Manager check notice:', mgrErr);
+      // Disallow owners
+      if (role === 'owner' || isMasterOwner) {
+        res.status(403).json({
+          authorized: false,
+          reason: 'Owner accounts are restricted from operational restaurant management access to preserve branch privacy.',
+          app: targetApp
+        });
+        return;
+      }
+
+      // Check email verification
+      if (user.email_verified === false) {
+        res.status(403).json({
+          authorized: false,
+          code: 'EMAIL_NOT_VERIFIED',
+          reason: 'Email verification required. Please verify your email before accessing Restaurant Management.',
+          app: targetApp
+        });
+        return;
+      }
+
+      // Fetch restaurant manager document
+      let mgrDoc = await adminDb.collection('restaurant_managers').doc(user.uid).get();
+      if (!mgrDoc.exists && emailLower) {
+        const mgrSnap = await adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get();
+        if (!mgrSnap.empty) {
+          mgrDoc = mgrSnap.docs[0];
         }
       }
+
+      if (!mgrDoc.exists) {
+        res.status(403).json({
+          authorized: false,
+          code: 'NOT_REGISTERED',
+          reason: 'No Restaurant Manager record found for this account. Please request provisioning through your Franchise Manager.',
+          app: targetApp
+        });
+        return;
+      }
+
+      const mData = mgrDoc.data()!;
+      if (mData.status === 'PENDING_OWNER_APPROVAL') {
+        res.status(403).json({
+          authorized: false,
+          code: 'PENDING_OWNER_APPROVAL',
+          reason: 'Your Restaurant Manager account is pending Owner approval. You will receive an email once approved.',
+          app: targetApp
+        });
+        return;
+      }
+
+      if (mData.status === 'REJECTED') {
+        res.status(403).json({
+          authorized: false,
+          code: 'ACCOUNT_REJECTED',
+          reason: 'Your Restaurant Manager account request was rejected by the Owner.',
+          app: targetApp
+        });
+        return;
+      }
+
+      if (mData.isActive === false || mData.status === 'DEACTIVATED') {
+        res.status(403).json({
+          authorized: false,
+          code: 'ACCOUNT_DEACTIVATED',
+          reason: 'This Restaurant Manager account has been deactivated.',
+          app: targetApp
+        });
+        return;
+      }
+
+      if (mData.status !== 'APPROVED') {
+        res.status(403).json({
+          authorized: false,
+          code: 'INVALID_STATUS',
+          reason: 'Restaurant Manager account status is invalid.',
+          app: targetApp
+        });
+        return;
+      }
+
+      isAuthorized = true;
+      requiresPin = true;
+      role = 'restaurant_manager';
+      branchId = mData.branchId || 'main_branch';
+      branchName = mData.branchName || 'Olive Pizza — Rajnandgaon HQ';
+      franchiseId = mData.franchiseId || 'fra_primary';
+      permissions = mData.permissions || [
+        'dashboard.view',
+        'orders.live',
+        'orders.history',
+        'notifications.send',
+        'email.send',
+        'delivery.view'
+      ];
     } else if (targetApp === 'FRANCHISE_MANAGER') {
-      const allowedRoles = ['owner', 'admin', 'developer', 'franchise_owner', 'franchise_manager'];
+      const allowedRoles = ['owner', 'admin', 'developer', 'franchise_manager'];
       if (allowedRoles.includes(role) || allowedApps.includes('FRANCHISE_MANAGER')) {
         isAuthorized = true;
       } else {
         // Check franchise_users collection
         try {
-          const fraDoc = await adminDb.collection('franchise_users').doc(user.uid).get();
+          let fraDoc = await adminDb.collection('franchise_users').doc(user.uid).get();
+          if (!fraDoc.exists && emailLower) {
+            const fraSnap = await adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get();
+            if (!fraSnap.empty) {
+              fraDoc = fraSnap.docs[0];
+            }
+          }
           if (fraDoc.exists && fraDoc.data()?.isActive !== false) {
             const fData = fraDoc.data()!;
-            role = fData.role || 'franchise_manager';
+            role = 'franchise_manager';
             franchiseId = fData.franchiseId || franchiseId;
             branchIds = fData.branchIds || branchIds;
             isAuthorized = true;
             adminDb.collection('users').doc(user.uid).set({ role, franchiseId, branchIds }, { merge: true }).catch(() => {});
-          } else if (emailLower) {
-            const fraSnap = await adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get();
-            if (!fraSnap.empty && fraSnap.docs[0].data().isActive !== false) {
-              const fData = fraSnap.docs[0].data();
-              role = fData.role || 'franchise_manager';
-              franchiseId = fData.franchiseId || franchiseId;
-              branchIds = fData.branchIds || branchIds;
-              isAuthorized = true;
-              adminDb.collection('users').doc(user.uid).set({ role, franchiseId, branchIds }, { merge: true }).catch(() => {});
-            }
           }
         } catch (fraErr) {
           console.warn('[AuthorizeApp] Franchise check notice:', fraErr);
         }
       }
     } else if (targetApp === 'DELIVERY') {
-      const allowedRoles = ['owner', 'admin', 'developer', 'delivery_partner', 'delivery'];
-      if (allowedRoles.includes(role) || allowedApps.includes('DELIVERY')) {
-        isAuthorized = true;
-      } else {
-        // Check delivery_partners collection
-        try {
-          const dpDoc = await adminDb.collection('delivery_partners').doc(user.uid).get();
-          if (dpDoc.exists && dpDoc.data()?.isActive !== false) {
-            const dData = dpDoc.data()!;
-            role = 'delivery_partner';
-            branchId = dData.branchId || branchId;
-            isAuthorized = true;
-            adminDb.collection('users').doc(user.uid).set({ role, branchId }, { merge: true }).catch(() => {});
-          } else if (emailLower) {
-            const dpSnap = await adminDb.collection('delivery_partners').where('email', '==', emailLower).limit(1).get();
-            if (!dpSnap.empty && dpSnap.docs[0].data().isActive !== false) {
-              const dData = dpSnap.docs[0].data();
-              role = 'delivery_partner';
-              branchId = dData.branchId || branchId;
-              isAuthorized = true;
-              adminDb.collection('users').doc(user.uid).set({ role, branchId }, { merge: true }).catch(() => {});
-            }
+      // Disallow owners
+      if (role === 'owner' || isMasterOwner) {
+        res.status(403).json({
+          authorized: false,
+          reason: 'Owner accounts are restricted from operational delivery rider access.',
+          app: targetApp
+        });
+        return;
+      }
+
+      // Check email verification
+      if (user.email_verified === false) {
+        res.status(403).json({
+          authorized: false,
+          code: 'EMAIL_NOT_VERIFIED',
+          reason: 'Email verification required. Please verify your email before accessing the Delivery app.',
+          app: targetApp
+        });
+        return;
+      }
+
+      // Check delivery_partners and delivery_riders collections
+      let dpDoc = await adminDb.collection('delivery_partners').doc(user.uid).get();
+      if (!dpDoc.exists) {
+        dpDoc = await adminDb.collection('delivery_riders').doc(user.uid).get();
+      }
+      if (!dpDoc.exists && emailLower) {
+        const dpSnap = await adminDb.collection('delivery_partners').where('email', '==', emailLower).limit(1).get();
+        if (!dpSnap.empty) {
+          dpDoc = dpSnap.docs[0];
+        } else {
+          const drSnap = await adminDb.collection('delivery_riders').where('email', '==', emailLower).limit(1).get();
+          if (!drSnap.empty) {
+            dpDoc = drSnap.docs[0];
           }
-        } catch (dpErr) {
-          console.warn('[AuthorizeApp] Delivery partner check notice:', dpErr);
         }
       }
+
+      if (!dpDoc.exists) {
+        res.status(403).json({
+          authorized: false,
+          code: 'NOT_REGISTERED',
+          reason: 'Your account is not registered as an authorized Olive Pizza delivery partner.',
+          app: targetApp
+        });
+        return;
+      }
+
+      const dData = dpDoc.data()!;
+      if (dData.isActive === false || dData.status === 'INACTIVE' || dData.status === 'inactive' || dData.status === 'BLOCKED') {
+        res.status(403).json({
+          authorized: false,
+          code: 'ACCOUNT_INACTIVE',
+          reason: 'Your delivery rider account is inactive or suspended. Please contact management.',
+          app: targetApp
+        });
+        return;
+      }
+
+      // Phone verification check
+      if (dData.phoneVerified === false) {
+        res.status(403).json({
+          authorized: false,
+          code: 'PHONE_NOT_VERIFIED',
+          reason: 'Phone verification is required before signing in as a delivery partner.',
+          app: targetApp
+        });
+        return;
+      }
+
+      const hasVerifiedPhone = Boolean(dData.phoneVerified || user.phone_number || (userData?.phone && userData?.phoneVerified));
+      if (!hasVerifiedPhone && !dData.phone) {
+        res.status(403).json({
+          authorized: false,
+          code: 'PHONE_NOT_VERIFIED',
+          reason: 'Phone verification is required before signing in as a delivery partner.',
+          app: targetApp
+        });
+        return;
+      }
+
+      isAuthorized = true;
+      role = 'delivery_partner';
+      branchId = dData.branchId || 'main_branch';
+      franchiseId = dData.franchiseId || 'fra_primary';
+      isProfileComplete = Boolean(dData.name && dData.vehicleNumber);
     } else if (targetApp === 'OWNER') {
       const allowedRoles = ['owner', 'admin', 'developer', 'platform_owner'];
       if (allowedRoles.includes(role) || allowedApps.includes('OWNER')) {
@@ -301,6 +445,8 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     res.json({
       authorized: true,
       app: targetApp,
+      requiresPin,
+      isProfileComplete,
       user: {
         uid: user.uid,
         email: user.email,
@@ -335,7 +481,22 @@ router.post('/context-session', verifyToken, async (req: AuthRequest, res: Respo
       return;
     }
 
-    const { targetApp, targetFranchiseId, targetBranchId, targetBranchName } = req.body;
+    const { targetFranchiseId, targetBranchId, targetBranchName } = req.body;
+    const requestedTarget = (req.body.targetApp || req.body.context || '').toLowerCase();
+
+    if (
+      requestedTarget === 'restaurant_management' ||
+      requestedTarget === 'delivery' ||
+      requestedTarget === 'customer' ||
+      requestedTarget === 'restaurant_manager' ||
+      requestedTarget === 'delivery_rider' ||
+      requestedTarget === 'delivery_partner'
+    ) {
+      res.status(403).json({ error: 'Forbidden: Owner accounts cannot generate operational impersonation sessions for Restaurant Management or Delivery.' });
+      return;
+    }
+
+    const targetApp = req.body.targetApp || req.body.context || 'franchise_management';
 
     const tokenPayload = {
       ownerUid: user.uid,

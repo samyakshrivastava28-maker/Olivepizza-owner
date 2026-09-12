@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import crypto from 'crypto';
 import { adminDb, adminAuth } from '../config/firebase.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
+import { FranchisePinService } from '../services/franchise/FranchisePinService.js';
 
 const router = Router();
 
@@ -361,8 +362,108 @@ router.patch('/:id/status', requireRole(['owner', 'admin', 'developer']), async 
       isActive: Boolean(isActive)
     });
   } catch (error: any) {
-    console.error('[RestaurantManagers] Error toggling manager status:', error);
-    res.status(500).json({ error: error.message || 'Failed to update manager status' });
+    console.error('[RestaurantManagers] Error toggling status:', error);
+    res.status(500).json({ error: error.message || 'Failed to toggle status' });
+  }
+});
+
+// 6. POST /verify-pin - Verify Restaurant Manager 4-digit PIN
+router.post('/verify-pin', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { pin } = req.body;
+    const uid = req.user?.uid;
+    const email = req.user?.email;
+
+    if (!pin) {
+      res.status(400).json({ success: false, error: 'PIN is required' });
+      return;
+    }
+
+    if (!uid) {
+      res.status(401).json({ success: false, error: 'User must be authenticated' });
+      return;
+    }
+
+    let userDoc = await adminDb.collection('restaurant_managers').doc(uid).get();
+    if (!userDoc.exists && email) {
+      const qSnap = await adminDb.collection('restaurant_managers').where('email', '==', email.toLowerCase()).limit(1).get();
+      if (!qSnap.empty) userDoc = qSnap.docs[0];
+    }
+
+    if (!userDoc.exists) {
+      res.status(404).json({ success: false, error: 'Restaurant Manager record not found' });
+      return;
+    }
+
+    const userData = userDoc.data() as any;
+    const pinHash = userData?.pinHash;
+    const failedAttempts = userData?.failedPinAttempts || 0;
+    const lockedUntil = userData?.pinLockedUntil;
+
+    if (FranchisePinService.isAccountLocked(failedAttempts, lockedUntil)) {
+      const remainingMinutes = Math.ceil((new Date(lockedUntil).getTime() - Date.now()) / (60 * 1000));
+      res.status(423).json({
+        success: false,
+        isLocked: true,
+        error: `Account locked due to too many failed attempts. Try again in ${remainingMinutes} minute(s).`
+      });
+      return;
+    }
+
+    if (!pinHash) {
+      res.status(400).json({
+        success: false,
+        requiresPinSetup: true,
+        error: 'No PIN has been configured for this account.'
+      });
+      return;
+    }
+
+    const isMatch = await FranchisePinService.verifyPin(String(pin).trim(), pinHash);
+    if (!isMatch) {
+      const nextAttempts = failedAttempts + 1;
+      const isNowLocked = nextAttempts >= FranchisePinService.MAX_ATTEMPTS;
+      const lockExpiry = isNowLocked ? FranchisePinService.getLockoutExpiry() : null;
+
+      await adminDb.collection('restaurant_managers').doc(userDoc.id).set({
+        failedPinAttempts: nextAttempts,
+        pinLockedUntil: lockExpiry,
+        lastFailedPinAt: new Date().toISOString()
+      }, { merge: true });
+
+      if (isNowLocked) {
+        res.status(423).json({
+          success: false,
+          isLocked: true,
+          error: `Too many failed attempts. Account locked for ${FranchisePinService.LOCKOUT_MINUTES} minutes.`
+        });
+        return;
+      }
+
+      res.status(401).json({
+        success: false,
+        error: 'Incorrect PIN',
+        attemptsRemaining: FranchisePinService.MAX_ATTEMPTS - nextAttempts
+      });
+      return;
+    }
+
+    // Success
+    await adminDb.collection('restaurant_managers').doc(userDoc.id).set({
+      failedPinAttempts: 0,
+      pinLockedUntil: null,
+      lastSuccessfulPinAt: new Date().toISOString()
+    }, { merge: true });
+
+    res.json({
+      success: true,
+      message: 'PIN verified successfully',
+      franchiseId: userData?.franchiseId,
+      branchId: userData?.branchId
+    });
+  } catch (error: any) {
+    console.error('[RestaurantManagers] Error verifying PIN:', error);
+    res.status(500).json({ success: false, error: 'Failed to verify PIN' });
   }
 });
 
