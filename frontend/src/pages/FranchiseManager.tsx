@@ -29,6 +29,7 @@ import { db } from '../lib/firebase';
 import { collection, getDocs, doc, setDoc, updateDoc } from 'firebase/firestore';
 import { fetchApi } from '../lib/api';
 import toast from 'react-hot-toast';
+import { FranchiseLocationPicker } from '../components/franchise/FranchiseLocationPicker';
 
 export interface FranchiseBranch {
   id: string;
@@ -52,7 +53,8 @@ export interface FranchiseBranch {
   createdAt?: string;
 }
 
-const DEFAULT_BRANCHES: FranchiseBranch[] = [
+// Canonical Rajnandgaon HQ location — no fake franchises
+const CANONICAL_DEFAULT_BRANCHES: FranchiseBranch[] = [
   {
     id: 'main_branch',
     name: 'Olive Pizza — Rajnandgaon (Main Branch)',
@@ -71,66 +73,6 @@ const DEFAULT_BRANCHES: FranchiseBranch[] = [
     closingTime: '23:59',
     isActive: true,
     isHeadquarters: true,
-    posTerminalCount: 2
-  },
-  {
-    id: 'durg_branch',
-    name: 'Olive Pizza — Durg (Branch 2)',
-    code: 'OP-DURG-02',
-    city: 'Durg',
-    state: 'Chhattisgarh',
-    address: 'Station Road, Durg, CG 491001',
-    lat: 21.190449,
-    lng: 81.284920,
-    phone: '+91 91799 44446',
-    email: 'durg@olivepizza.in',
-    franchiseOwnerEmail: 'franchise.durg@olivepizza.in',
-    restaurantManagerEmail: 'manager.durg@olivepizza.in',
-    maxDeliveryRadiusKm: 12,
-    openingTime: '12:00',
-    closingTime: '23:59',
-    isActive: true,
-    isHeadquarters: false,
-    posTerminalCount: 1
-  },
-  {
-    id: 'bhilai_branch',
-    name: 'Olive Pizza — Bhilai (Branch 3)',
-    code: 'OP-BHL-03',
-    city: 'Bhilai',
-    state: 'Chhattisgarh',
-    address: 'Civic Centre, Sector 5, Bhilai, CG 490006',
-    lat: 21.193848,
-    lng: 81.350941,
-    phone: '+91 91799 44447',
-    email: 'bhilai@olivepizza.in',
-    franchiseOwnerEmail: 'franchise.bhilai@olivepizza.in',
-    restaurantManagerEmail: 'manager.bhilai@olivepizza.in',
-    maxDeliveryRadiusKm: 12,
-    openingTime: '12:00',
-    closingTime: '23:59',
-    isActive: true,
-    isHeadquarters: false,
-    posTerminalCount: 1
-  },
-  {
-    id: 'raipur_branch',
-    name: 'Olive Pizza — Raipur (Branch 4)',
-    code: 'OP-RPR-04',
-    city: 'Raipur',
-    state: 'Chhattisgarh',
-    address: 'VIP Road, Telibandha, Raipur, CG 492006',
-    lat: 21.237944,
-    lng: 81.667427,
-    phone: '+91 91799 44448',
-    email: 'raipur@olivepizza.in',
-    franchiseOwnerEmail: 'franchise.raipur@olivepizza.in',
-    restaurantManagerEmail: 'manager.raipur@olivepizza.in',
-    maxDeliveryRadiusKm: 15,
-    openingTime: '12:00',
-    closingTime: '23:59',
-    isActive: true,
-    isHeadquarters: false,
     posTerminalCount: 2
   }
 ];
@@ -185,15 +127,12 @@ export default function FranchiseManager() {
         if (snap.docs && snap.docs.length > 0) {
           setBranches(snap.docs.map((d: any) => ({ id: d.id, ...d.data() })));
         } else {
-          setBranches(DEFAULT_BRANCHES);
-          for (const b of DEFAULT_BRANCHES) {
-            await setDoc(doc(db, 'franchises', b.id), b, { merge: true }).catch(() => {});
-          }
+          setBranches(CANONICAL_DEFAULT_BRANCHES);
         }
       }
     } catch (err) {
-      console.warn('Franchises fallback to defaults:', err);
-      setBranches(DEFAULT_BRANCHES);
+      console.warn('Franchises fallback to canonical:', err);
+      setBranches(CANONICAL_DEFAULT_BRANCHES);
     } finally {
       setLoading(false);
     }
@@ -786,60 +725,36 @@ export default function FranchiseManager() {
 
               {wizardStep === 5 && (
                 <div className="space-y-4">
-                  <h3 className="text-sm font-bold text-white">Step 5: Exact Location on Map</h3>
-                  <div className="space-y-3">
-                    <div>
-                      <label className="text-xs text-slate-400 block mb-1">Full Street Address *</label>
-                      <input
-                        type="text"
-                        value={wizAddress}
-                        onChange={(e) => setWizAddress(e.target.value)}
-                        placeholder="e.g. VIP Road, Telibandha, Raipur, Chhattisgarh 492006"
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs text-slate-400 block mb-1">Latitude</label>
-                        <input
-                          type="text"
-                          value={wizLat}
-                          onChange={(e) => setWizLat(e.target.value)}
-                          className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500 font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-slate-400 block mb-1">Longitude</label>
-                        <input
-                          type="text"
-                          value={wizLng}
-                          onChange={(e) => setWizLng(e.target.value)}
-                          className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500 font-mono"
-                        />
-                      </div>
-                    </div>
-                    <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between text-xs text-slate-400">
-                      <span className="flex items-center gap-1.5">
-                        <MapPin className="w-4 h-4 text-orange-400" />
-                        <span>Coordinates: {wizLat}, {wizLng}</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (navigator.geolocation) {
-                            navigator.geolocation.getCurrentPosition((pos) => {
-                              setWizLat(pos.coords.latitude.toFixed(6));
-                              setWizLng(pos.coords.longitude.toFixed(6));
-                              toast.success('Updated coordinates from GPS');
-                            });
-                          }
-                        }}
-                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-[11px]"
-                      >
-                        Use Current GPS
-                      </button>
-                    </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Step 5: Exact Location on OpenStreetMap</h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Search address via OpenStreetMap, drag the pin, or click anywhere on the map.
+                    </p>
                   </div>
+
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1 font-medium">Full Street Address *</label>
+                    <input
+                      type="text"
+                      value={wizAddress}
+                      onChange={(e) => setWizAddress(e.target.value)}
+                      placeholder="e.g. Dongargaon Rd, near Saraswati school, Rajnandgaon, CG 491441"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+
+                  <FranchiseLocationPicker
+                    lat={parseFloat(wizLat) || 21.0810244}
+                    lng={parseFloat(wizLng) || 81.0123793}
+                    address={wizAddress}
+                    onChange={(newLat, newLng, newAddr) => {
+                      setWizLat(newLat.toFixed(7));
+                      setWizLng(newLng.toFixed(7));
+                      if (newAddr && (!wizAddress || wizAddress.length < 5)) {
+                        setWizAddress(newAddr);
+                      }
+                    }}
+                  />
                 </div>
               )}
 

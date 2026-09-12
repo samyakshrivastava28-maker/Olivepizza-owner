@@ -600,23 +600,23 @@ export default function FranchiseWorkspace() {
             <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4">
               <p className="text-[11px] text-slate-400 font-semibold uppercase">Today's Sales</p>
               <h3 className="text-xl font-bold text-amber-400 mt-1 font-mono">
-                ₹{(dashboardMetrics?.todaySales || 24590).toLocaleString('en-IN')}
+                ₹{(dashboardMetrics?.todaySales || 0).toLocaleString('en-IN')}
               </h3>
-              <p className="text-[10px] text-slate-500 mt-1">POS: ₹{(dashboardMetrics?.posSales || 14800).toLocaleString('en-IN')}</p>
+              <p className="text-[10px] text-slate-500 mt-1">POS: ₹{(dashboardMetrics?.posSales || 0).toLocaleString('en-IN')}</p>
             </div>
 
             <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4">
               <p className="text-[11px] text-slate-400 font-semibold uppercase">Total Orders</p>
               <h3 className="text-xl font-bold text-white mt-1 font-mono">
-                {dashboardMetrics?.totalOrders || 38}
+                {dashboardMetrics?.totalOrders || 0}
               </h3>
-              <p className="text-[10px] text-emerald-400 mt-1">Avg: ₹{dashboardMetrics?.avgOrderValue || 420}</p>
+              <p className="text-[10px] text-emerald-400 mt-1">Avg: ₹{dashboardMetrics?.avgOrderValue || 0}</p>
             </div>
 
             <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4">
               <p className="text-[11px] text-slate-400 font-semibold uppercase">Active Queue</p>
               <h3 className="text-xl font-bold text-amber-500 mt-1 font-mono">
-                {liveOrders.length || dashboardMetrics?.activeOrders || 4}
+                {liveOrders.length || dashboardMetrics?.activeOrders || 0}
               </h3>
               <p className="text-[10px] text-amber-400 mt-1">Live in Kitchen</p>
             </div>
@@ -640,7 +640,7 @@ export default function FranchiseWorkspace() {
             <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4">
               <p className="text-[11px] text-slate-400 font-semibold uppercase">Delivery Riders</p>
               <h3 className="text-xl font-bold text-sky-400 mt-1 font-mono">
-                {riders.length || 3}
+                {riders.length}
               </h3>
               <p className="text-[10px] text-sky-400/80 mt-1">Fleet Ready</p>
             </div>
@@ -696,7 +696,7 @@ export default function FranchiseWorkspace() {
 
                   <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
                     <span className="text-slate-400">Activation Code:</span>
-                    <span className="text-amber-400 font-mono font-bold text-sm tracking-widest">{t.activationCode || '741852'}</span>
+                    <span className="text-amber-400 font-mono font-bold text-sm tracking-widest">{t.activationCode || '—'}</span>
                   </div>
 
                   <div className="flex justify-between items-center text-[11px] text-slate-400 pt-1">
@@ -766,6 +766,157 @@ export default function FranchiseWorkspace() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* ─── 7. TAB: LIVE ORDERS (READ-ONLY MONITORING FOR MASTER OWNER) ──────── */}
+      {activeTab === 'live-orders' && (
+        <div className="space-y-4">
+          {/* Read-Only Safety Banner */}
+          <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-2xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-black text-[10px] uppercase">
+                READ-ONLY
+              </span>
+              <span className="font-bold text-amber-300">
+                Franchise Live Order Stream — Master Owner Observability Mode
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400">
+              Real-time Firestore listener active • Order mutations must be performed within Restaurant Manager or POS terminal
+            </p>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <Flame className="w-4 h-4 text-amber-500 animate-pulse" />
+              <span>Active Orders in Kitchen & Delivery ({liveOrders.length})</span>
+            </h3>
+            <span className="text-xs text-slate-400 font-mono">
+              Filtered: {selectedBranchFilter === 'all' ? 'All Branches' : selectedBranchFilter}
+            </span>
+          </div>
+
+          {liveOrders.length === 0 ? (
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center max-w-md mx-auto space-y-2">
+              <Flame className="w-8 h-8 mx-auto text-slate-600" />
+              <h4 className="text-sm font-bold text-white">No Active Orders Right Now</h4>
+              <p className="text-xs text-slate-400">
+                New incoming orders will appear here automatically via live Firestore streaming.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {liveOrders.map((o) => (
+                <div key={o.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-mono font-bold text-amber-400">#{o.id.slice(-6).toUpperCase()}</span>
+                      <p className="text-xs text-white font-semibold mt-0.5">{o.customerName || o.userName || 'Customer'}</p>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                      {o.status || 'PENDING'}
+                    </span>
+                  </div>
+
+                  <div className="space-y-1 text-xs text-slate-300 pt-2 border-t border-slate-800">
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Total:</span>
+                      <span className="font-mono font-bold text-white">₹{Number(o.totalAmount || 0).toLocaleString('en-IN')}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Source / Type:</span>
+                      <span className="capitalize text-slate-300">{o.orderSource || 'online'} • {o.deliveryType || o.fulfillmentType || 'delivery'}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Payment:</span>
+                      <span className="uppercase text-[11px] font-mono text-emerald-400">{o.paymentMethod || 'online'} ({o.paymentStatus || 'PAID'})</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Branch:</span>
+                      <span className="text-slate-300 font-medium">{o.branchId || 'main_branch'}</span>
+                    </div>
+                  </div>
+
+                  {Array.isArray(o.items) && o.items.length > 0 && (
+                    <div className="pt-2 border-t border-slate-800/60">
+                      <p className="text-[10px] text-slate-500 font-mono mb-1">ITEMS ({o.items.length}):</p>
+                      <div className="space-y-0.5">
+                        {o.items.slice(0, 3).map((it: any, idx: number) => (
+                          <p key={idx} className="text-[11px] text-slate-300 truncate">
+                            {it.quantity || 1}x {it.name || it.title}
+                          </p>
+                        ))}
+                        {o.items.length > 3 && (
+                          <p className="text-[10px] text-slate-500 font-semibold">+{o.items.length - 3} more items...</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between text-[10px] text-slate-500 font-mono">
+                    <span>⏱ {new Date(o.createdAt?.toDate ? o.createdAt.toDate() : o.createdAt || Date.now()).toLocaleTimeString()}</span>
+                    <span className="text-amber-400/80 font-semibold">👀 Pure Observability</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ─── 8. TAB: ORDERS HISTORY (PAST ORDERS AUDIT) ───────────────────────── */}
+      {activeTab === 'orders' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-white">Completed & Past Orders ({historicalOrders.length})</h3>
+            <span className="text-xs text-slate-400">Read-only historical order archive</span>
+          </div>
+
+          {historicalOrders.length === 0 ? (
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-8 text-center text-slate-400 text-xs">
+              No historical orders recorded yet.
+            </div>
+          ) : (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="text-[11px] text-slate-400 uppercase bg-slate-950/80 border-b border-slate-800">
+                    <tr>
+                      <th className="p-3">Order ID</th>
+                      <th className="p-3">Customer</th>
+                      <th className="p-3">Branch</th>
+                      <th className="p-3">Amount</th>
+                      <th className="p-3">Payment</th>
+                      <th className="p-3">Status</th>
+                      <th className="p-3 text-right">Time</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                    {historicalOrders.slice(0, 50).map((o) => (
+                      <tr key={o.id} className="hover:bg-slate-800/40">
+                        <td className="p-3 font-mono text-amber-400">#{o.id.slice(-6).toUpperCase()}</td>
+                        <td className="p-3 text-white font-medium">{o.customerName || o.userName || 'Customer'}</td>
+                        <td className="p-3">{o.branchId || 'main_branch'}</td>
+                        <td className="p-3 font-mono font-bold text-white">₹{Number(o.totalAmount || 0).toLocaleString('en-IN')}</td>
+                        <td className="p-3 uppercase text-[11px] font-mono text-emerald-400">{o.paymentMethod || 'online'}</td>
+                        <td className="p-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            o.status === 'delivered' || o.status === 'completed' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                          }`}>
+                            {o.status}
+                          </span>
+                        </td>
+                        <td className="p-3 text-right font-mono text-slate-500 text-[11px]">
+                          {new Date(o.createdAt?.toDate ? o.createdAt.toDate() : o.createdAt || Date.now()).toLocaleDateString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

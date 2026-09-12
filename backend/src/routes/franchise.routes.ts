@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
+import { FranchisePinService } from '../services/franchise/FranchisePinService.js';
 import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogleSheetsService.js';
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 
@@ -48,205 +49,19 @@ export interface FranchiseEntity {
   updatedAt: string;
 }
 
-const DEFAULT_FRANCHISES: FranchiseEntity[] = [
-  {
-    id: 'fra_rajnandgaon',
-    slug: 'rajnandgaon',
-    organizationId: 'org_olive_pizza',
-    name: 'Olive Pizza — Rajnandgaon Franchise',
-    code: 'FRA-RJN-01',
-    region: 'Chhattisgarh',
-    city: 'Rajnandgaon',
-    contactEmail: 'olivepizzarjn@gmail.com',
-    contactPhone: '+91 91799 44445',
-    franchiseOwnerName: 'Olive Pizza Master Owner',
-    franchiseOwnerEmail: 'olivepizzarjn@gmail.com',
-    mainBranchId: 'main_branch',
-    isActive: true,
-    status: 'ACTIVE',
-    businessHours: { openingTime: '12:00', closingTime: '23:59', isOpenToday: true },
-    deliverySettings: { maxDeliveryRadiusKm: 15, deliveryFee: 30, freeDeliveryThreshold: 299, minOrderAmount: 99 },
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  },
-  {
-    id: 'fra_durg',
-    slug: 'durg',
-    organizationId: 'org_olive_pizza',
-    name: 'Olive Pizza — Durg Franchise',
-    code: 'FRA-DURG-02',
-    region: 'Chhattisgarh',
-    city: 'Durg',
-    contactEmail: 'durg@olivepizza.in',
-    contactPhone: '+91 91799 44446',
-    franchiseOwnerName: 'Durg Franchise Partner',
-    franchiseOwnerEmail: 'franchise.durg@olivepizza.in',
-    mainBranchId: 'durg_branch',
-    isActive: true,
-    status: 'ACTIVE',
-    businessHours: { openingTime: '12:00', closingTime: '23:59', isOpenToday: true },
-    deliverySettings: { maxDeliveryRadiusKm: 12, deliveryFee: 30, freeDeliveryThreshold: 299, minOrderAmount: 99 },
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  },
-  {
-    id: 'fra_bhilai',
-    slug: 'bhilai',
-    organizationId: 'org_olive_pizza',
-    name: 'Olive Pizza — Bhilai Franchise',
-    code: 'FRA-BHL-03',
-    region: 'Chhattisgarh',
-    city: 'Bhilai',
-    contactEmail: 'bhilai@olivepizza.in',
-    contactPhone: '+91 91799 44447',
-    franchiseOwnerName: 'Bhilai Franchise Partner',
-    franchiseOwnerEmail: 'franchise.bhilai@olivepizza.in',
-    mainBranchId: 'bhilai_branch',
-    isActive: true,
-    status: 'ACTIVE',
-    businessHours: { openingTime: '12:00', closingTime: '23:59', isOpenToday: true },
-    deliverySettings: { maxDeliveryRadiusKm: 12, deliveryFee: 30, freeDeliveryThreshold: 299, minOrderAmount: 99 },
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  },
-  {
-    id: 'fra_raipur',
-    slug: 'raipur',
-    organizationId: 'org_olive_pizza',
-    name: 'Olive Pizza — Raipur Franchise',
-    code: 'FRA-RPR-04',
-    region: 'Chhattisgarh',
-    city: 'Raipur',
-    contactEmail: 'raipur@olivepizza.in',
-    contactPhone: '+91 91799 44448',
-    franchiseOwnerName: 'Raipur Franchise Partner',
-    franchiseOwnerEmail: 'franchise.raipur@olivepizza.in',
-    mainBranchId: 'raipur_branch',
-    isActive: true,
-    status: 'ACTIVE',
-    businessHours: { openingTime: '12:00', closingTime: '23:59', isOpenToday: true },
-    deliverySettings: { maxDeliveryRadiusKm: 15, deliveryFee: 40, freeDeliveryThreshold: 399, minOrderAmount: 99 },
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  }
-];
-
-const DEFAULT_BRANCHES: any[] = [
-  {
-    id: 'main_branch',
-    organizationId: 'org_olive_pizza',
-    franchiseId: 'fra_rajnandgaon',
-    name: 'Olive Pizza — Rajnandgaon (Main Branch)',
-    code: 'OP-RJN-01',
-    city: 'Rajnandgaon',
-    state: 'Chhattisgarh',
-    address: 'Dongargaon Rd, near Saraswati school, Gokul Nagar, Rajnandgaon, CG 491441',
-    lat: 21.0810244,
-    lng: 81.0123793,
-    phone: '+91 91799 44445',
-    email: 'olivepizzarjn@gmail.com',
-    maxDeliveryRadiusKm: 15,
-    openingTime: '12:00',
-    closingTime: '23:59',
-    isActive: true,
-    isHeadquarters: true,
-    posTerminalCount: 2,
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: 'durg_branch',
-    organizationId: 'org_olive_pizza',
-    franchiseId: 'fra_durg',
-    name: 'Olive Pizza — Durg (Branch 2)',
-    code: 'OP-DURG-02',
-    city: 'Durg',
-    state: 'Chhattisgarh',
-    address: 'Station Road, Durg, CG 491001',
-    lat: 21.190449,
-    lng: 81.284920,
-    phone: '+91 91799 44446',
-    email: 'durg@olivepizza.in',
-    maxDeliveryRadiusKm: 12,
-    openingTime: '12:00',
-    closingTime: '23:59',
-    isActive: true,
-    isHeadquarters: false,
-    posTerminalCount: 1,
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: 'bhilai_branch',
-    organizationId: 'org_olive_pizza',
-    franchiseId: 'fra_bhilai',
-    name: 'Olive Pizza — Bhilai (Branch 3)',
-    code: 'OP-BHL-03',
-    city: 'Bhilai',
-    state: 'Chhattisgarh',
-    address: 'Civic Centre, Sector 5, Bhilai, CG 490006',
-    lat: 21.193848,
-    lng: 81.350941,
-    phone: '+91 91799 44447',
-    email: 'bhilai@olivepizza.in',
-    maxDeliveryRadiusKm: 12,
-    openingTime: '12:00',
-    closingTime: '23:59',
-    isActive: true,
-    isHeadquarters: false,
-    posTerminalCount: 1,
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: 'raipur_branch',
-    organizationId: 'org_olive_pizza',
-    franchiseId: 'fra_raipur',
-    name: 'Olive Pizza — Raipur (Branch 4)',
-    code: 'OP-RPR-04',
-    city: 'Raipur',
-    state: 'Chhattisgarh',
-    address: 'VIP Road, Telibandha, Raipur, CG 492006',
-    lat: 21.237944,
-    lng: 81.667427,
-    phone: '+91 91799 44448',
-    email: 'raipur@olivepizza.in',
-    maxDeliveryRadiusKm: 15,
-    openingTime: '12:00',
-    closingTime: '23:59',
-    isActive: true,
-    isHeadquarters: false,
-    posTerminalCount: 2,
-    createdAt: new Date().toISOString()
-  }
-];
+// ── No hardcoded default franchises or branches.
+// Franchises and branches are created exclusively via the Provisioning Wizard
+// (POST /api/franchises/provision) and stored in Firestore.
+// The owner must use the wizard to create real franchises.
 
 router.use(verifyToken);
-
-// Helper to seed defaults if Firestore is blank
-async function ensureFranchiseDefaults() {
-  const fSnap = await adminDb.collection('franchise_entities').get().catch(() => ({ docs: [] } as any));
-  if (fSnap.docs.length === 0) {
-    for (const f of DEFAULT_FRANCHISES) {
-      await adminDb.collection('franchise_entities').doc(f.id).set(f, { merge: true }).catch(() => {});
-    }
-  }
-  const bSnap = await adminDb.collection('franchises').get().catch(() => ({ docs: [] } as any));
-  if (bSnap.docs.length === 0) {
-    for (const b of DEFAULT_BRANCHES) {
-      await adminDb.collection('franchises').doc(b.id).set(b, { merge: true }).catch(() => {});
-    }
-  }
-}
 
 // ─── 1. LIST ALL FRANCHISES (FOR GLOBAL OWNER OR FRANCHISE OWNER) ───────────
 router.get('/list', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    await ensureFranchiseDefaults();
     const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
     const snap = await adminDb.collection('franchise_entities').get();
     let franchises: FranchiseEntity[] = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as FranchiseEntity));
-
-    if (franchises.length === 0) {
-      franchises = DEFAULT_FRANCHISES;
-    }
 
     // Filter if restricted franchise owner
     if (!scope.isGlobalOwner) {
@@ -275,11 +90,11 @@ router.get('/list', requireRole(['owner', 'admin', 'developer', 'platform_owner'
 
       return {
         ...f,
-        branchCount: Math.max(1, branches.length),
-        terminalCount: terminals.length > 0 ? terminals.length : (f.id === 'fra_rajnandgaon' ? 2 : 1),
-        managerCount: managers.length > 0 ? managers.length : 1,
-        riderCount: riders.length > 0 ? riders.length : 2,
-        mainBranch: branches[0]?.name || `${f.city} Main Branch`,
+        branchCount: branches.length,
+        terminalCount: terminals.length,
+        managerCount: managers.length,
+        riderCount: riders.length,
+        mainBranch: branches[0]?.name || null,
         mainBranchId: branches[0]?.id || f.mainBranchId,
       };
     });
@@ -287,27 +102,21 @@ router.get('/list', requireRole(['owner', 'admin', 'developer', 'platform_owner'
     res.json({ success: true, franchises: augmented });
   } catch (error: any) {
     console.error('[FranchiseRoutes] Error listing franchises:', error);
-    res.json({ success: true, franchises: DEFAULT_FRANCHISES });
+    res.status(500).json({ error: 'Failed to list franchises' });
   }
 });
 
 // ─── 2. RESOLVE FRANCHISE BY SLUG (AUTHORITATIVE SERVER SCOPING) ───────────
 router.get('/by-slug/:slug', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    await ensureFranchiseDefaults();
     const { slug } = req.params;
     const cleanSlug = slug.toLowerCase().trim();
     const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
 
     const snap = await adminDb.collection('franchise_entities').get();
-    let franchise = snap.docs
+    const franchise = snap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) } as FranchiseEntity))
       .find(f => f.slug === cleanSlug || f.id === cleanSlug || f.id === `fra_${cleanSlug}`);
-
-    if (!franchise) {
-      // Fallback matching default list
-      franchise = DEFAULT_FRANCHISES.find(f => f.slug === cleanSlug || f.id === cleanSlug || f.id === `fra_${cleanSlug}`);
-    }
 
     if (!franchise) {
       res.status(404).json({ error: `Franchise with slug '${cleanSlug}' not found`, code: 'NOT_FOUND' });
@@ -324,13 +133,13 @@ router.get('/by-slug/:slug', requireRole(['owner', 'admin', 'developer', 'platfo
     const bSnap = await adminDb.collection('franchises').get();
     const branches = bSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
-      .filter(b => b.franchiseId === franchise!.id || (franchise!.id === 'fra_rajnandgaon' && (b.id === 'main_branch' || b.franchiseId === 'fra_primary')));
+      .filter(b => b.franchiseId === franchise.id || (franchise.id === 'fra_rajnandgaon' && (b.id === 'main_branch' || b.franchiseId === 'fra_primary')));
 
     res.json({
       success: true,
       franchise: {
         ...franchise,
-        branches: branches.length > 0 ? branches : DEFAULT_BRANCHES.filter(b => b.franchiseId === franchise!.id || (franchise!.id === 'fra_rajnandgaon' && b.id === 'main_branch'))
+        branches
       }
     });
   } catch (error: any) {
@@ -429,24 +238,24 @@ router.get('/:id/dashboard', requireRole(['owner', 'admin', 'developer', 'platfo
       dashboard: {
         franchiseId: id,
         branchCount: targetBranchIds.length,
-        todaySales: todaySales || 24590,
-        totalOrders: scopedOrders.length || 38,
-        activeOrders: activeOrdersCount || 4,
-        completedOrders: completedOrdersCount || 32,
-        cancelledOrders: cancelledOrdersCount || 2,
-        avgOrderValue: scopedOrders.length > 0 ? Math.round(todaySales / Math.max(1, scopedOrders.length)) : 420,
-        posSales: posSales || 14800,
-        onlineSales: onlineSales || 9790,
-        cashSales: cashSales || 6200,
-        upiSales: upiSales || 15400,
-        cardSales: cardSales || 2990,
-        dineInCount: dineInCount || 14,
-        takeawayCount: takeawayCount || 10,
-        deliveryCount: deliveryCount || 14,
+        todaySales,
+        totalOrders: scopedOrders.length,
+        activeOrders: activeOrdersCount,
+        completedOrders: completedOrdersCount,
+        cancelledOrders: cancelledOrdersCount,
+        avgOrderValue: scopedOrders.length > 0 ? Math.round(todaySales / Math.max(1, scopedOrders.length)) : 0,
+        posSales,
+        onlineSales,
+        cashSales,
+        upiSales,
+        cardSales,
+        dineInCount,
+        takeawayCount,
+        deliveryCount,
         activeBranchesCount: targetBranchIds.length,
-        activePosTerminalsCount: activeTerminals.length || 2,
-        activeRidersCount: activeRiders.length || 3,
-        lowStockAlertsCount: 1,
+        activePosTerminalsCount: activeTerminals.length,
+        activeRidersCount: activeRiders.length,
+        lowStockAlertsCount: 0,
         operationalAlertsCount: 0,
         syncTimestamp: new Date().toISOString()
       }
@@ -462,13 +271,9 @@ router.get('/:id/branches', requireRole(['owner', 'admin', 'developer', 'platfor
   try {
     const { id } = req.params;
     const bSnap = await adminDb.collection('franchises').get();
-    let branches: any[] = bSnap.docs
+    const branches: any[] = bSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
       .filter(b => b.franchiseId === id || (id === 'fra_rajnandgaon' && (b.id === 'main_branch' || b.franchiseId === 'fra_primary')));
-
-    if (branches.length === 0) {
-      branches = DEFAULT_BRANCHES.filter(b => b.franchiseId === id || (id === 'fra_rajnandgaon' && b.id === 'main_branch'));
-    }
 
     res.json({ success: true, branches });
   } catch (error: any) {
@@ -544,27 +349,9 @@ router.get('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platfor
       .map(b => b.id);
 
     const mgrSnap = await adminDb.collection('restaurant_managers').get();
-    let managers: any[] = mgrSnap.docs
+    const managers: any[] = mgrSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
       .filter(m => m.franchiseId === id || branchIds.includes(m.branchId));
-
-    if (managers.length === 0) {
-      managers = [
-        {
-          id: `mgr_${id}_1`,
-          name: 'Primary Branch Manager',
-          email: 'webhub2811@gmail.com',
-          phone: '+91 91799 44445',
-          role: 'restaurant_manager',
-          franchiseId: id,
-          branchId: branchIds[0] || 'main_branch',
-          branchName: 'Main Restaurant',
-          permissions: ['dashboard.view', 'orders.live', 'orders.history', 'inventory.view', 'notifications.send'],
-          isActive: true,
-          createdAt: new Date().toISOString()
-        }
-      ];
-    }
 
     res.json({ success: true, managers });
   } catch (error: any) {
@@ -575,18 +362,28 @@ router.get('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platfor
 router.post('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const { name, email, phone, branchId, permissions } = req.body;
+    const { name, email, phone, branchId, permissions, pin } = req.body;
 
     if (!name || !email || !branchId) {
       res.status(400).json({ error: 'Manager name, email, and branch assignment are required' });
       return;
     }
 
+    let pinHash: string | undefined = undefined;
+    if (pin) {
+      try {
+        pinHash = await FranchisePinService.hashPin(pin);
+      } catch (pinErr: any) {
+        res.status(400).json({ error: pinErr.message || 'Invalid PIN' });
+        return;
+      }
+    }
+
     const cleanEmail = email.trim().toLowerCase();
     const mgrId = `mgr_${cleanEmail.replace(/[^a-z0-9]/g, '_')}`;
     const now = new Date().toISOString();
 
-    const managerData = {
+    const managerData: Record<string, any> = {
       id: mgrId,
       name: name.trim(),
       email: cleanEmail,
@@ -597,12 +394,34 @@ router.post('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platfo
       branchId,
       permissions: permissions || ['dashboard.view', 'orders.live', 'orders.history', 'inventory.view', 'notifications.send'],
       isActive: true,
+      hasPin: Boolean(pinHash),
       createdAt: now,
       updatedAt: now,
       invitedBy: req.user?.uid || 'owner'
     };
 
+    if (pinHash) {
+      managerData.pinHash = pinHash;
+      managerData.failedPinAttempts = 0;
+      managerData.pinUpdatedAt = now;
+    }
+
     await adminDb.collection('restaurant_managers').doc(mgrId).set(managerData, { merge: true });
+
+    // Also sync to franchise_users for franchise app lookup
+    await adminDb.collection('franchise_users').doc(mgrId).set({
+      id: mgrId,
+      name: managerData.name,
+      email: cleanEmail,
+      phone: phone || '',
+      role: 'franchise_manager',
+      franchiseId: id,
+      branchIds: [branchId],
+      isActive: true,
+      hasPin: Boolean(pinHash),
+      ...(pinHash ? { pinHash, failedPinAttempts: 0, pinUpdatedAt: now } : {}),
+      updatedAt: now
+    }, { merge: true }).catch(() => {});
 
     await FranchiseScopeService.logFranchiseAudit({
       organizationId: managerData.organizationId,
@@ -613,12 +432,201 @@ router.post('/:id/managers', requireRole(['owner', 'admin', 'developer', 'platfo
       actionType: 'MANAGER_PROVISIONED',
       entityType: 'restaurant_manager',
       entityId: mgrId,
-      details: managerData
+      details: { name: managerData.name, email: cleanEmail, branchId, hasPin: Boolean(pinHash) }
     });
 
-    res.status(201).json({ success: true, manager: managerData });
+    // Strip pinHash from response
+    const { pinHash: _omitted, ...safeManagerData } = managerData;
+    res.status(201).json({ success: true, manager: safeManagerData });
   } catch (error: any) {
     res.status(500).json({ error: 'Failed to provision restaurant manager' });
+  }
+});
+
+// ─── 5.1 SET / UPDATE MANAGER PIN (POST /:id/managers/:managerId/set-pin) ──
+router.post('/:id/managers/:managerId/set-pin', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, managerId } = req.params;
+    const { pin } = req.body;
+
+    if (!pin) {
+      res.status(400).json({ success: false, error: 'PIN is required' });
+      return;
+    }
+
+    let pinHash: string;
+    try {
+      pinHash = await FranchisePinService.hashPin(pin);
+    } catch (pinErr: any) {
+      res.status(400).json({ success: false, error: pinErr.message || 'Invalid PIN' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const pinPayload = {
+      pinHash,
+      hasPin: true,
+      failedPinAttempts: 0,
+      pinLockedUntil: null,
+      pinUpdatedAt: now,
+      updatedAt: now,
+      updatedBy: req.user?.email || 'owner'
+    };
+
+    // Update in restaurant_managers
+    const mgrRef = adminDb.collection('restaurant_managers').doc(managerId);
+    const mgrDoc = await mgrRef.get();
+    if (mgrDoc.exists) {
+      await mgrRef.set(pinPayload, { merge: true });
+    }
+
+    // Update in franchise_users
+    const fuRef = adminDb.collection('franchise_users').doc(managerId);
+    const fuDoc = await fuRef.get();
+    if (fuDoc.exists) {
+      await fuRef.set(pinPayload, { merge: true });
+    }
+
+    // Update in users collection if exists
+    const uRef = adminDb.collection('users').doc(managerId);
+    const uDoc = await uRef.get();
+    if (uDoc.exists) {
+      await uRef.set(pinPayload, { merge: true });
+    }
+
+    await FranchiseScopeService.logFranchiseAudit({
+      franchiseId: id,
+      actorUid: req.user?.uid || 'owner',
+      actorEmail: req.user?.email || 'owner@olivepizza.in',
+      actionType: 'MANAGER_PIN_SET',
+      entityType: 'restaurant_manager',
+      entityId: managerId,
+      details: { managerId, updatedBy: req.user?.email }
+    });
+
+    res.json({ success: true, message: 'Manager PIN updated successfully' });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error setting manager PIN:', error);
+    res.status(500).json({ success: false, error: 'Failed to set manager PIN' });
+  }
+});
+
+// ─── 5.2 SERVER-SIDE PIN VERIFICATION (POST /verify-pin) ────────────────────
+router.post('/verify-pin', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { pin } = req.body;
+    const uid = req.user?.uid;
+    const email = req.user?.email;
+
+    if (!pin) {
+      res.status(400).json({ success: false, error: 'PIN is required' });
+      return;
+    }
+
+    if (!uid) {
+      res.status(401).json({ success: false, error: 'User must be authenticated' });
+      return;
+    }
+
+    // Lookup user record in Firestore (restaurant_managers, franchise_users, or users)
+    let userDoc = await adminDb.collection('franchise_users').doc(uid).get();
+    let collectionName = 'franchise_users';
+
+    if (!userDoc.exists) {
+      userDoc = await adminDb.collection('restaurant_managers').doc(uid).get();
+      collectionName = 'restaurant_managers';
+    }
+    if (!userDoc.exists) {
+      userDoc = await adminDb.collection('users').doc(uid).get();
+      collectionName = 'users';
+    }
+
+    // Also check query by email if not found by UID
+    if (!userDoc.exists && email) {
+      const qSnap = await adminDb.collection('restaurant_managers').where('email', '==', email.toLowerCase()).limit(1).get();
+      if (!qSnap.empty) {
+        userDoc = qSnap.docs[0];
+        collectionName = 'restaurant_managers';
+      }
+    }
+
+    if (!userDoc.exists) {
+      res.status(404).json({ success: false, error: 'Manager account record not found' });
+      return;
+    }
+
+    const userData = userDoc.data() as any;
+    const pinHash = userData?.pinHash;
+    const failedAttempts = userData?.failedPinAttempts || 0;
+    const lockedUntil = userData?.pinLockedUntil;
+
+    // Check account lockout
+    if (FranchisePinService.isAccountLocked(failedAttempts, lockedUntil)) {
+      const remainingMinutes = Math.ceil((new Date(lockedUntil).getTime() - Date.now()) / (60 * 1000));
+      res.status(423).json({
+        success: false,
+        isLocked: true,
+        error: `Account is locked due to too many failed PIN attempts. Try again in ${remainingMinutes} minute(s).`
+      });
+      return;
+    }
+
+    if (!pinHash) {
+      res.status(400).json({
+        success: false,
+        requiresPinSetup: true,
+        error: 'No PIN has been configured for this account. Please ask the franchise owner to set your PIN.'
+      });
+      return;
+    }
+
+    // Constant-time bcrypt verify
+    const isMatch = await FranchisePinService.verifyPin(pin.trim(), pinHash);
+
+    if (!isMatch) {
+      const nextAttempts = failedAttempts + 1;
+      const isNowLocked = nextAttempts >= FranchisePinService.MAX_ATTEMPTS;
+      const lockExpiry = isNowLocked ? FranchisePinService.getLockoutExpiry() : null;
+
+      await adminDb.collection(collectionName).doc(userDoc.id).set({
+        failedPinAttempts: nextAttempts,
+        pinLockedUntil: lockExpiry,
+        lastFailedPinAt: new Date().toISOString()
+      }, { merge: true });
+
+      if (isNowLocked) {
+        res.status(423).json({
+          success: false,
+          isLocked: true,
+          error: `Too many failed attempts. Account locked for ${FranchisePinService.LOCKOUT_MINUTES} minutes.`
+        });
+        return;
+      }
+
+      res.status(401).json({
+        success: false,
+        error: 'Incorrect PIN',
+        attemptsRemaining: FranchisePinService.MAX_ATTEMPTS - nextAttempts
+      });
+      return;
+    }
+
+    // Success — reset failed counter
+    await adminDb.collection(collectionName).doc(userDoc.id).set({
+      failedPinAttempts: 0,
+      pinLockedUntil: null,
+      lastSuccessfulPinAt: new Date().toISOString()
+    }, { merge: true });
+
+    res.json({
+      success: true,
+      message: 'PIN verified successfully',
+      franchiseId: userData?.franchiseId,
+      branchId: userData?.branchId
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error verifying PIN:', error);
+    res.status(500).json({ success: false, error: 'Failed to verify PIN' });
   }
 });
 
@@ -627,42 +635,9 @@ router.get('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform_
   try {
     const { id } = req.params;
     const riderSnap = await adminDb.collection('delivery_partners').get();
-    let riders: any[] = riderSnap.docs
+    const riders: any[] = riderSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
       .filter(r => r.franchiseId === id || (id === 'fra_rajnandgaon' && (!r.franchiseId || r.branchId === 'main_branch')));
-
-    if (riders.length === 0) {
-      riders = [
-        {
-          id: 'rider_01',
-          name: 'Ramesh Patel',
-          email: 'rider1@olivepizza.in',
-          phone: '+91 98261 11223',
-          franchiseId: id,
-          branchId: 'main_branch',
-          vehicleNumber: 'CG-08-AA-1234',
-          isActive: true,
-          isOnline: true,
-          rating: 4.9,
-          totalDeliveries: 342,
-          createdAt: new Date().toISOString()
-        },
-        {
-          id: 'rider_02',
-          name: 'Vikram Soni',
-          email: 'rider2@olivepizza.in',
-          phone: '+91 98261 44556',
-          franchiseId: id,
-          branchId: 'main_branch',
-          vehicleNumber: 'CG-08-BB-5678',
-          isActive: true,
-          isOnline: true,
-          rating: 4.8,
-          totalDeliveries: 289,
-          createdAt: new Date().toISOString()
-        }
-      ];
-    }
 
     res.json({ success: true, riders });
   } catch (error: any) {
@@ -755,8 +730,8 @@ router.post('/:id/pos-terminals/register', requireRole(['owner', 'admin', 'devel
     }
 
     const termId = `pos_${branchId}_${Date.now().toString().slice(-4)}`;
-    // Generate secure 6-digit activation code
-    const activationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    // Generate cryptographically random 6-digit activation code (NOT Math.random())
+    const activationCode = FranchisePinService.generateSecureActivationCode();
     const now = new Date().toISOString();
 
     const terminalData = {
@@ -853,6 +828,59 @@ router.get('/:id/reports', requireRole(['owner', 'admin', 'developer', 'platform
   try {
     const { id } = req.params;
     const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
+    const monthStart = `${currentMonth}-01T00:00:00.000Z`;
+    const monthEnd = new Date(new Date(monthStart).setMonth(new Date(monthStart).getMonth() + 1)).toISOString();
+
+    // Query real orders for this franchise in the current month
+    const orderSnap = await adminDb.collection('orders')
+      .where('franchiseId', '==', id)
+      .limit(500)
+      .get()
+      .catch(async () => {
+        // Fallback: unscoped query for legacy orders without franchiseId
+        return adminDb.collection('orders').limit(500).get();
+      });
+
+    let grossRevenue = 0;
+    let totalOrders = 0;
+    let posSales = 0;
+    let onlineSales = 0;
+    let taxCgst = 0;
+    let taxSgst = 0;
+    let discountsGiven = 0;
+    let refunds = 0;
+
+    orderSnap.docs.forEach(d => {
+      const o = d.data() as any;
+      // Scope to this month and this franchise
+      const oDate = o.createdAt || '';
+      if (oDate < monthStart || oDate >= monthEnd) return;
+      if (o.franchiseId && o.franchiseId !== id) return;
+
+      const amt = Number(o.totalAmount || 0);
+      const status = (o.status || '').toLowerCase();
+      if (status === 'cancelled' || status === 'rejected') return;
+
+      grossRevenue += amt;
+      totalOrders++;
+
+      const source = (o.orderSource || '').toLowerCase();
+      if (source === 'pos' || source.startsWith('pos_')) posSales += amt;
+      else onlineSales += amt;
+
+      taxCgst += Number(o.cgst || o.taxAmount ? Number(o.taxAmount || 0) / 2 : 0);
+      taxSgst += Number(o.sgst || o.taxAmount ? Number(o.taxAmount || 0) / 2 : 0);
+      discountsGiven += Number(o.discountAmount || 0);
+      if (status === 'refunded') refunds += amt;
+    });
+
+    const netSales = grossRevenue - discountsGiven - refunds;
+
+    // Get Google Sheets status for this franchise
+    let sheetsStatus: any = { status: 'UNKNOWN' };
+    try {
+      sheetsStatus = await FranchiseGoogleSheetsService.getFranchiseSheetsStatus(id) || { status: 'PROVISIONING_PENDING' };
+    } catch { /* Sheets may not be configured */ }
 
     res.json({
       success: true,
@@ -860,22 +888,22 @@ router.get('/:id/reports', requireRole(['owner', 'admin', 'developer', 'platform
         franchiseId: id,
         currentMonth,
         googleSheetsStatus: {
-          status: 'SYNCED',
-          workbookName: `Olive Pizza — ${id.toUpperCase()} — ${currentMonth}`,
-          lastSyncTime: new Date().toISOString(),
-          pendingRecords: 0,
-          failedRecords: 0
+          status: sheetsStatus.status || 'UNKNOWN',
+          workbookName: sheetsStatus.spreadsheetName || `Olive Pizza — ${id.toUpperCase()} — ${currentMonth}`,
+          lastSyncTime: sheetsStatus.lastSyncedAt || null,
+          pendingRecords: sheetsStatus.pendingSyncCount || 0,
+          failedRecords: sheetsStatus.failedSyncCount || 0
         },
         monthlySalesSummary: {
-          grossRevenue: 485900,
-          netSales: 462760,
-          totalOrders: 1140,
-          posSales: 298400,
-          onlineSales: 187500,
-          taxCgst: 11570,
-          taxSgst: 11570,
-          discountsGiven: 14200,
-          refunds: 1850
+          grossRevenue: Math.round(grossRevenue),
+          netSales: Math.round(netSales),
+          totalOrders,
+          posSales: Math.round(posSales),
+          onlineSales: Math.round(onlineSales),
+          taxCgst: Math.round(taxCgst),
+          taxSgst: Math.round(taxSgst),
+          discountsGiven: Math.round(discountsGiven),
+          refunds: Math.round(refunds)
         }
       }
     });
@@ -1079,7 +1107,7 @@ router.post('/provision', requireRole(['owner', 'admin', 'developer', 'platform_
 
     for (let i = 0; i < terminalCount; i++) {
       const termId = `pos_${branchId}_${i + 1}`;
-      const activationCode = Math.floor(100000 + Math.random() * 900000).toString();
+      const activationCode = FranchisePinService.generateSecureActivationCode();
       await adminDb.collection('pos_terminals').doc(termId).set({
         id: termId,
         organizationId: orgId,
@@ -1132,18 +1160,16 @@ router.post('/provision', requireRole(['owner', 'admin', 'developer', 'platform_
 // Default list fallback
 router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    await ensureFranchiseDefaults();
     const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
     const snap = await adminDb.collection('franchises').get().catch(() => ({ docs: [] } as any));
     let branches: any[] = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
-    if (branches.length === 0) branches = DEFAULT_BRANCHES;
 
     if (!scope.isGlobalOwner && !scope.isFranchiseOwner) {
       branches = branches.filter(b => scope.branchIds.includes(b.id) || scope.branchId === b.id);
     }
     res.json({ success: true, branches });
   } catch (error: any) {
-    res.json({ success: true, branches: DEFAULT_BRANCHES });
+    res.status(500).json({ error: 'Failed to load franchise data' });
   }
 });
 
@@ -1400,26 +1426,6 @@ router.get('/:id/access-accounts', requireRole(['owner', 'admin', 'developer', '
       });
     });
 
-    // Fallback sample accounts if database is empty for demo/testing
-    if (accounts.length === 0) {
-      accounts.push({
-        id: 'usr_rjn_lead',
-        name: 'Rahul Sharma',
-        email: 'manager.rjn@olivepizza.in',
-        role: 'franchise_manager',
-        branchId: 'all_branches',
-        accountStatus: 'ACTIVE',
-        applicationAccess: {
-          app_franchise_management: true,
-          app_restaurant_management: false,
-          app_pos: false, // Not initially provided
-          app_delivery: false
-        },
-        permissions: ['dashboard.view', 'branches.view', 'reports.view'],
-        updatedAt: new Date().toISOString()
-      });
-    }
-
     res.json({ success: true, accounts });
   } catch (error: any) {
     console.error('[FranchiseRoutes] Error loading access accounts:', error);
@@ -1541,9 +1547,9 @@ router.post('/:id/pos/provide', requireRole(['owner', 'admin', 'developer', 'pla
     const count = Math.max(1, Math.min(Number(posTerminalCount) || 1, 10));
 
     for (let i = 0; i < count; i++) {
-      const termSuffix = Math.floor(1000 + Math.random() * 9000);
+      const termSuffix = FranchisePinService.generateSecureTerminalSuffix();
       const terminalId = `pos_${branchId}_${termSuffix}`;
-      const activationCode = String(Math.floor(100000 + Math.random() * 900000));
+      const activationCode = FranchisePinService.generateSecureActivationCode();
 
       const termDoc = {
         id: terminalId,
@@ -1611,119 +1617,42 @@ router.get('/pos/all-terminals', requireRole(['owner', 'admin', 'developer', 'pl
 
     const userFranchiseId = req.user?.franchiseId;
 
-    // Fetch all franchises
+    // Fetch all franchises from Firestore
     const fSnap = await adminDb.collection('franchise_entities').get();
     const franchisesMap = new Map<string, any>();
     fSnap.docs.forEach(d => franchisesMap.set(d.id, { id: d.id, ...(d.data() as any) }));
 
-    // Fallback default franchises
-    if (franchisesMap.size === 0) {
-      franchisesMap.set('fra_rajnandgaon', { id: 'fra_rajnandgaon', name: 'Olive Pizza — Rajnandgaon Franchise', code: 'FRA-RJN-01', city: 'Rajnandgaon' });
-      franchisesMap.set('fra_durg', { id: 'fra_durg', name: 'Olive Pizza — Durg Franchise', code: 'FRA-DURG-02', city: 'Durg' });
-      franchisesMap.set('fra_bhilai', { id: 'fra_bhilai', name: 'Olive Pizza — Bhilai Franchise', code: 'FRA-BHL-03', city: 'Bhilai' });
-      franchisesMap.set('fra_raipur', { id: 'fra_raipur', name: 'Olive Pizza — Raipur Franchise', code: 'FRA-RPR-04', city: 'Raipur' });
-    }
-
-    // Fetch all branches
+    // Fetch all branches from Firestore
     const bSnap = await adminDb.collection('franchises').get();
     const branchesMap = new Map<string, any>();
     bSnap.docs.forEach(d => branchesMap.set(d.id, { id: d.id, ...(d.data() as any) }));
 
-    if (branchesMap.size === 0) {
-      branchesMap.set('main_branch', { id: 'main_branch', name: 'Olive Pizza — Rajnandgaon (Main)', franchiseId: 'fra_rajnandgaon' });
-      branchesMap.set('durg_branch', { id: 'durg_branch', name: 'Olive Pizza — Durg Main', franchiseId: 'fra_durg' });
-      branchesMap.set('bhilai_branch', { id: 'bhilai_branch', name: 'Olive Pizza — Bhilai Main', franchiseId: 'fra_bhilai' });
-      branchesMap.set('raipur_branch', { id: 'raipur_branch', name: 'Olive Pizza — Raipur Main', franchiseId: 'fra_raipur' });
-    }
-
-    // Fetch all POS terminals
+    // Fetch all POS terminals — strip activationCode before sending
     const posSnap = await adminDb.collection('pos_terminals').get();
-    let terminals = posSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
-
-    // Fallback default terminals if collection is fresh
-    if (terminals.length === 0) {
-      terminals = [
-        {
-          id: 'pos_main_branch_1',
-          terminalName: 'Front Counter #1 — Dine-In',
-          branchId: 'main_branch',
-          franchiseId: 'fra_rajnandgaon',
-          activationCode: '741852',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: true,
-          assignedUserName: 'Amit Verma (Cashier)',
-          currentShift: 'Morning Shift (09:00 - 17:00)',
-          todaySales: 18420,
-          todayOrders: 47,
-          lastSeenAt: new Date(Date.now() - 2 * 60 * 1000).toISOString()
-        },
-        {
-          id: 'pos_main_branch_2',
-          terminalName: 'Express Kiosk #2 — Takeaway',
-          branchId: 'main_branch',
-          franchiseId: 'fra_rajnandgaon',
-          activationCode: '184920',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: false,
-          assignedUserName: 'Unassigned',
-          currentShift: 'Evening Shift',
-          todaySales: 12210,
-          todayOrders: 29,
-          lastSeenAt: new Date(Date.now() - 45 * 60 * 1000).toISOString()
-        },
-        {
-          id: 'pos_durg_branch_1',
-          terminalName: 'Durg Counter #1',
-          branchId: 'durg_branch',
-          franchiseId: 'fra_durg',
-          activationCode: '582910',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: true,
-          assignedUserName: 'Rahul Singh (Cashier)',
-          currentShift: 'All-Day Shift',
-          todaySales: 21800,
-          todayOrders: 54,
-          lastSeenAt: new Date(Date.now() - 1 * 60 * 1000).toISOString()
-        },
-        {
-          id: 'pos_bhilai_branch_1',
-          terminalName: 'Bhilai Counter #1',
-          branchId: 'bhilai_branch',
-          franchiseId: 'fra_bhilai',
-          activationCode: '918274',
-          activationStatus: 'ACTIVATED',
-          isActive: true,
-          isOnline: true,
-          assignedUserName: 'Suresh Kumar',
-          currentShift: 'Day Shift',
-          todaySales: 16950,
-          todayOrders: 38,
-          lastSeenAt: new Date(Date.now() - 3 * 60 * 1000).toISOString()
-        }
-      ];
-    }
+    let terminals = posSnap.docs.map(d => {
+      const data = d.data() as any;
+      const { activationCode, ...safeData } = data;
+      return { id: d.id, ...safeData };
+    });
 
     // Filter by franchise if not global owner
     if (!isGlobalOwner && userFranchiseId) {
       terminals = terminals.filter(t => t.franchiseId === userFranchiseId);
     }
 
-    // Enrich with franchise and branch details
+    // Enrich with franchise and branch details — no fake fallback values
     const enriched = terminals.map(t => {
-      const fra = franchisesMap.get(t.franchiseId) || { name: 'Franchise', city: 'Chhattisgarh' };
-      const br = branchesMap.get(t.branchId) || { name: 'Branch' };
+      const fra = franchisesMap.get(t.franchiseId);
+      const br = branchesMap.get(t.branchId);
       return {
         ...t,
-        franchiseName: fra.name || fra.city,
-        franchiseCode: fra.code || 'FRA',
-        branchName: br.name || t.branchId,
-        todaySales: t.todaySales || 14800,
-        todayOrders: t.todayOrders || 32,
-        currentShift: t.currentShift || 'Current Active Shift',
-        assignedUserName: t.assignedUserName || 'Counter Cashier'
+        franchiseName: fra?.name || t.franchiseId,
+        franchiseCode: fra?.code || null,
+        branchName: br?.name || t.branchId,
+        todaySales: t.todaySales || 0,
+        todayOrders: t.todayOrders || 0,
+        currentShift: t.currentShift || null,
+        assignedUserName: t.assignedUserName || null
       };
     });
 
@@ -1824,21 +1753,46 @@ router.post('/pos/owner-context/switch', requireRole(['owner', 'admin', 'develop
 router.get('/:id/telemetry', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
+
+    // Resolve franchise name from Firestore
+    const fDoc = await adminDb.collection('franchise_entities').doc(id).get();
+    const franchiseName = fDoc.exists ? (fDoc.data() as any)?.name : id;
+
+    // Real order metrics
+    const orderSnap = await adminDb.collection('orders').limit(200).get().catch(() => ({ docs: [] } as any));
+    let todaySales = 0, todayOrders = 0, activeOrders = 0, completedOrders = 0;
+    const today = new Date().toISOString().slice(0, 10);
+    orderSnap.docs.forEach((d: any) => {
+      const o = d.data();
+      if (o.franchiseId && o.franchiseId !== id) return;
+      const oDate = (o.createdAt || '').slice(0, 10);
+      if (oDate !== today) return;
+      const status = (o.status || '').toLowerCase();
+      if (status !== 'cancelled' && status !== 'rejected') {
+        todaySales += Number(o.totalAmount || 0);
+        todayOrders++;
+      }
+      if (['pending','accepted','preparing','ready','out_for_delivery'].includes(status)) activeOrders++;
+      else if (['delivered','completed'].includes(status)) completedOrders++;
+    });
+
+    const posSnap = await adminDb.collection('pos_terminals').get().catch(() => ({ docs: [] } as any));
+    const activeTerminals = posSnap.docs.filter((d: any) => {
+      const t = d.data();
+      return (t.franchiseId === id) && t.isActive !== false;
+    }).length;
+
+    const riderSnap = await adminDb.collection('delivery_partners').get().catch(() => ({ docs: [] } as any));
+    const activeRiders = riderSnap.docs.filter((d: any) => {
+      const r = d.data();
+      return (r.franchiseId === id) && r.isActive !== false && r.isOnline === true;
+    }).length;
+
     res.json({
       success: true,
       franchiseId: id,
-      franchise: {
-        id,
-        name: id === 'fra_durg' ? 'Olive Pizza — Durg Franchise' : 'Olive Pizza — Rajnandgaon Franchise'
-      },
-      telemetry: {
-        todaySales: 38450,
-        todayOrders: 94,
-        activeOrders: 6,
-        completedOrders: 85,
-        activeTerminals: 3,
-        activeRiders: 4
-      }
+      franchise: { id, name: franchiseName },
+      telemetry: { todaySales, todayOrders, activeOrders, completedOrders, activeTerminals, activeRiders }
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -1850,29 +1804,9 @@ router.get('/:id/restaurants', requireRole(['owner', 'admin', 'developer', 'plat
   try {
     const { id } = req.params;
     const bSnap = await adminDb.collection('franchises').get();
-    let branches = bSnap.docs
+    const branches = bSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
       .filter(b => b.franchiseId === id || (id === 'fra_rajnandgaon' && (b.id === 'main_branch' || b.franchiseId === 'fra_primary')));
-
-    if (branches.length === 0) {
-      branches = [
-        {
-          id: id === 'fra_durg' ? 'durg_branch' : 'main_branch',
-          name: id === 'fra_durg' ? 'Olive Pizza — Durg Station Rd' : 'Olive Pizza — Rajnandgaon HQ',
-          franchiseId: id,
-          address: id === 'fra_durg' ? 'Shop 12, Station Rd, Durg' : 'Dongargaon Rd, near Saraswati school, Rajnandgaon',
-          phone: '+91 91799 44445',
-          managerName: 'Sunil Verma',
-          managerEmail: 'manager@olivepizza.in',
-          isOpen: true,
-          todaySales: 28450,
-          activeOrdersCount: 4,
-          deliveryRadiusKm: 5,
-          openingTime: '10:00 AM',
-          closingTime: '11:00 PM'
-        }
-      ];
-    }
 
     res.json({
       success: true,
