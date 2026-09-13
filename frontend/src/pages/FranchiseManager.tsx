@@ -59,11 +59,11 @@ export interface FranchiseBranch {
   slug?: string;
 }
 
-// Canonical Rajnandgaon HQ location — no fake franchises
+// Canonical Rajnandgaon location — no fake franchises
 const CANONICAL_DEFAULT_BRANCHES: FranchiseBranch[] = [
   {
     id: 'main_branch',
-    name: 'Olive Pizza — Rajnandgaon (Main Branch)',
+    name: 'Olive Pizza — Rajnandgaon',
     code: 'OP-RJN-01',
     city: 'Rajnandgaon',
     state: 'Chhattisgarh',
@@ -80,7 +80,7 @@ const CANONICAL_DEFAULT_BRANCHES: FranchiseBranch[] = [
     openingTime: '12:00',
     closingTime: '23:59',
     isActive: true,
-    isHeadquarters: true,
+    isHeadquarters: false,
     posTerminalCount: 1,
     slug: 'rajnandgaon'
   }
@@ -492,11 +492,6 @@ export default function FranchiseManager() {
                       <h3 className="font-extrabold text-white text-base leading-tight">
                         {branch.name}
                       </h3>
-                      {branch.isHeadquarters && (
-                        <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-orange-500/20 text-orange-400 border border-orange-500/30">
-                          HQ
-                        </span>
-                      )}
                     </div>
                     <div className="flex items-center gap-2 text-xs text-slate-400">
                       <span className="font-mono text-orange-400 font-bold">{branch.code}</span>
@@ -557,11 +552,11 @@ export default function FranchiseManager() {
                 {/* Actions: Show Live, Manage Workspace, Edit, View & Power */}
                 <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-2">
-                    {/* Show Live Button (Navigates to in-app Live Orders tab) */}
+                    {/* Show Live Button (Navigates to in-app Live Dashboard & Reports tab) */}
                     <button
-                      onClick={() => navigate(`/franchise-management/${(branch as any).slug || (branch.id === 'main_branch' ? 'rajnandgaon' : branch.id.replace('fra_', ''))}?tab=live-orders`)}
+                      onClick={() => navigate(`/franchise-management/${(branch as any).slug || (branch.id === 'main_branch' ? 'rajnandgaon' : branch.id.replace('fra_', ''))}?tab=live-dashboard`)}
                       className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 font-bold text-xs transition-all cursor-pointer group shadow-sm"
-                      title="View Real-Time Live Orders & Kitchen Queue"
+                      title="View Real-Time Live Franchise Dashboard & Operational Reports"
                     >
                       <span className="relative flex h-2 w-2">
                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>

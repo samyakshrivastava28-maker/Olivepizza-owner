@@ -44,8 +44,8 @@ export class FranchiseSeedService {
         {
           id: FranchiseScopeService.DEFAULT_FRANCHISE_ID,
           organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
-          name: 'Olive Pizza Primary Franchise',
-          code: 'FRA-IN-01',
+          name: 'Olive Pizza — Rajnandgaon',
+          code: 'OP-RJN-01',
           region: 'Chhattisgarh',
           contactEmail: 'olivepizzarjn@gmail.com',
           contactPhone: '+91 91799 44445',
@@ -58,13 +58,13 @@ export class FranchiseSeedService {
         { merge: true }
       );
 
-      // 3. Seed canonical branch documents (Only Rajnandgaon HQ)
+      // 3. Seed canonical branch documents (Only Rajnandgaon)
       const defaultBranches = [
         {
           id: 'main_branch',
           organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
           franchiseId: FranchiseScopeService.DEFAULT_FRANCHISE_ID,
-          name: 'Olive Pizza — Rajnandgaon (Main Branch)',
+          name: 'Olive Pizza — Rajnandgaon',
           code: 'OP-RJN-01',
           city: 'Rajnandgaon',
           state: 'Chhattisgarh',
@@ -78,8 +78,7 @@ export class FranchiseSeedService {
           maxDeliveryRadiusKm: 15,
           openingTime: '12:00',
           closingTime: '23:59',
-          isActive: true,
-          isHeadquarters: true
+          isActive: true
         }
       ];
 

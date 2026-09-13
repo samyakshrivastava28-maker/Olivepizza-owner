@@ -35,7 +35,7 @@ interface ManagerItem {
 }
 
 const AVAILABLE_BRANCHES = [
-  { id: 'main_branch', name: 'Olive Pizza — Rajnandgaon (Main Branch)' }
+  { id: 'main_branch', name: 'Olive Pizza — Rajnandgaon' }
 ];
 
 const PERMISSION_OPTIONS = [

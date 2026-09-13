@@ -1254,10 +1254,7 @@ router.get('/all-terminals', verifyToken, requireRole(['owner', 'admin', 'develo
     fSnap.docs.forEach(d => franchisesMap.set(d.id, { id: d.id, ...(d.data() as any) }));
 
     if (franchisesMap.size === 0) {
-      franchisesMap.set('fra_rajnandgaon', { id: 'fra_rajnandgaon', name: 'Olive Pizza — Rajnandgaon Franchise', code: 'FRA-RJN-01', city: 'Rajnandgaon' });
-      franchisesMap.set('fra_durg', { id: 'fra_durg', name: 'Olive Pizza — Durg Franchise', code: 'FRA-DURG-02', city: 'Durg' });
-      franchisesMap.set('fra_bhilai', { id: 'fra_bhilai', name: 'Olive Pizza — Bhilai Franchise', code: 'FRA-BHL-03', city: 'Bhilai' });
-      franchisesMap.set('fra_raipur', { id: 'fra_raipur', name: 'Olive Pizza — Raipur Franchise', code: 'FRA-RPR-04', city: 'Raipur' });
+      franchisesMap.set('fra_rajnandgaon', { id: 'fra_rajnandgaon', name: 'Olive Pizza — Rajnandgaon', code: 'OP-RJN-01', city: 'Rajnandgaon' });
     }
 
     // Fetch all branches
@@ -1266,10 +1263,7 @@ router.get('/all-terminals', verifyToken, requireRole(['owner', 'admin', 'develo
     bSnap.docs.forEach(d => branchesMap.set(d.id, { id: d.id, ...(d.data() as any) }));
 
     if (branchesMap.size === 0) {
-      branchesMap.set('main_branch', { id: 'main_branch', name: 'Olive Pizza — Rajnandgaon (Main)', franchiseId: 'fra_rajnandgaon' });
-      branchesMap.set('durg_branch', { id: 'durg_branch', name: 'Olive Pizza — Durg Main', franchiseId: 'fra_durg' });
-      branchesMap.set('bhilai_branch', { id: 'bhilai_branch', name: 'Olive Pizza — Bhilai Main', franchiseId: 'fra_bhilai' });
-      branchesMap.set('raipur_branch', { id: 'raipur_branch', name: 'Olive Pizza — Raipur Main', franchiseId: 'fra_raipur' });
+      branchesMap.set('main_branch', { id: 'main_branch', name: 'Olive Pizza — Rajnandgaon', franchiseId: 'fra_rajnandgaon' });
     }
 
     // Fetch all POS terminals
@@ -2004,10 +1998,7 @@ router.get('/branches', verifyToken, requirePOSRole, async (req: AuthRequest, re
 
     if (branches.length === 0) {
       branches = [
-        { franchiseId: 'fra_rajnandgaon', branchId: 'main_branch', name: 'Olive Pizza — Rajnandgaon (HQ)', code: 'OP-RJN-01', city: 'Rajnandgaon' },
-        { franchiseId: 'fra_durg', branchId: 'durg_branch', name: 'Olive Pizza — Durg Branch', code: 'OP-DURG-02', city: 'Durg' },
-        { franchiseId: 'fra_bhilai', branchId: 'bhilai_branch', name: 'Olive Pizza — Bhilai Central', code: 'OP-BHL-03', city: 'Bhilai' },
-        { franchiseId: 'fra_raipur', branchId: 'raipur_branch', name: 'Olive Pizza — Raipur Hub', code: 'OP-RPR-04', city: 'Raipur' }
+        { franchiseId: 'fra_rajnandgaon', branchId: 'main_branch', name: 'Olive Pizza — Rajnandgaon', code: 'OP-RJN-01', city: 'Rajnandgaon' }
       ];
     }
 

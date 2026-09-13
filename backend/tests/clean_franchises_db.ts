@@ -17,7 +17,7 @@ async function purgeAndClean() {
   await adminDb.collection('franchise_entities').doc('fra_rajnandgaon').set({
     id: 'fra_rajnandgaon',
     slug: 'rajnandgaon',
-    name: 'Olive Pizza — Rajnandgaon (HQ)',
+    name: 'Olive Pizza — Rajnandgaon',
     code: 'OP-RJN-01',
     city: 'Rajnandgaon',
     state: 'Chhattisgarh',
@@ -44,12 +44,12 @@ async function purgeAndClean() {
   }, { merge: true });
   console.log('✅ Canonical fra_rajnandgaon updated in franchise_entities');
 
-  // 2. Purge unwanted branches from 'franchises' collection
-  const branchesToKeep = ['main_branch', 'fra_rajnandgaon'];
+  // 2. Purge unwanted branches from 'franchises' collection - only main_branch should exist
+  const branchesToKeep = ['main_branch'];
   const fBranchesSnap = await adminDb.collection('franchises').get();
   for (const doc of fBranchesSnap.docs) {
-    if (!branchesToKeep.includes(doc.id) && !doc.id.startsWith('main_branch')) {
-      console.log(`Deleting franchises (branch) doc: ${doc.id}`);
+    if (!branchesToKeep.includes(doc.id)) {
+      console.log(`Deleting extra franchises doc: ${doc.id}`);
       await doc.ref.delete();
     }
   }
@@ -58,7 +58,7 @@ async function purgeAndClean() {
   await adminDb.collection('franchises').doc('main_branch').set({
     id: 'main_branch',
     franchiseId: 'fra_rajnandgaon',
-    name: 'Olive Pizza — Rajnandgaon (Main Branch)',
+    name: 'Olive Pizza — Rajnandgaon',
     code: 'OP-RJN-01',
     city: 'Rajnandgaon',
     state: 'Chhattisgarh',
@@ -73,11 +73,25 @@ async function purgeAndClean() {
     openingTime: '12:00',
     closingTime: '23:59',
     isActive: true,
-    isHeadquarters: true,
+    isHeadquarters: false,
     posTerminalCount: 1,
     updatedAt: new Date().toISOString()
   }, { merge: true });
   console.log('✅ Canonical main_branch updated in franchises');
+
+  // Also ensure franchise_metadata is updated
+  await adminDb.collection('franchise_metadata').doc('fra_primary').set({
+    id: 'fra_primary',
+    name: 'Olive Pizza — Rajnandgaon',
+    code: 'OP-RJN-01',
+    region: 'Chhattisgarh',
+    contactEmail: 'olivepizzarjn@gmail.com',
+    contactPhone: '+91 91799 44445',
+    isActive: true,
+    defaultBranchId: 'main_branch',
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+  console.log('✅ Canonical franchise_metadata updated');
 
   console.log('Purge completed successfully.');
 }
