@@ -3,6 +3,7 @@ import { pgPool } from '../../config/postgres.js';
 import { randomUUID } from 'crypto';
 import { PreparationTimeEngine } from './PreparationTimeEngine.js';
 import { RiderDispatchEngine } from '../delivery/RiderDispatchEngine.js';
+import { StoreBoundDeliveryFleetService } from '../delivery/StoreBoundDeliveryFleetService.js';
 import { notificationEngine } from '../notification/NotificationEngine.js';
 import { OwnerTemplates, CustomerTemplates, RestaurantTemplates, DeliveryTemplates } from '../notification/NotificationTemplates.js';
 
@@ -274,11 +275,12 @@ export class OrderStateMachine {
 
         case 'ready': {
           updates.readyAt = nowIso;
-          // If this is a delivery order without an assigned partner yet, auto-dispatch immediately
+          // If this is a delivery order without an assigned partner yet, auto-dispatch immediately using Store FIFO Queue
           const fulfillment = (orderData.fulfillmentType || orderData.deliveryType || 'delivery').toLowerCase();
           if (fulfillment === 'delivery' && !orderData.deliveryPartnerId && !metadata.deliveryPartnerId) {
-            RiderDispatchEngine.autoDispatchRider(orderId).catch((e) =>
-              console.warn('[OrderStateMachine] Auto-dispatch on ready notice:', e.message)
+            const branchId = orderData.branchId || 'main_branch';
+            StoreBoundDeliveryFleetService.assignOrderToFifoRider(orderId, branchId).catch((e) =>
+              console.warn('[OrderStateMachine] Store FIFO dispatch on ready notice:', e.message)
             );
           }
           break;

@@ -11,6 +11,7 @@ import { notificationEngine } from '../services/notification/NotificationEngine.
 import { DeliveryCapacityService } from '../services/delivery/DeliveryCapacityService.js';
 import { webSocketServer } from '../services/websocket/WebSocketServer.js';
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
+import { StoreBoundDeliveryFleetService, RiderOperationalState } from '../services/delivery/StoreBoundDeliveryFleetService.js';
 
 const router = Router();
 
@@ -448,6 +449,144 @@ router.post('/orders/:id/assign-partner', requireRole(['restaurant_manager', 'ow
   }
 });
 
+// ─── POST /orders/:id/manual-assign — Server-Authoritative Manual Fleet Override ───
+router.post('/orders/:id/manual-assign', requireRole(['restaurant_manager', 'owner', 'admin', 'developer', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { deliveryPartnerId, reason } = req.body;
+
+    if (!deliveryPartnerId) {
+      res.status(400).json({ error: 'deliveryPartnerId is required' });
+      return;
+    }
+    if (!reason || reason.trim().length < 3) {
+      res.status(400).json({ error: 'A valid reason is required for manual assignment override.' });
+      return;
+    }
+
+    const actor = {
+      uid: req.user!.uid,
+      role: req.user!.role || 'restaurant_manager',
+      name: req.user!.email || 'Manager'
+    };
+
+    const result = await StoreBoundDeliveryFleetService.manualAssignRider(id, deliveryPartnerId, actor, reason);
+    if (!result.success) {
+      res.status(400).json({ error: result.error || 'Manual assignment failed' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Rider assigned via manual override', orderId: id, deliveryPartnerId });
+  } catch (err: any) {
+    console.error('[Delivery Routes] manual-assign error:', err);
+    res.status(500).json({ error: err.message || 'Failed to assign rider' });
+  }
+});
+
+// ─── POST /orders/:id/emergency-reassign — Emergency Reassignment ───────────
+router.post('/orders/:id/emergency-reassign', requireRole(['restaurant_manager', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { reason, targetRiderId } = req.body;
+
+    if (!reason || reason.trim().length < 3) {
+      res.status(400).json({ error: 'A valid reason is required for emergency reassignment.' });
+      return;
+    }
+
+    const actor = {
+      uid: req.user!.uid,
+      role: req.user!.role || 'restaurant_manager',
+      name: req.user!.email || 'Manager'
+    };
+
+    const result = await StoreBoundDeliveryFleetService.emergencyReassign(id, reason, actor, targetRiderId);
+    if (!result.success) {
+      res.status(400).json({ error: result.error || 'Emergency reassignment failed' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Emergency reassignment processed', orderId: id, newRiderId: result.newRiderId });
+  } catch (err: any) {
+    console.error('[Delivery Routes] emergency-reassign error:', err);
+    res.status(500).json({ error: err.message || 'Failed to process emergency reassignment' });
+  }
+});
+
+// ─── GET /stores/:storeId/fleet-queue — Live Store Fleet & FIFO Queue ────────
+router.get('/stores/:storeId/fleet-queue', requireRole(['restaurant_manager', 'owner', 'admin', 'developer', 'delivery', 'delivery_partner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { storeId } = req.params;
+    const fleet = await StoreBoundDeliveryFleetService.getStoreFleet(storeId);
+    const fifoQueue = await StoreBoundDeliveryFleetService.getStoreFifoQueue(storeId);
+
+    res.json({
+      success: true,
+      storeId,
+      fleet,
+      fifoQueue,
+      counts: {
+        total: fleet.length,
+        available: fifoQueue.length,
+        onDelivery: fleet.filter(r => r.state === 'OUT_FOR_DELIVERY' || r.state === 'RESERVED').length,
+        offline: fleet.filter(r => r.state === 'OFFLINE').length,
+        paused: fleet.filter(r => r.state === 'PAUSED').length,
+      }
+    });
+  } catch (err: any) {
+    console.error('[Delivery Routes] fleet-queue error:', err);
+    res.status(500).json({ error: 'Failed to fetch store fleet queue' });
+  }
+});
+
+// ─── POST /rider/state — Rider Self-State Transition (AVAILABLE, PAUSED, RETURNING, OFFLINE) ──
+router.post('/rider/state', requireRole(['delivery', 'delivery_partner', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.user!.uid;
+    const { state, reason } = req.body;
+
+    const validStates: RiderOperationalState[] = ['AVAILABLE', 'RETURNING', 'PAUSED', 'OFFLINE'];
+    if (!validStates.includes(state)) {
+      res.status(400).json({ error: `Invalid operational state. Allowed: ${validStates.join(', ')}` });
+      return;
+    }
+
+    const result = await StoreBoundDeliveryFleetService.updateRiderState(uid, state, { reason });
+    if (!result.success) {
+      res.status(400).json({ error: result.error || 'Failed to update rider operational state' });
+      return;
+    }
+
+    res.json({ success: true, state: result.state });
+  } catch (err: any) {
+    console.error('[Delivery Routes] rider/state error:', err);
+    res.status(500).json({ error: 'Failed to update rider operational state' });
+  }
+});
+
+// ─── GET /audit-logs — Delivery Assignment Audit Logs ────────────────────────
+router.get('/audit-logs', requireRole(['restaurant_manager', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { orderId, branchId, limit = '50' } = req.query;
+    let q: any = adminDb.collection('delivery_fleet_audit_logs');
+
+    if (orderId) {
+      q = q.where('orderId', '==', String(orderId));
+    } else if (branchId) {
+      q = q.where('branchId', '==', String(branchId));
+    }
+
+    const snap = await q.limit(Number(limit)).get();
+    const logs = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+    logs.sort((a: any, b: any) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
+
+    res.json({ success: true, logs });
+  } catch (err: any) {
+    console.error('[Delivery Routes] audit-logs error:', err);
+    res.status(500).json({ error: 'Failed to fetch audit logs' });
+  }
+});
+
 // ─── POST /orders/:id/decline — Rider Assignment Decline & Reassignment ────
 router.post('/orders/:id/decline', requireRole(['delivery', 'delivery_partner', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -580,6 +719,8 @@ router.get('/rider/stats', requireRole(['delivery', 'delivery_partner', 'owner',
     let active = 0;
     let cancelled = 0;
     let earnings = 0;
+    let totalDurationMin = 0;
+    let durationCount = 0;
 
     ordersSnap.forEach((doc) => {
       const order = doc.data();
@@ -587,12 +728,22 @@ router.get('/rider/stats', requireRole(['delivery', 'delivery_partner', 'owner',
       if (order.status === 'delivered') {
         completed++;
         earnings += 40; // Flat ₹40 payout per delivered order
+
+        // Real duration calculation
+        const start = order.pickedUpAt ? new Date(order.pickedUpAt).getTime() : (order.partnerAssignedAt ? new Date(order.partnerAssignedAt).getTime() : null);
+        const end = order.deliveredAt ? new Date(order.deliveredAt).getTime() : null;
+        if (start && end && end > start) {
+          totalDurationMin += (end - start) / (60 * 1000);
+          durationCount++;
+        }
       } else if (['partner_assigned', 'picked_up', 'out_for_delivery'].includes(order.status)) {
         active++;
       } else if (order.status === 'cancelled') {
         cancelled++;
       }
     });
+
+    const averageDeliveryTimeMin = durationCount > 0 ? Math.round(totalDurationMin / durationCount) : 0;
 
     res.json({
       success: true,
@@ -601,8 +752,8 @@ router.get('/rider/stats', requireRole(['delivery', 'delivery_partner', 'owner',
         completed,
         active,
         cancelled,
-        totalDistanceKm: Number((completed * 3.5).toFixed(1)),
-        averageDeliveryTimeMin: 22,
+        totalDistanceKm: 0, // Computed strictly from live GPS odometer in delivery app
+        averageDeliveryTimeMin,
         earnings,
         date: todayStr
       }
@@ -629,15 +780,37 @@ router.get('/rider/reports', requireRole(['delivery', 'delivery_partner', 'owner
     const deliveredCount = ordersSnap.size;
     const monthlyEarnings = deliveredCount * 40;
 
-    const reports = [
+    // Calculate real on-time rate and ratings from actual orders
+    let onTimeCount = 0;
+    let totalRated = 0;
+    let sumRating = 0;
+
+    ordersSnap.forEach((d) => {
+      const o = d.data();
+      const start = o.pickedUpAt ? new Date(o.pickedUpAt).getTime() : (o.partnerAssignedAt ? new Date(o.partnerAssignedAt).getTime() : null);
+      const end = o.deliveredAt ? new Date(o.deliveredAt).getTime() : null;
+      if (start && end) {
+        const dur = (end - start) / (60 * 1000);
+        if (dur <= 30) onTimeCount++; // Target within 30 minutes
+      }
+      if (typeof o.riderRating === 'number' && o.riderRating > 0) {
+        sumRating += o.riderRating;
+        totalRated++;
+      }
+    });
+
+    const onTimeRate = deliveredCount > 0 ? Math.round((onTimeCount / deliveredCount) * 100) : 0;
+    const averageRating = totalRated > 0 ? Number((sumRating / totalRated).toFixed(1)) : 5.0;
+
+    const reports = deliveredCount > 0 ? [
       {
         month: currentMonth,
         totalDeliveries: deliveredCount,
         totalEarnings: monthlyEarnings,
-        averageRating: 4.9,
-        onTimeRate: 96
+        averageRating,
+        onTimeRate
       }
-    ];
+    ] : [];
 
     res.json({ success: true, reports });
   } catch (err: any) {
