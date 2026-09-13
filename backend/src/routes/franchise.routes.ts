@@ -57,6 +57,185 @@ export interface FranchiseEntity {
 
 router.use(verifyToken);
 
+// ─── 0. GET ALL FRANCHISES & BRANCHES (DEFAULT ENTRYPOINT) ───────────────────
+router.get('/', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
+
+    // Fetch franchise entities from Firestore
+    const entitySnap = await adminDb.collection('franchise_entities').get();
+    let franchiseEntities: any[] = entitySnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+
+    // Fetch branches from Firestore
+    const branchSnap = await adminDb.collection('franchises').get();
+    let branches: any[] = branchSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+
+    // If non-global owner, scope records
+    if (!scope.isGlobalOwner) {
+      franchiseEntities = franchiseEntities.filter(f => f.id === scope.franchiseId || f.slug === scope.franchiseId);
+      const allowedBranchIds = branches
+        .filter(b => b.franchiseId === scope.franchiseId || (scope.franchiseId === 'fra_rajnandgaon' && b.id === 'main_branch'))
+        .map(b => b.id);
+      branches = branches.filter(b => allowedBranchIds.includes(b.id));
+    }
+
+    // Merge entity meta into branch records if missing
+    branches = branches.map(b => {
+      const parentEntity = franchiseEntities.find(fe => fe.id === b.franchiseId || (fe.id === 'fra_rajnandgaon' && b.id === 'main_branch'));
+      return {
+        ...b,
+        slug: parentEntity?.slug || (b.id === 'main_branch' ? 'rajnandgaon' : b.id.replace('fra_', '').replace('_branch', '')),
+        franchiseName: parentEntity?.name || b.name,
+        franchiseOwnerName: parentEntity?.franchiseOwnerName || b.franchiseOwnerName || 'Olive Pizza Master Owner',
+        franchiseOwnerEmail: b.franchiseOwnerEmail || parentEntity?.franchiseOwnerEmail || parentEntity?.contactEmail || 'olivepizzarjn@gmail.com',
+        restaurantManagerEmail: b.restaurantManagerEmail || parentEntity?.restaurantManagerEmail || 'webhub2811@gmail.com',
+        restaurantManagerName: b.restaurantManagerName || parentEntity?.restaurantManagerName || 'Primary Branch Manager'
+      };
+    });
+
+    res.json({
+      success: true,
+      branches,
+      franchises: franchiseEntities
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error in GET /:', error);
+    res.status(500).json({ error: 'Failed to retrieve franchises and branches' });
+  }
+});
+
+// ─── 0.1 UPDATE FRANCHISE / BRANCH DETAILS ──────────────────────────────────
+router.patch('/:id', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const body = req.body;
+
+    const branchRef = adminDb.collection('franchises').doc(id);
+    const branchDoc = await branchRef.get();
+
+    // Check if it exists in franchise_entities as well
+    const entityRef = adminDb.collection('franchise_entities').doc(id.startsWith('fra_') ? id : `fra_${id}`);
+    const altEntityRef = adminDb.collection('franchise_entities').doc(branchDoc.exists ? (branchDoc.data()?.franchiseId || id) : id);
+    const entityDoc = await entityRef.get();
+    const targetEntityRef = entityDoc.exists ? entityRef : (await altEntityRef.get()).exists ? altEntityRef : null;
+
+    if (!branchDoc.exists && !targetEntityRef) {
+      res.status(404).json({ error: `Franchise/branch with id '${id}' not found in database`, code: 'NOT_FOUND' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const updateData: Record<string, any> = {
+      updatedAt: now,
+      updatedBy: req.user?.email || req.user?.uid || 'owner'
+    };
+
+    const allowedFields = [
+      'name', 'code', 'city', 'state', 'region', 'address', 'phone', 'email',
+      'contactPhone', 'contactEmail', 'franchiseOwnerName', 'franchiseOwnerEmail',
+      'restaurantManagerName', 'restaurantManagerEmail', 'maxDeliveryRadiusKm',
+      'openingTime', 'closingTime', 'posTerminalCount', 'isActive', 'isHeadquarters'
+    ];
+
+    for (const field of allowedFields) {
+      if (body[field] !== undefined) {
+        if (['maxDeliveryRadiusKm', 'posTerminalCount'].includes(field)) {
+          updateData[field] = Number(body[field]);
+        } else if (['isActive', 'isHeadquarters'].includes(field)) {
+          updateData[field] = Boolean(body[field]);
+        } else {
+          updateData[field] = typeof body[field] === 'string' ? body[field].trim() : body[field];
+        }
+      }
+    }
+
+    if (body.lat !== undefined) updateData.lat = Number(body.lat);
+    if (body.lng !== undefined) updateData.lng = Number(body.lng);
+
+    // Update franchises doc if exists
+    if (branchDoc.exists) {
+      await branchRef.set(updateData, { merge: true });
+    }
+
+    // Update franchise_entities doc if exists
+    if (targetEntityRef) {
+      await targetEntityRef.set(updateData, { merge: true });
+    }
+
+    await FranchiseScopeService.logFranchiseAudit({
+      organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
+      franchiseId: targetEntityRef ? targetEntityRef.id : id,
+      branchId: id,
+      actorUid: req.user?.uid || 'owner',
+      actorEmail: req.user?.email || 'owner@olivepizza.in',
+      actionType: 'FRANCHISE_UPDATED',
+      entityType: 'franchise_branch',
+      entityId: id,
+      details: updateData
+    });
+
+    const refreshedDoc = branchDoc.exists ? await branchRef.get() : (await targetEntityRef?.get());
+    res.json({
+      success: true,
+      message: 'Franchise details updated successfully',
+      branch: { id, ...(refreshedDoc?.data() || updateData) }
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error updating franchise:', error);
+    res.status(500).json({ error: error.message || 'Failed to update franchise details' });
+  }
+});
+
+// ─── 0.2 TOGGLE FRANCHISE / BRANCH STATUS ───────────────────────────────────
+router.patch('/:id/status', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { isActive } = req.body;
+
+    if (typeof isActive !== 'boolean') {
+      res.status(400).json({ error: 'isActive boolean flag is required' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const branchRef = adminDb.collection('franchises').doc(id);
+    const branchDoc = await branchRef.get();
+
+    const entityRef = adminDb.collection('franchise_entities').doc(id.startsWith('fra_') ? id : `fra_${id}`);
+    const altEntityRef = adminDb.collection('franchise_entities').doc(branchDoc.exists ? (branchDoc.data()?.franchiseId || id) : id);
+    const entityDoc = await entityRef.get();
+    const targetEntityRef = entityDoc.exists ? entityRef : (await altEntityRef.get()).exists ? altEntityRef : null;
+
+    if (branchDoc.exists) {
+      await branchRef.set({ isActive, updatedAt: now }, { merge: true });
+    }
+    if (targetEntityRef) {
+      await targetEntityRef.set({
+        isActive,
+        status: isActive ? 'ACTIVE' : 'SUSPENDED',
+        updatedAt: now
+      }, { merge: true });
+    }
+
+    await FranchiseScopeService.logFranchiseAudit({
+      organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
+      franchiseId: targetEntityRef ? targetEntityRef.id : id,
+      branchId: id,
+      actorUid: req.user?.uid || 'owner',
+      actorEmail: req.user?.email || 'owner@olivepizza.in',
+      actionType: isActive ? 'FRANCHISE_ACTIVATED' : 'FRANCHISE_DEACTIVATED',
+      entityType: 'franchise_branch',
+      entityId: id,
+      details: { isActive }
+    });
+
+    res.json({ success: true, message: `Franchise ${isActive ? 'activated' : 'deactivated'} successfully`, isActive });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error updating franchise status:', error);
+    res.status(500).json({ error: error.message || 'Failed to update franchise status' });
+  }
+});
+
 // ─── 1. LIST ALL FRANCHISES (FOR GLOBAL OWNER OR FRANCHISE OWNER) ───────────
 router.get('/list', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {

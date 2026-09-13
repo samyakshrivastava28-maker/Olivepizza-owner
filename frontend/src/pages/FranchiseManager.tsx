@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router';
 import {
   Building2,
   Plus,
@@ -23,7 +24,9 @@ import {
   Layers,
   Map,
   Check,
-  AlertCircle
+  AlertCircle,
+  Save,
+  Radio
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { collection, getDocs, doc, setDoc, updateDoc } from 'firebase/firestore';
@@ -42,7 +45,9 @@ export interface FranchiseBranch {
   lng: number;
   phone: string;
   email: string;
+  franchiseOwnerName?: string;
   franchiseOwnerEmail?: string;
+  restaurantManagerName?: string;
   restaurantManagerEmail?: string;
   maxDeliveryRadiusKm: number;
   openingTime: string;
@@ -51,6 +56,7 @@ export interface FranchiseBranch {
   isHeadquarters?: boolean;
   posTerminalCount?: number;
   createdAt?: string;
+  slug?: string;
 }
 
 // Canonical Rajnandgaon HQ location — no fake franchises
@@ -66,18 +72,22 @@ const CANONICAL_DEFAULT_BRANCHES: FranchiseBranch[] = [
     lng: 81.0123793,
     phone: '+91 91799 44445',
     email: 'olivepizzarjn@gmail.com',
+    franchiseOwnerName: 'Olive Pizza Master Owner',
     franchiseOwnerEmail: 'olivepizzarjn@gmail.com',
+    restaurantManagerName: 'Primary Branch Manager',
     restaurantManagerEmail: 'webhub2811@gmail.com',
     maxDeliveryRadiusKm: 15,
     openingTime: '12:00',
     closingTime: '23:59',
     isActive: true,
     isHeadquarters: true,
-    posTerminalCount: 2
+    posTerminalCount: 1,
+    slug: 'rajnandgaon'
   }
 ];
 
 export default function FranchiseManager() {
+  const navigate = useNavigate();
   const [branches, setBranches] = useState<FranchiseBranch[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -111,8 +121,97 @@ export default function FranchiseManager() {
   const [wizPosCount, setWizPosCount] = useState(1);
   const [wizPosNames, setWizPosNames] = useState(['Counter 1']);
 
-  // Edit Modal
+  // Edit Modal State
   const [editingBranch, setEditingBranch] = useState<FranchiseBranch | null>(null);
+  const [editForm, setEditForm] = useState({
+    name: '',
+    code: '',
+    city: '',
+    state: '',
+    address: '',
+    lat: 21.0810244,
+    lng: 81.0123793,
+    phone: '+91 91799 44445',
+    email: 'olivepizzarjn@gmail.com',
+    franchiseOwnerName: 'Olive Pizza Master Owner',
+    franchiseOwnerEmail: 'olivepizzarjn@gmail.com',
+    restaurantManagerName: 'Primary Branch Manager',
+    restaurantManagerEmail: 'webhub2811@gmail.com',
+    openingTime: '12:00',
+    closingTime: '23:59',
+    maxDeliveryRadiusKm: 15,
+    posTerminalCount: 1,
+    isActive: true
+  });
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [showEditMapPicker, setShowEditMapPicker] = useState(false);
+
+  const handleOpenEdit = (branch: FranchiseBranch) => {
+    setEditingBranch(branch);
+    setEditForm({
+      name: branch.name || '',
+      code: branch.code || '',
+      city: branch.city || '',
+      state: branch.state || 'Chhattisgarh',
+      address: branch.address || '',
+      lat: typeof branch.lat === 'number' && !isNaN(branch.lat) ? branch.lat : 21.0810244,
+      lng: typeof branch.lng === 'number' && !isNaN(branch.lng) ? branch.lng : 81.0123793,
+      phone: branch.phone || '+91 91799 44445',
+      email: branch.email || 'olivepizzarjn@gmail.com',
+      franchiseOwnerName: (branch as any).franchiseOwnerName || 'Olive Pizza Master Owner',
+      franchiseOwnerEmail: branch.franchiseOwnerEmail || 'olivepizzarjn@gmail.com',
+      restaurantManagerName: (branch as any).restaurantManagerName || 'Primary Branch Manager',
+      restaurantManagerEmail: branch.restaurantManagerEmail || 'webhub2811@gmail.com',
+      openingTime: branch.openingTime || '12:00',
+      closingTime: branch.closingTime || '23:59',
+      maxDeliveryRadiusKm: Number(branch.maxDeliveryRadiusKm) || 15,
+      posTerminalCount: Number(branch.posTerminalCount) || 1,
+      isActive: branch.isActive !== false
+    });
+    setShowEditMapPicker(false);
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingBranch) return;
+    if (!editForm.name.trim() || !editForm.city.trim()) {
+      toast.error('Franchise name and city are required');
+      return;
+    }
+
+    setIsSavingEdit(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${editingBranch.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(editForm)
+      });
+      const data = await res.json().catch(() => null);
+
+      if (res.ok || data?.success) {
+        toast.success('Franchise updated successfully in backend & database!');
+        setEditingBranch(null);
+        await loadBranches();
+      } else {
+        throw new Error(data?.error || 'Failed to update franchise');
+      }
+    } catch (err: any) {
+      console.error('Error saving franchise edit via backend:', err);
+      // Fallback direct Firestore update
+      try {
+        await updateDoc(doc(db, 'franchises', editingBranch.id), {
+          ...editForm,
+          updatedAt: new Date().toISOString()
+        });
+        toast.success('Franchise updated successfully in database!');
+        setEditingBranch(null);
+        await loadBranches();
+      } catch (dbErr: any) {
+        toast.error(err.message || 'Failed to update franchise');
+      }
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
 
   const loadBranches = async () => {
     setLoading(true);
@@ -455,25 +554,40 @@ export default function FranchiseManager() {
                   <span className="line-clamp-1">{branch.address}</span>
                 </div>
 
-                {/* Launch & Management Buttons */}
-                <div className="pt-2 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
+                {/* Actions: Show Live, Manage Workspace, Edit, View & Power */}
+                <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* Show Live Button (Navigates to in-app Live Orders tab) */}
                     <button
-                      onClick={() => handleOpenLaunch('franchise', branch)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 font-bold text-xs transition-colors cursor-pointer"
-                      title="Open Franchise Management Suite"
+                      onClick={() => navigate(`/franchise-management/${(branch as any).slug || (branch.id === 'main_branch' ? 'rajnandgaon' : branch.id.replace('fra_', ''))}?tab=live-orders`)}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 font-bold text-xs transition-all cursor-pointer group shadow-sm"
+                      title="View Real-Time Live Orders & Kitchen Queue"
                     >
-                      <Layers className="w-3.5 h-3.5" />
-                      <span>Franchise Suite</span>
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                      </span>
+                      <span>Show Live</span>
                     </button>
 
+                    {/* Manage Workspace Button (In-App Management) */}
                     <button
-                      onClick={() => handleOpenLaunch('restaurant_management', branch)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 font-bold text-xs transition-colors cursor-pointer"
-                      title="Open Restaurant Manager & KDS"
+                      onClick={() => navigate(`/franchise-management/${(branch as any).slug || (branch.id === 'main_branch' ? 'rajnandgaon' : branch.id.replace('fra_', ''))}`)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 font-bold text-xs transition-colors cursor-pointer"
+                      title="Open In-App Franchise Workspace"
                     >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      <span>Restaurant KDS</span>
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>Manage Workspace</span>
+                    </button>
+
+                    {/* Edit Button */}
+                    <button
+                      onClick={() => handleOpenEdit(branch)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-400 font-bold text-xs transition-colors cursor-pointer"
+                      title="Edit Franchise & Branch Configuration"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                      <span>Edit</span>
                     </button>
                   </div>
 
@@ -927,6 +1041,307 @@ export default function FranchiseManager() {
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── EDIT FRANCHISE MODAL ─── */}
+      {editingBranch && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400">
+                  <Edit2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-black text-white">
+                    Edit Franchise: {editingBranch.name}
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Update store metadata, contacts, operational radius, and live coordinates in backend & database.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditingBranch(null)}
+                className="p-2 rounded-xl text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEdit} className="space-y-5 text-xs">
+              {/* Basic Details */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Store Identification</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Franchise / Branch Name *</label>
+                    <input
+                      type="text"
+                      required
+                      value={editForm.name}
+                      onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Store Code</label>
+                    <input
+                      type="text"
+                      value={editForm.code}
+                      onChange={(e) => setEditForm({ ...editForm, code: e.target.value.toUpperCase() })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Location & Region */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Location & Territory</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">City *</label>
+                    <input
+                      type="text"
+                      required
+                      value={editForm.city}
+                      onChange={(e) => setEditForm({ ...editForm, city: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">State</label>
+                    <input
+                      type="text"
+                      value={editForm.state}
+                      onChange={(e) => setEditForm({ ...editForm, state: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">Full Physical Address</label>
+                  <input
+                    type="text"
+                    value={editForm.address}
+                    onChange={(e) => setEditForm({ ...editForm, address: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 items-end">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Latitude</label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={editForm.lat}
+                      onChange={(e) => setEditForm({ ...editForm, lat: parseFloat(e.target.value) || 0 })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Longitude</label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={editForm.lng}
+                      onChange={(e) => setEditForm({ ...editForm, lng: parseFloat(e.target.value) || 0 })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white font-mono placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="col-span-2 sm:col-span-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowEditMapPicker(!showEditMapPicker)}
+                      className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-bold text-xs transition-colors"
+                    >
+                      <Map className="w-3.5 h-3.5 text-blue-400" />
+                      <span>{showEditMapPicker ? 'Hide Map' : 'Pick on Map'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {showEditMapPicker && (
+                  <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800">
+                    <FranchiseLocationPicker
+                      lat={editForm.lat}
+                      lng={editForm.lng}
+                      address={editForm.address}
+                      onChange={(lat, lng, addr) => {
+                        setEditForm(prev => ({
+                          ...prev,
+                          lat,
+                          lng,
+                          ...(addr ? { address: addr } : {})
+                        }));
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Contacts & Staff */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Staff & Contacts</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Store Phone</label>
+                    <input
+                      type="text"
+                      value={editForm.phone}
+                      onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Store Official Email</label>
+                    <input
+                      type="email"
+                      value={editForm.email}
+                      onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Franchise Owner Name</label>
+                    <input
+                      type="text"
+                      value={editForm.franchiseOwnerName}
+                      onChange={(e) => setEditForm({ ...editForm, franchiseOwnerName: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Franchise Owner Email</label>
+                    <input
+                      type="email"
+                      value={editForm.franchiseOwnerEmail}
+                      onChange={(e) => setEditForm({ ...editForm, franchiseOwnerEmail: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Restaurant Manager Name</label>
+                    <input
+                      type="text"
+                      value={editForm.restaurantManagerName}
+                      onChange={(e) => setEditForm({ ...editForm, restaurantManagerName: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Restaurant Manager Email</label>
+                    <input
+                      type="email"
+                      value={editForm.restaurantManagerEmail}
+                      onChange={(e) => setEditForm({ ...editForm, restaurantManagerEmail: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Operational Hours & POS */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Operations & Logistics</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Opening Time</label>
+                    <input
+                      type="time"
+                      value={editForm.openingTime}
+                      onChange={(e) => setEditForm({ ...editForm, openingTime: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Closing Time</label>
+                    <input
+                      type="time"
+                      value={editForm.closingTime}
+                      onChange={(e) => setEditForm({ ...editForm, closingTime: e.target.value })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">Delivery Radius (km)</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50"
+                      value={editForm.maxDeliveryRadiusKm}
+                      onChange={(e) => setEditForm({ ...editForm, maxDeliveryRadiusKm: parseInt(e.target.value) || 15 })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-300 font-semibold mb-1">POS Counters</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="10"
+                      value={editForm.posTerminalCount}
+                      onChange={(e) => setEditForm({ ...editForm, posTerminalCount: parseInt(e.target.value) || 1 })}
+                      className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <label className="flex items-center gap-2 cursor-pointer p-3 rounded-xl bg-slate-950 border border-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={editForm.isActive}
+                      onChange={(e) => setEditForm({ ...editForm, isActive: e.target.checked })}
+                      className="w-4 h-4 accent-blue-500 rounded cursor-pointer"
+                    />
+                    <div>
+                      <span className="text-white font-bold block">Franchise Active & Operational</span>
+                      <span className="text-slate-400 text-[11px]">When disabled, orders and POS sessions are suspended for this branch.</span>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              {/* Form Actions */}
+              <div className="pt-4 border-t border-slate-800 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setEditingBranch(null)}
+                  disabled={isSavingEdit}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-colors"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={isSavingEdit}
+                  className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-600/20 transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  {isSavingEdit ? (
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <Save className="w-4 h-4" />
+                      <span>Save Changes</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -482,17 +482,6 @@ export default function FranchiseWorkspace() {
             <span>+ Provide POS</span>
           </button>
 
-          {/* Shortcut: Open Franchise App */}
-          <a
-            href="http://localhost:5175"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hidden sm:flex items-center gap-1 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-xl text-xs font-semibold transition"
-          >
-            <ExternalLink className="w-3.5 h-3.5 text-amber-400" />
-            <span>Open Franchise App (5175)</span>
-          </a>
-
           {/* Franchise Context Switcher */}
           <div className="flex items-center gap-1.5 bg-slate-950/80 border border-slate-700/60 rounded-xl px-3 py-1.5 shadow-inner">
             <span className="text-[10px] text-slate-400 font-semibold uppercase">Franchise:</span>

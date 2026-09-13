@@ -58,7 +58,7 @@ export class FranchiseSeedService {
         { merge: true }
       );
 
-      // 3. Seed canonical branch documents
+      // 3. Seed canonical branch documents (Only Rajnandgaon HQ)
       const defaultBranches = [
         {
           id: 'main_branch',
@@ -73,68 +73,13 @@ export class FranchiseSeedService {
           lng: 81.0123793,
           phone: '+91 91799 44445',
           email: 'olivepizzarjn@gmail.com',
+          franchiseOwnerEmail: 'olivepizzarjn@gmail.com',
+          restaurantManagerEmail: 'webhub2811@gmail.com',
           maxDeliveryRadiusKm: 15,
           openingTime: '12:00',
           closingTime: '23:59',
           isActive: true,
           isHeadquarters: true
-        },
-        {
-          id: 'durg_branch',
-          organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
-          franchiseId: FranchiseScopeService.DEFAULT_FRANCHISE_ID,
-          name: 'Olive Pizza — Durg (Branch 2)',
-          code: 'OP-DURG-02',
-          city: 'Durg',
-          state: 'Chhattisgarh',
-          address: 'Station Road, Durg, CG 491001',
-          lat: 21.190449,
-          lng: 81.284920,
-          phone: '+91 91799 44446',
-          email: 'durg@olivepizza.in',
-          maxDeliveryRadiusKm: 12,
-          openingTime: '12:00',
-          closingTime: '23:59',
-          isActive: true,
-          isHeadquarters: false
-        },
-        {
-          id: 'bhilai_branch',
-          organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
-          franchiseId: FranchiseScopeService.DEFAULT_FRANCHISE_ID,
-          name: 'Olive Pizza — Bhilai (Branch 3)',
-          code: 'OP-BHL-03',
-          city: 'Bhilai',
-          state: 'Chhattisgarh',
-          address: 'Civic Centre, Sector 5, Bhilai, CG 490006',
-          lat: 21.193848,
-          lng: 81.350941,
-          phone: '+91 91799 44447',
-          email: 'bhilai@olivepizza.in',
-          maxDeliveryRadiusKm: 12,
-          openingTime: '12:00',
-          closingTime: '23:59',
-          isActive: true,
-          isHeadquarters: false
-        },
-        {
-          id: 'raipur_branch',
-          organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
-          franchiseId: FranchiseScopeService.DEFAULT_FRANCHISE_ID,
-          name: 'Olive Pizza — Raipur (Branch 4)',
-          code: 'OP-RPR-04',
-          city: 'Raipur',
-          state: 'Chhattisgarh',
-          address: 'VIP Road, Telibandha, Raipur, CG 492006',
-          lat: 21.237944,
-          lng: 81.667427,
-          phone: '+91 91799 44448',
-          email: 'raipur@olivepizza.in',
-          maxDeliveryRadiusKm: 15,
-          openingTime: '12:00',
-          closingTime: '23:59',
-          isActive: true,
-          isHeadquarters: false
         }
       ];
 

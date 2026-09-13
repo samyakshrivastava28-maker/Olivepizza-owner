@@ -35,10 +35,7 @@ interface ManagerItem {
 }
 
 const AVAILABLE_BRANCHES = [
-  { id: 'main_branch', name: 'Olive Pizza — Rajnandgaon (Main Branch)' },
-  { id: 'durg_branch', name: 'Olive Pizza — Durg (Branch 2)' },
-  { id: 'bhilai_branch', name: 'Olive Pizza — Bhilai (Branch 3)' },
-  { id: 'raipur_branch', name: 'Olive Pizza — Raipur (Branch 4)' },
+  { id: 'main_branch', name: 'Olive Pizza — Rajnandgaon (Main Branch)' }
 ];
 
 const PERMISSION_OPTIONS = [
