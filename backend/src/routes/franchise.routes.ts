@@ -112,6 +112,116 @@ router.get('/', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'f
   }
 });
 
+// ─── 0.05 FASTEST GROWING FRANCHISE ANALYTICS ──────────────────────────────
+router.get('/analytics/fastest-growing', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
+    const now = new Date();
+    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+    const currentPeriodStart = new Date(now.getTime() - thirtyDaysMs);
+    const previousPeriodStart = new Date(now.getTime() - 2 * thirtyDaysMs);
+
+    const [entitySnap, branchSnap, orderSnap] = await Promise.all([
+      adminDb.collection('franchise_entities').get(),
+      adminDb.collection('franchises').get(),
+      adminDb.collection('orders').limit(1000).get()
+    ]);
+
+    let franchises: any[] = entitySnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    const branches: any[] = branchSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    const orders: any[] = orderSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+
+    if (!scope.isGlobalOwner) {
+      franchises = franchises.filter(f => f.id === scope.franchiseId || f.slug === scope.franchiseId);
+    }
+
+    const results = franchises.map(f => {
+      const fId = f.id;
+      const associatedBranchIds = branches
+        .filter(b => b.franchiseId === fId || (fId === 'fra_rajnandgaon' && (b.id === 'main_branch' || b.franchiseId === 'fra_primary')))
+        .map(b => b.id);
+      if (!associatedBranchIds.includes(fId)) associatedBranchIds.push(fId);
+
+      let current30dRevenue = 0;
+      let previous30dRevenue = 0;
+      let current30dOrders = 0;
+      let previous30dOrders = 0;
+
+      orders.forEach(o => {
+        const bId = o.branchId || 'main_branch';
+        const isFranchiseOrder = o.franchiseId === fId || associatedBranchIds.includes(bId) ||
+          (fId === 'fra_rajnandgaon' && (!o.franchiseId || o.franchiseId === 'fra_primary' || bId === 'main_branch'));
+
+        if (!isFranchiseOrder) return;
+        const status = (o.status || '').toLowerCase();
+        if (status === 'cancelled' || status === 'rejected') return;
+
+        const amt = Number(o.totalAmount || 0);
+        let createdAtDate = new Date();
+        if (o.createdAt) {
+          if (o.createdAt.toDate && typeof o.createdAt.toDate === 'function') createdAtDate = o.createdAt.toDate();
+          else if (o.createdAt._seconds) createdAtDate = new Date(o.createdAt._seconds * 1000);
+          else if (typeof o.createdAt === 'string' || typeof o.createdAt === 'number') createdAtDate = new Date(o.createdAt);
+        }
+
+        const t = createdAtDate.getTime();
+        if (t >= currentPeriodStart.getTime() && t <= now.getTime()) {
+          current30dRevenue += amt;
+          current30dOrders++;
+        } else if (t >= previousPeriodStart.getTime() && t < currentPeriodStart.getTime()) {
+          previous30dRevenue += amt;
+          previous30dOrders++;
+        }
+      });
+
+      // Safe Growth Rate Calculation
+      let growthRatePct = 0;
+      let growthStatus: 'positive' | 'negative' | 'flat' | 'new_baseline' = 'flat';
+
+      if (previous30dRevenue === 0) {
+        if (current30dRevenue === 0) {
+          growthRatePct = 0;
+          growthStatus = 'flat';
+        } else {
+          growthRatePct = 100;
+          growthStatus = 'new_baseline';
+        }
+      } else {
+        growthRatePct = Math.round(((current30dRevenue - previous30dRevenue) / previous30dRevenue) * 10000) / 100;
+        growthStatus = growthRatePct > 0 ? 'positive' : (growthRatePct < 0 ? 'negative' : 'flat');
+      }
+
+      return {
+        franchiseId: fId,
+        franchiseName: f.name || fId,
+        city: f.city || '',
+        current30dRevenue: Math.round(current30dRevenue),
+        previous30dRevenue: Math.round(previous30dRevenue),
+        current30dOrders,
+        previous30dOrders,
+        revenueDelta: Math.round(current30dRevenue - previous30dRevenue),
+        growthRatePct,
+        growthStatus,
+      };
+    });
+
+    results.sort((a, b) => b.growthRatePct - a.growthRatePct);
+
+    res.json({
+      success: true,
+      comparisonPeriod: {
+        currentWindow: { start: currentPeriodStart.toISOString(), end: now.toISOString() },
+        previousWindow: { start: previousPeriodStart.toISOString(), end: currentPeriodStart.toISOString() }
+      },
+      fastestGrowing: results.length > 0 ? results[0] : null,
+      rankings: results
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error in GET /analytics/fastest-growing:', error);
+    res.status(500).json({ error: 'Failed to calculate fastest growing franchise' });
+  }
+});
+
 // ─── 0.1 UPDATE FRANCHISE / BRANCH DETAILS ──────────────────────────────────
 router.patch('/:id', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -1549,6 +1659,11 @@ router.post('/:id/pos-terminals/:termId/revoke', requireRole(['owner', 'admin', 
 router.get('/:id/orders/live', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
+    const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
+    if (!scope.isGlobalOwner && scope.franchiseId !== id && scope.franchiseId !== `fra_${id}`) {
+      res.status(403).json({ error: 'Unauthorized: Scope mismatch', code: 'FORBIDDEN' });
+      return;
+    }
     const bSnap = await adminDb.collection('franchises').get();
     const branchIds = bSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
@@ -1576,6 +1691,11 @@ router.get('/:id/orders/live', requireRole(['owner', 'admin', 'developer', 'plat
 router.get('/:id/reports', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
+    const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
+    if (!scope.isGlobalOwner && scope.franchiseId !== id && scope.franchiseId !== `fra_${id}`) {
+      res.status(403).json({ error: 'Unauthorized: Scope mismatch', code: 'FORBIDDEN' });
+      return;
+    }
     const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
     const monthStart = `${currentMonth}-01T00:00:00.000Z`;
     const monthEnd = new Date(new Date(monthStart).setMonth(new Date(monthStart).getMonth() + 1)).toISOString();
@@ -1690,6 +1810,11 @@ router.get('/:id/reports', requireRole(['owner', 'admin', 'developer', 'platform
 router.get('/:id/audit-logs', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
+    const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
+    if (!scope.isGlobalOwner && scope.franchiseId !== id && scope.franchiseId !== `fra_${id}`) {
+      res.status(403).json({ error: 'Unauthorized: Scope mismatch', code: 'FORBIDDEN' });
+      return;
+    }
     const snap = await adminDb.collection('franchise_audit_logs').limit(50).get().catch(() => ({ docs: [] } as any));
     const logs = snap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))

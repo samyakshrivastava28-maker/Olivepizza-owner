@@ -470,7 +470,10 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     
     const userPhone = req.body.contactPhone || req.body.phone || userData.phone || userData.contactPhone || (req.user as any)?.phone_number || (req.user as any)?.phone || '9999999999';
 
-    const userAddress = address || req.body.deliveryAddress || userData.full_address || userData.fullAddress || (req.body.deliveryType === 'pickup' ? 'Pickup at Store' : 'Rajnandgaon');
+    const effectiveLocation = location || (typeof req.body.deliveryAddress === 'object' && req.body.deliveryAddress?.lat != null ? { lat: req.body.deliveryAddress.lat, lng: req.body.deliveryAddress.lng } : null);
+    const userAddress = (typeof address === 'string' ? address : null) || 
+      (typeof req.body.deliveryAddress === 'string' ? req.body.deliveryAddress : req.body.deliveryAddress?.addressLine) || 
+      userData.full_address || userData.fullAddress || (req.body.deliveryType === 'pickup' ? 'Pickup at Store' : 'Rajnandgaon');
 
     // Auto-sync missing profile fields to Firestore user doc if provided during checkout
     if (userPhone && (!userData.phone || (!userData.fullAddress && !userData.full_address))) {
@@ -480,7 +483,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         fullAddress: userAddress || 'Pickup',
         full_address: userAddress || 'Pickup',
         locationSetupCompleted: true,
-        location: location || null,
+        location: effectiveLocation || null,
       }, { merge: true }).catch(err => console.warn('[Orders] User profile sync warning:', err));
     }
 
@@ -887,8 +890,8 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         cancellationAcknowledgedAt: null,
         deliveryAddress: { 
           addressLine: userAddress || 'Pickup', 
-          lat: location?.lat || userData.lat || userData.location?.lat || 0, 
-          lng: location?.lng || userData.lng || userData.location?.lng || 0,
+          lat: effectiveLocation?.lat ?? req.body.deliveryAddress?.lat ?? userData.lat ?? userData.location?.lat ?? 0, 
+          lng: effectiveLocation?.lng ?? req.body.deliveryAddress?.lng ?? userData.lng ?? userData.location?.lng ?? 0,
           houseNumber: addressDetails?.houseNumber || '',
           apartment: addressDetails?.apartment || '',
           landmark: addressDetails?.landmark || '',

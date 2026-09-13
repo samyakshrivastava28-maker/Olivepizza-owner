@@ -172,6 +172,19 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
       if (req.body.deliveryProof) {
         updateData.deliveryProof = req.body.deliveryProof;
       }
+      const riderUid = orderData.deliveryPartnerId || req.user?.uid;
+      if (riderUid) {
+        await adminDb.collection('users').doc(riderUid).set({
+          activeOrderId: null,
+          deliveryStatus: 'returning',
+          updatedAt: FieldValue.serverTimestamp()
+        }, { merge: true }).catch(() => {});
+        await adminDb.collection('delivery_partners').doc(riderUid).set({
+          activeOrderId: null,
+          deliveryStatus: 'returning',
+          updatedAt: FieldValue.serverTimestamp()
+        }, { merge: true }).catch(() => {});
+      }
     }
 
     await adminDb.collection('orders').doc(id).update(updateData);
