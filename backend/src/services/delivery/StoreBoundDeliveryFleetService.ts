@@ -65,7 +65,19 @@ export class StoreBoundDeliveryFleetService {
   public static async getStoreFleet(branchId: string): Promise<FleetRider[]> {
     const usersSnap = await adminDb.collection('users')
       .where('role', 'in', ['delivery', 'delivery_partner'])
-      .get();
+      .get()
+      .catch(() => ({ docs: [] } as any));
+
+    const dpSnap = await adminDb.collection('delivery_partners')
+      .get()
+      .catch(() => ({ docs: [] } as any));
+
+    const combinedCandidates = new Map<string, any>();
+    usersSnap.docs.forEach((d: any) => combinedCandidates.set(d.id, { id: d.id, ...d.data() }));
+    dpSnap.docs.forEach((d: any) => {
+      const existing = combinedCandidates.get(d.id);
+      combinedCandidates.set(d.id, existing ? { ...existing, ...d.data() } : { id: d.id, ...d.data() });
+    });
 
     const locSnap = await adminDb.collection('delivery_locations').get().catch(() => ({ docs: [] } as any));
     const locMap = new Map<string, any>();
@@ -73,16 +85,15 @@ export class StoreBoundDeliveryFleetService {
 
     const riders: FleetRider[] = [];
 
-    for (const doc of usersSnap.docs) {
-      const data = doc.data();
+    for (const [uid, data] of combinedCandidates.entries()) {
       const riderBranchId = data.branchId || 'main_branch';
       
       if (branchId !== 'all' && riderBranchId !== branchId && riderBranchId !== 'all') {
         continue;
       }
 
-      const loc = locMap.get(doc.id) || {};
-      const locUpdated = loc.updated_at || loc.last_updated || data.lastLocationUpdate || null;
+      const loc = locMap.get(uid) || {};
+      const locUpdated = loc.updated_at || loc.last_updated || data.lastLocationUpdate || data.updatedAt || null;
       const freshness = this.getLocationFreshness(locUpdated);
 
       let state: RiderOperationalState = 'OFFLINE';
@@ -90,7 +101,7 @@ export class StoreBoundDeliveryFleetService {
         state = 'DISABLED';
       } else if (data.isPaused === true || data.deliveryStatus === 'break') {
         state = 'PAUSED';
-      } else if (data.isOnline === false) {
+      } else if (data.isOnline === false || data.status === 'offline') {
         state = 'OFFLINE';
       } else if (data.activeOrderId) {
         state = data.deliveryStatus === 'out_for_delivery' ? 'OUT_FOR_DELIVERY' : 'RESERVED';
@@ -101,15 +112,15 @@ export class StoreBoundDeliveryFleetService {
       }
 
       riders.push({
-        uid: doc.id,
+        uid,
         name: data.name || data.displayName || 'Delivery Partner',
         phone: data.phone || data.phoneNumber || '',
         branchId: riderBranchId,
         state,
         activeOrderId: data.activeOrderId || null,
         availableSince: data.availableSince || data.onlineStatusUpdatedAt || null,
-        latitude: loc.latitude !== undefined ? Number(loc.latitude) : data.latitude,
-        longitude: loc.longitude !== undefined ? Number(loc.longitude) : data.longitude,
+        latitude: loc.latitude !== undefined ? Number(loc.latitude) : (data.latitude || data.lat),
+        longitude: loc.longitude !== undefined ? Number(loc.longitude) : (data.longitude || data.lng),
         locationUpdatedAt: locUpdated,
         locationFreshness: freshness,
         vehicleNumber: data.vehicleNumber,

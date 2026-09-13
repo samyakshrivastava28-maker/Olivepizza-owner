@@ -288,6 +288,15 @@ async function runSecurityTests() {
       } else {
         recordFail(8, 'Client-provided role ignored', 'delivery_partner', `${data.rider?.role}`);
       }
+      // Immediately clean up test rider so production database stays clean
+      if (data.rider?.id) {
+        await adminDb.collection('delivery_partners').doc(data.rider.id).delete().catch(() => {});
+        await adminDb.collection('users').doc(data.rider.id).delete().catch(() => {});
+      }
+      if (data.rider?.uid) {
+        await adminDb.collection('users').doc(data.rider.uid).delete().catch(() => {});
+        await adminAuth.deleteUser(data.rider.uid).catch(() => {});
+      }
     } else {
       recordPass(8, 'Client-provided role rejected or sanitized', `HTTP ${res.status}`);
     }
@@ -803,6 +812,15 @@ async function runSecurityTests() {
     }
   } catch (e: any) {
     recordFail(27, 'Delivery Rider strictly scoped to assigned franchise', FRANCHISE_ID, 'Error', e.message);
+  } finally {
+    // Teardown temporary test rider accounts
+    const testRiderUids = ['test_scoped_rider_sec', 'test_inact_rider_sec', 'test_unver_phone_rider_sec'];
+    for (const tuid of testRiderUids) {
+      await adminDb.collection('delivery_partners').doc(tuid).delete().catch(() => {});
+      await adminDb.collection('delivery_riders').doc(tuid).delete().catch(() => {});
+      await adminDb.collection('users').doc(tuid).delete().catch(() => {});
+      await adminAuth.deleteUser(tuid).catch(() => {});
+    }
   }
 
   // Summary
