@@ -673,6 +673,9 @@ async function runSecurityTests() {
     }
   } catch (e: any) {
     recordFail(23, 'POS terminal bound to franchise', FRANCHISE_ID, 'Error', e.message);
+  } finally {
+    // Immediately delete test POS terminal
+    await adminDb.collection('pos_terminals').doc(TEST_POS_TERM_ID).delete().catch(() => {});
   }
 
   // -------------------------------------------------------------
