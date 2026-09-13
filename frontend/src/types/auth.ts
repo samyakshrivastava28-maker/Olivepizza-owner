@@ -42,6 +42,8 @@ export interface User {
   phoneVerified?: boolean;
   phoneSetupCompleted?: boolean;
   locationSetupCompleted?: boolean;
+  isOnline?: boolean;
+  isActive?: boolean;
 
   // Location fields
   fullAddress?: string;

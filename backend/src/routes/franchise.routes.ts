@@ -1290,6 +1290,22 @@ router.patch('/:id/riders/:riderId/status', requireRole(['owner', 'admin', 'deve
       updatedBy: req.user?.email || 'manager'
     }, { merge: true });
 
+    if (!isActive) {
+      try {
+        await adminAuth.revokeRefreshTokens(riderId);
+        await adminAuth.setCustomUserClaims(riderId, { role: 'REVOKED', revokedAt: now });
+        await adminDb.collection('users').doc(riderId).set({
+          isActive: false,
+          status: 'REVOKED',
+          role: 'REVOKED',
+          revokedAt: now,
+          revokedReason: 'Deactivated by franchise manager'
+        }, { merge: true });
+      } catch (revErr) {
+        console.warn('[FranchiseRoutes] Rider revocation warning:', revErr);
+      }
+    }
+
     res.json({ success: true, message: `Rider ${isActive ? 'activated' : 'deactivated'} successfully` });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to update rider status' });
@@ -1304,6 +1320,21 @@ router.delete('/:id/riders/:riderId', requireRole(['owner', 'admin', 'developer'
     if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
       res.status(403).json({ error: 'Cross-franchise access denied' });
       return;
+    }
+
+    const now = new Date().toISOString();
+    try {
+      await adminAuth.revokeRefreshTokens(riderId);
+      await adminAuth.setCustomUserClaims(riderId, { role: 'REVOKED', revokedAt: now });
+      await adminDb.collection('users').doc(riderId).set({
+        isActive: false,
+        status: 'REVOKED',
+        role: 'REVOKED',
+        revokedAt: now,
+        revokedReason: 'Deleted by franchise manager'
+      }, { merge: true });
+    } catch (revErr) {
+      console.warn('[FranchiseRoutes] Rider deletion revocation warning:', revErr);
     }
 
     await adminDb.collection('delivery_partners').doc(riderId).delete();

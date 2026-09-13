@@ -167,6 +167,8 @@ export interface User {
   locationSetupCompleted?: boolean;
   approvalStatus?: 'pending' | 'approved' | 'suspended';
   status?: 'online' | 'offline' | 'busy' | 'break';
+  isOnline?: boolean;
+  isActive?: boolean;
   vehicleType?: string;
   vehicleNumber?: string;
   joinedAt?: string;

@@ -690,15 +690,6 @@ export default function FranchiseWorkspace() {
             <span>Edit Access</span>
           </button>
 
-          {/* Quick Action: Provide POS */}
-          <button
-            onClick={() => setShowProvidePosModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-black rounded-xl text-xs font-bold transition shadow-sm"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>+ Provide POS</span>
-          </button>
-
           {/* Franchise Context Switcher (Single Rajnandgaon Franchise) */}
           <div className="flex items-center gap-1.5 bg-slate-950/80 border border-slate-700/60 rounded-xl px-3 py-1.5 shadow-inner">
             <span className="text-[10px] text-slate-400 font-semibold uppercase">Franchise:</span>

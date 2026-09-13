@@ -49,11 +49,15 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
 
   const token = authHeader.split('Bearer ')[1];
   try {
-    // SECURITY: Always verify through Firebase Admin SDK.
-    // No test-token or dev-token bypass exists in any environment.
-    // Use the Firebase Emulator (FIREBASE_AUTH_EMULATOR_HOST) for local testing.
-    const decodedToken: any = await adminAuth.verifyIdToken(token);
+    // SECURITY: Always verify through Firebase Admin SDK with checkRevoked = true.
+    // When an account is replaced or revoked, revokeRefreshTokens invalidates existing tokens immediately.
+    const decodedToken: any = await adminAuth.verifyIdToken(token, true);
     const uid = decodedToken.uid;
+
+    if (decodedToken.role === 'REVOKED' || decodedToken.status === 'REVOKED') {
+      res.status(403).json({ error: 'Forbidden: Account has been revoked', code: 'ACCOUNT_REVOKED' });
+      return;
+    }
     
     let role = (decodedToken.role as string) || 'customer';
     let organizationId = (decodedToken.organizationId as string) || FranchiseScopeService.DEFAULT_ORG_ID;
@@ -74,8 +78,8 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
         const userDoc = await adminDb.collection('users').doc(uid).get();
         if (userDoc.exists) {
           const userData = userDoc.data()!;
-          if (userData.isActive === false) {
-            res.status(403).json({ error: 'Forbidden: Account has been deactivated' });
+          if (userData.isActive === false || userData.status === 'REVOKED' || userData.role === 'REVOKED' || userData.status === 'suspended') {
+            res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked', code: 'ACCOUNT_REVOKED' });
             return;
           }
           if (userData.role) role = userData.role;
@@ -93,8 +97,12 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
         if (role === 'customer' || !role) {
           // Check restaurant_managers by UID
           const rmDoc = await adminDb.collection('restaurant_managers').doc(uid).get().catch(() => null);
-          if (rmDoc && rmDoc.exists && rmDoc.data()?.isActive !== false) {
+          if (rmDoc && rmDoc.exists) {
             const rmData = rmDoc.data()!;
+            if (rmData.isActive === false || rmData.status === 'REVOKED' || rmData.status === 'TERMINATED') {
+              res.status(403).json({ error: 'Forbidden: Restaurant manager account has been revoked', code: 'ACCOUNT_REVOKED' });
+              return;
+            }
             role = rmData.role || 'restaurant_manager';
             if (rmData.branchId) branchId = rmData.branchId;
             if (rmData.permissions) permissions = rmData.permissions;
@@ -103,8 +111,12 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           // Check delivery_partners by UID
           if (role === 'customer' || !role) {
             const dpDoc = await adminDb.collection('delivery_partners').doc(uid).get().catch(() => null);
-            if (dpDoc && dpDoc.exists && dpDoc.data()?.isActive !== false) {
+            if (dpDoc && dpDoc.exists) {
               const dpData = dpDoc.data()!;
+              if (dpData.isActive === false || dpData.status === 'REVOKED' || dpData.status === 'INACTIVE' || dpData.status === 'BLOCKED') {
+                res.status(403).json({ error: 'Forbidden: Delivery partner account has been revoked or deactivated', code: 'ACCOUNT_REVOKED' });
+                return;
+              }
               role = dpData.role || 'delivery_partner';
               if (dpData.branchId) branchId = dpData.branchId;
             }
@@ -113,8 +125,12 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           // Check franchise_users by UID
           if (role === 'customer' || !role) {
             const fuDoc = await adminDb.collection('franchise_users').doc(uid).get().catch(() => null);
-            if (fuDoc && fuDoc.exists && fuDoc.data()?.isActive !== false) {
+            if (fuDoc && fuDoc.exists) {
               const fuData = fuDoc.data()!;
+              if (fuData.isActive === false || fuData.status === 'REVOKED' || fuData.status === 'SUSPENDED') {
+                res.status(403).json({ error: 'Forbidden: Franchise manager account has been revoked', code: 'ACCOUNT_REVOKED' });
+                return;
+              }
               role = fuData.role || 'franchise_manager';
               if (fuData.franchiseId) franchiseId = fuData.franchiseId;
               if (fuData.branchIds) branchIds = fuData.branchIds;
@@ -124,10 +140,16 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           // Check pos_accounts by UID
           if (role === 'customer' || !role) {
             const posDoc = await adminDb.collection('pos_accounts').doc(uid).get().catch(() => null);
-            if (posDoc && posDoc.exists && (posDoc.data()?.status === 'APPROVED' || posDoc.data()?.status === 'ACTIVE') && posDoc.data()?.isActive !== false) {
+            if (posDoc && posDoc.exists) {
               const posData = posDoc.data()!;
-              role = 'pos_operator';
-              if (posData.franchiseId) franchiseId = posData.franchiseId;
+              if (posData.isActive === false || posData.status === 'REVOKED' || posData.status === 'DEACTIVATED' || posData.status === 'REJECTED') {
+                res.status(403).json({ error: 'Forbidden: POS terminal account has been revoked', code: 'ACCOUNT_REVOKED' });
+                return;
+              }
+              if (posData.status === 'APPROVED' || posData.status === 'ACTIVE') {
+                role = 'pos_operator';
+                if (posData.franchiseId) franchiseId = posData.franchiseId;
+              }
             }
           }
         }
@@ -163,9 +185,13 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
     };
     
     next();
-  } catch (error) {
+  } catch (error: any) {
     console.error('Token verification error:', error);
-    res.status(401).json({ error: 'Unauthorized: Invalid token' });
+    if (error?.code === 'auth/id-token-revoked' || error?.message?.includes('revoked')) {
+      res.status(401).json({ error: 'Unauthorized: Token has been revoked', code: 'TOKEN_REVOKED' });
+      return;
+    }
+    res.status(401).json({ error: 'Unauthorized: Invalid token', code: error?.code || 'INVALID_TOKEN' });
   }
 };
 

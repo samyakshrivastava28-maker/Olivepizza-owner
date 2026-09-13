@@ -229,7 +229,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     }
 
     // ── 4. Active status check ──
-    if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended' || userData.status === 'SUSPENDED')) {
+    if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended' || userData.status === 'SUSPENDED' || userData.status === 'REVOKED' || userData.role === 'REVOKED')) {
       await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
       await logSecurityEventServer({
         action: 'deactivated_account_access_attempt',
@@ -242,7 +242,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       });
       res.status(403).json({
         authorized: false,
-        reason: 'This account has been deactivated by the owner.',
+        reason: 'This account has been deactivated or revoked by the owner.',
         app: targetApp,
         email: user.email
       });

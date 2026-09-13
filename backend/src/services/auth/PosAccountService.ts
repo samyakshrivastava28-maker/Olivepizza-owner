@@ -270,13 +270,18 @@ export class PosAccountService {
 
     await adminDb.collection('users').doc(posId).set({
       status: 'REVOKED',
+      role: 'REVOKED',
+      isActive: false,
       posApproved: false,
+      revokedAt: now,
+      revokedBy: ownerEmail,
       updatedAt: now,
     }, { merge: true });
 
     // Revoke Firebase Auth session tokens if possible
     try {
       await adminAuth.revokeRefreshTokens(posId);
+      await adminAuth.setCustomUserClaims(posId, { role: 'REVOKED', revokedAt: now });
     } catch (err) {
       console.warn('[PosAccountService] Failed to revoke refresh tokens:', err);
     }
