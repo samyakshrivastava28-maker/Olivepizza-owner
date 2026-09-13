@@ -15,6 +15,7 @@ import { DeliveryCapacityService } from '../services/delivery/DeliveryCapacitySe
 import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogleSheetsService.js';
 import { CanonicalOrderService } from '../services/pos/CanonicalOrderService.js';
 import { BillingNumberService } from '../services/pos/BillingNumberService.js';
+import { calculateDistance } from '../lib/utils.js';
 import crypto from 'crypto';
 
 // Restaurant local timezone for daily order counter reset
@@ -458,42 +459,6 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
       return;
     }
 
-    // 0.4. Check Restaurant Operational Status (Open/Closed & Accepting Orders)
-    const callerRole = req.user?.role || '';
-    const isStaffMember = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(callerRole);
-    const branchToCheck = isStaffMember ? (req.user?.branchId || 'main_branch') : 'main_branch';
-    try {
-      const restDoc = await adminDb.collection('restaurant_settings').doc(branchToCheck).get();
-      if (restDoc.exists) {
-        const restData = restDoc.data() || {};
-        if (restData.isOpen === false || restData.acceptingOrders === false) {
-          res.status(400).json({
-            error: restData.closeReason || 'The restaurant is currently closed and not accepting orders.',
-            code: 'RESTAURANT_CLOSED',
-            canAcceptOrders: false,
-            isOpen: false
-          });
-          return;
-        }
-      }
-    } catch (restErr) {
-      console.warn('[Orders] Restaurant status read notice:', restErr);
-    }
-
-    // 0.5. Check Delivery Availability if delivery requested
-    const deliveryType = req.body.deliveryType || 'delivery';
-    if (deliveryType === 'delivery') {
-      const avail = await DeliveryCapacityService.getRestaurantAvailability();
-      if (!avail.canAcceptDeliveries) {
-        res.status(400).json({
-          error: avail.availabilityMessage,
-          code: avail.availabilityStatus,
-          canAcceptDeliveries: false
-        });
-        return;
-      }
-    }
-
     // 1. Fetch user data from Firestore
     let userData: any = {};
     try {
@@ -517,6 +482,131 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         locationSetupCompleted: true,
         location: location || null,
       }, { merge: true }).catch(err => console.warn('[Orders] User profile sync warning:', err));
+    }
+
+    // 0.4. Dynamic Branch & Franchise Resolution
+    const callerRole = req.user?.role || 'customer';
+    const isStaffMember = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(callerRole);
+
+    let resolvedBranchId = 'main_branch';
+    let resolvedFranchiseId = 'fra_rajnandgaon';
+    let resolvedOrgId = 'org_olive_pizza';
+    let resolvedBranchName = 'Olive Pizza — Rajnandgaon HQ';
+
+    if (isStaffMember) {
+      resolvedBranchId = req.user?.branchId || req.body.branchId || (req.headers['x-branch-id'] as string) || 'main_branch';
+      resolvedFranchiseId = req.user?.franchiseId || req.body.franchiseId || 'fra_rajnandgaon';
+      resolvedOrgId = req.user?.organizationId || 'org_olive_pizza';
+    } else {
+      // Customer: 
+      // 1. Check explicit store selection from body/headers
+      const explicitBranch = (req.body.branchId || req.headers['x-branch-id'] || req.body.session?.branchId || '').trim();
+      const explicitFranchise = (req.body.franchiseId || req.body.session?.franchiseId || '').trim();
+
+      if (explicitBranch) {
+        resolvedBranchId = explicitBranch;
+      } else if (explicitFranchise) {
+        resolvedFranchiseId = explicitFranchise;
+        try {
+          const feDoc = await adminDb.collection('franchise_entities').doc(explicitFranchise).get();
+          if (feDoc.exists && feDoc.data()?.mainBranchId) {
+            resolvedBranchId = feDoc.data()!.mainBranchId;
+          }
+        } catch (fErr) {
+          console.warn('[Orders] Franchise entity lookup warning:', fErr);
+        }
+      } else {
+        // 2. Resolve via GPS / coordinates if provided
+        const custLat = Number(location?.lat || userData.lat || userData.location?.lat);
+        const custLng = Number(location?.lng || userData.lng || userData.location?.lng);
+
+        if (!isNaN(custLat) && !isNaN(custLng) && custLat !== 0 && custLng !== 0) {
+          try {
+            const allBranchesSnap = await adminDb.collection('franchises').get();
+            let closestBranch: any = null;
+            let minDistance = Infinity;
+
+            for (const bDoc of allBranchesSnap.docs) {
+              const bData = bDoc.data();
+              if (bData.isActive === false) continue;
+              const bLat = Number(bData.lat ?? bData.coordinates?.lat ?? bData.location?.lat);
+              const bLng = Number(bData.lng ?? bData.coordinates?.lng ?? bData.location?.lng);
+              if (!isNaN(bLat) && !isNaN(bLng) && bLat !== 0 && bLng !== 0) {
+                const dist = calculateDistance(custLat, custLng, bLat, bLng);
+                const maxRadius = Number(bData.deliveryRadiusKm || bData.deliveryRadius || 25);
+                if (dist <= maxRadius && dist < minDistance) {
+                  minDistance = dist;
+                  closestBranch = { id: bDoc.id, ...bData };
+                }
+              }
+            }
+
+            if (closestBranch) {
+              resolvedBranchId = closestBranch.id;
+              resolvedFranchiseId = closestBranch.franchiseId || resolvedFranchiseId;
+            }
+          } catch (geoErr) {
+            console.warn('[Orders] Geolocation branch resolution notice:', geoErr);
+          }
+        }
+      }
+    }
+
+    // Lookup resolved branch details to guarantee consistent name & IDs
+    try {
+      const bDoc = await adminDb.collection('franchises').doc(resolvedBranchId).get();
+      if (bDoc.exists) {
+        const bData = bDoc.data()!;
+        resolvedBranchName = bData.name || resolvedBranchName;
+        resolvedFranchiseId = bData.franchiseId || resolvedFranchiseId;
+        resolvedOrgId = bData.organizationId || resolvedOrgId;
+
+        // Check operational availability of branch
+        if (bData.isActive === false || bData.isOpen === false || bData.acceptingOrders === false) {
+          res.status(400).json({
+            error: `${resolvedBranchName} is currently closed and not accepting orders.`,
+            code: 'RESTAURANT_CLOSED',
+            canAcceptOrders: false,
+            isOpen: false
+          });
+          return;
+        }
+      }
+    } catch (bErr) {
+      console.warn('[Orders] Branch document read notice:', bErr);
+    }
+
+    // Check restaurant_settings collection for the branch
+    try {
+      const restDoc = await adminDb.collection('restaurant_settings').doc(resolvedBranchId).get();
+      if (restDoc.exists) {
+        const restData = restDoc.data() || {};
+        if (restData.isOpen === false || restData.acceptingOrders === false) {
+          res.status(400).json({
+            error: restData.closeReason || `${resolvedBranchName} is currently closed and not accepting orders.`,
+            code: 'RESTAURANT_CLOSED',
+            canAcceptOrders: false,
+            isOpen: false
+          });
+          return;
+        }
+      }
+    } catch (restErr) {
+      console.warn('[Orders] Restaurant status read notice:', restErr);
+    }
+
+    // 0.5. Check Delivery Availability if delivery requested
+    const deliveryType = req.body.deliveryType || 'delivery';
+    if (deliveryType === 'delivery') {
+      const avail = await DeliveryCapacityService.getRestaurantAvailability(resolvedBranchId);
+      if (!avail.canAcceptDeliveries) {
+        res.status(400).json({
+          error: avail.availabilityMessage,
+          code: avail.availabilityStatus,
+          canAcceptDeliveries: false
+        });
+        return;
+      }
     }
 
     console.log("Order attempt:", { phone: userPhone, address: userAddress, itemsCount: items.length });
@@ -727,10 +817,6 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     const userRole = req.user?.role || 'customer';
     const isStaff = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(userRole);
 
-    // Enforce server-side scope derivation: Never trust client-supplied branchId/franchiseId/terminalId
-    const resolvedBranchId = isStaff ? (req.user?.branchId || 'main_branch') : 'main_branch';
-    const resolvedFranchiseId = isStaff ? (req.user?.franchiseId || 'fra_primary') : 'fra_primary';
-    const resolvedOrgId = isStaff ? (req.user?.organizationId || 'org_olive_pizza') : 'org_olive_pizza';
     const resolvedTerminalId = isStaff ? (req.user?.terminalId || null) : null;
     const resolvedCashierName = isStaff ? ((req.user as any)?.name || req.user?.email || null) : null;
 
@@ -825,7 +911,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         cashierName: resolvedCashierName,
         terminalId: resolvedTerminalId,
         branchId: resolvedBranchId,
-        branchName: 'Olive Pizza — Rajnandgaon HQ',
+        branchName: resolvedBranchName,
         franchiseId: resolvedFranchiseId,
         organizationId: resolvedOrgId,
         paymentDetails: req.body.paymentDetails || null,
@@ -865,8 +951,8 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         paymentMethod: req.body.paymentMethod || 'COD',
         paymentStatus: (req.body.paymentMethod || 'COD').toUpperCase() === 'ONLINE' ? 'PAID' : 'PENDING',
         branchId: resolvedBranchId,
-        branchName: req.body.session?.branchName || req.body.branchName || 'Olive Pizza — Rajnandgaon HQ',
-        franchiseId: req.body.session?.franchiseId || req.body.franchiseId || 'fra_rajnandgaon',
+        branchName: resolvedBranchName,
+        franchiseId: resolvedFranchiseId,
         deliveryAddress: { addressLine: userAddress || 'Pickup' },
         createdAt: new Date()
       }).catch(e => console.warn('[OnlineOrderSheetSync] Notice:', e.message));
@@ -911,7 +997,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
             deliveryAddress: userAddress || 'Pickup',
             phone: userPhone,
             branchId: resolvedBranchId,
-            franchiseId: req.body.session?.franchiseId || req.body.franchiseId || 'fra_rajnandgaon',
+            franchiseId: resolvedFranchiseId,
             orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
             version: 1,
           });

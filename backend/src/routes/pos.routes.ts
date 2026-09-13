@@ -20,8 +20,37 @@ import net from 'net';
 
 const router = Router();
 
-// Middleware: Require Staff/Cashier authorization
-const requirePOSRole = requireRole(['cashier', 'manager', 'restaurant_manager', 'admin', 'owner', 'developer', 'platform_owner', 'franchise_owner']);
+// Middleware: Require POS Operational authorization (Franchise Manager or approved POS operator only)
+// Note: Owner accounts are strictly DENIED POS operational access (Rule 22 & 23: Owner Privacy)
+const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promise<void> => {
+  const user = req.user;
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  const emailLower = (user.email || '').toLowerCase().trim();
+  const isMasterOwner = emailLower === 'olivepizzarjn@gmail.com' ||
+    emailLower === 'webhub2811@gmail.com' ||
+    emailLower === 'olivepizzamaker@gmail.com';
+  const isOwnerRole = isMasterOwner || user.role === 'owner' || user.role === 'platform_owner';
+
+  if (isOwnerRole) {
+    res.status(403).json({
+      error: 'Owner accounts are restricted from POS operational access to preserve store-level separation of duties and owner privacy.'
+    });
+    return;
+  }
+
+  const allowedRoles = ['pos_operator', 'cashier', 'franchise_manager', 'franchise_owner'];
+  if (!allowedRoles.includes(user.role)) {
+    res.status(403).json({
+      error: 'Forbidden: POS access is restricted to the Franchise Manager and the authorized POS account.'
+    });
+    return;
+  }
+
+  next();
+};
 
 // ============================================================================
 // 1. POS SESSION & TERMINAL INFO
@@ -282,7 +311,20 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
 
     const terminalId = reqTerminalId || user.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01';
     const branchId = user.branchId || 'main_branch';
-    const franchiseId = user.franchiseId || 'fra_primary';
+    let franchiseId = user.franchiseId;
+    let branchName = 'Olive Pizza — Rajnandgaon HQ';
+
+    try {
+      const bDoc = await adminDb.collection('franchises').doc(branchId).get();
+      if (bDoc.exists) {
+        const bData = bDoc.data()!;
+        branchName = bData.name || branchName;
+        franchiseId = franchiseId || bData.franchiseId;
+      }
+    } catch (bErr) {
+      console.warn('[POS] Branch lookup notice:', bErr);
+    }
+    franchiseId = franchiseId || 'fra_rajnandgaon';
     const cashierName = user.email?.split('@')[0] || 'Counter Cashier';
 
     // Map orderSource
@@ -373,7 +415,7 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
       cashierName,
       terminalId,
       branchId,
-      branchName: 'Olive Pizza — Rajnandgaon HQ',
+      branchName,
       franchiseId,
       notes: notes || '',
       createdAt: new Date(),

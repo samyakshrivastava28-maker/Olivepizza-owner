@@ -105,21 +105,19 @@ export class FranchiseScopeService {
    */
   public static isGlobalOwner(emailOrUser?: string | any, role?: string): boolean {
     if (!emailOrUser && !role) return false;
+    let email = '';
+    let userRole = '';
     if (typeof emailOrUser === 'object') {
-      const userRole = (emailOrUser?.role || '').toLowerCase();
-      const userEmail = (emailOrUser?.email || '').toLowerCase();
-      return (
-        ['owner', 'developer', 'admin', 'platform_admin', 'platform_owner'].includes(userRole) ||
-        userEmail === 'olivepizzarjn@gmail.com' ||
-        userEmail === 'webhub2811@gmail.com'
-      );
+      userRole = (emailOrUser?.role || role || '').toLowerCase();
+      email = (emailOrUser?.email || '').toLowerCase();
+    } else {
+      email = (emailOrUser || '').toLowerCase();
+      userRole = (role || '').toLowerCase();
     }
-    const email = (emailOrUser || '').toLowerCase();
-    const r = (role || '').toLowerCase();
+    // Only the verified platform owner and authorized internal account can have global owner scope
     return (
-      ['owner', 'developer', 'admin', 'platform_admin', 'platform_owner'].includes(r) ||
       email === 'olivepizzarjn@gmail.com' ||
-      email === 'webhub2811@gmail.com'
+      (email === 'webhub2811@gmail.com' && ['owner', 'developer', 'admin', 'platform_owner'].includes(userRole))
     );
   }
   /**

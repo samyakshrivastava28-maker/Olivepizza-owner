@@ -120,6 +120,16 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
               if (fuData.branchIds) branchIds = fuData.branchIds;
             }
           }
+
+          // Check pos_accounts by UID
+          if (role === 'customer' || !role) {
+            const posDoc = await adminDb.collection('pos_accounts').doc(uid).get().catch(() => null);
+            if (posDoc && posDoc.exists && (posDoc.data()?.status === 'APPROVED' || posDoc.data()?.status === 'ACTIVE') && posDoc.data()?.isActive !== false) {
+              const posData = posDoc.data()!;
+              role = 'pos_operator';
+              if (posData.franchiseId) franchiseId = posData.franchiseId;
+            }
+          }
         }
       } catch (dbErr) {
         console.warn('[AuthMiddleware] Failed to read fallback role from Firestore:', dbErr);

@@ -7,8 +7,7 @@ import { signOut } from 'firebase/auth';
 
 export const AUTHORIZED_OWNER_EMAILS = [
   'olivepizzarjn@gmail.com',
-  'webhub2811@gmail.com',
-  'olivepizzamaker@gmail.com'
+  'webhub2811@gmail.com'
 ];
 
 export const isAuthorizedOwnerEmail = (email?: string | null): boolean => {

@@ -62,14 +62,18 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
               }
 
               if (!isAuthorized) {
-                console.warn(`[AuthProvider] Access restricted for ${firebaseUser.email}: ${denialReason}`);
-                await signOut(auth);
-                if (mounted) {
-                  setRestricted(denialReason, firebaseUser.email);
-                  setLoading(false);
-                  setInitialized(true);
+                if (isOwnerEmail) {
+                  isAuthorized = true;
+                } else {
+                  console.warn(`[AuthProvider] Access restricted for ${firebaseUser.email}: ${denialReason}`);
+                  await signOut(auth);
+                  if (mounted) {
+                    setRestricted(denialReason, firebaseUser.email);
+                    setLoading(false);
+                    setInitialized(true);
+                  }
+                  return;
                 }
-                return;
               }
 
               // Authorized Owner/Executive

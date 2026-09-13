@@ -52,15 +52,25 @@ export class DeliveryCapacityService {
   }
 
   /**
-   * Evaluates the current restaurant delivery availability status
+   * Evaluates the current restaurant delivery availability status for a branch
    */
-  static async getRestaurantAvailability() {
+  static async getRestaurantAvailability(targetBranchId?: string) {
     try {
       const settingsDoc = await adminDb.collection('settings').doc('global').get();
       const settings = settingsDoc.exists ? settingsDoc.data() || {} : {};
+
+      let branchSettings: any = {};
+      if (targetBranchId && targetBranchId !== 'all') {
+        try {
+          const bDoc = await adminDb.collection('franchises').doc(targetBranchId).get();
+          if (bDoc.exists) {
+            branchSettings = bDoc.data() || {};
+          }
+        } catch {}
+      }
       
-      const openH = settings.openingHour !== undefined ? Number(settings.openingHour) : 0;
-      const closeH = settings.closingHour !== undefined ? Number(settings.closingHour) : 24;
+      const openH = branchSettings.openingTime ? parseInt(branchSettings.openingTime.split(':')[0], 10) : (settings.openingHour !== undefined ? Number(settings.openingHour) : 0);
+      const closeH = branchSettings.closingTime ? parseInt(branchSettings.closingTime.split(':')[0], 10) : (settings.closingHour !== undefined ? Number(settings.closingHour) : 24);
       const currentHour = new Date().getHours();
 
       // Check if configured for 24x7 or full-day operation
@@ -77,7 +87,8 @@ export class DeliveryCapacityService {
         }
       }
 
-      const isRestaurantOpen = (settings.isRestaurantOpen !== false) && isWithinBusinessHours;
+      const isBranchActive = branchSettings.isActive !== false && branchSettings.isOpen !== false;
+      const isRestaurantOpen = (settings.isRestaurantOpen !== false) && isBranchActive && isWithinBusinessHours;
       const isDeliveryEnabled = settings.isDeliveryAvailable !== false;
 
       // Fetch all riders
@@ -91,6 +102,12 @@ export class DeliveryCapacityService {
 
       for (const doc of snapshot.docs) {
         const data = doc.data();
+        if (targetBranchId && targetBranchId !== 'all') {
+          const rBranch = data.branchId || 'main_branch';
+          if (rBranch !== targetBranchId && rBranch !== 'all') {
+            continue;
+          }
+        }
         const status = (data.deliveryStatus || data.status || 'offline').toLowerCase();
         if (status === 'online' || status === 'available') {
           onlineCount++;

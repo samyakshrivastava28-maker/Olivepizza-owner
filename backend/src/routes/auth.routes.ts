@@ -65,6 +65,12 @@ import { verifyToken, requireRole, AuthRequest, logSecurityEventServer } from '.
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { TOTPService } from '../services/auth/TOTPService.js';
 import { adminDb } from '../config/firebase.js';
+import { EmailVerificationService } from '../services/auth/EmailVerificationService.js';
+import { LoginRateLimiterService } from '../services/auth/LoginRateLimiterService.js';
+import { PosAccountService } from '../services/auth/PosAccountService.js';
+import { PosPinService } from '../services/auth/PosPinService.js';
+import { PasswordResetWorkflowService } from '../services/auth/PasswordResetWorkflowService.js';
+import { AuthAuditService } from '../services/auth/AuthAuditService.js';
 
 // ============================================================================
 // AUTHORIZE OPERATIONAL APP HANDSHAKE (POS, RESTAURANT_MANAGER, FRANCHISE_MANAGER, DELIVERY)
@@ -79,9 +85,23 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     }
 
     const { targetApp, terminalId, requestedBranchId } = req.body;
-    const validApps = ['POS', 'RESTAURANT_MANAGER', 'FRANCHISE_MANAGER', 'DELIVERY', 'OWNER'];
+    const validApps = ['POS', 'RESTAURANT_MANAGER', 'FRANCHISE_MANAGER', 'DELIVERY', 'OWNER', 'CUSTOMER'];
     if (!targetApp || !validApps.includes(targetApp)) {
       res.status(400).json({ authorized: false, reason: `Invalid targetApp. Must be one of: ${validApps.join(', ')}` });
+      return;
+    }
+
+    const userIdentifier = (user.email || user.uid || '').toLowerCase().trim();
+    const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
+
+    // ── 1. Server-Enforced Login Rate Limiter (Max 2 attempts per 15 min, 3rd blocked) ──
+    const rateStatus = await LoginRateLimiterService.checkLimit(userIdentifier, clientIp);
+    if (!rateStatus.allowed) {
+      res.status(429).json({
+        authorized: false,
+        reason: 'Too many login attempts. Please try again later.',
+        retryAfterSeconds: rateStatus.retryAfterSeconds
+      });
       return;
     }
 
@@ -89,23 +109,89 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     const isMasterOwner = emailLower === 'olivepizzarjn@gmail.com' ||
       emailLower === 'webhub2811@gmail.com' ||
       emailLower === 'olivepizzamaker@gmail.com';
+    const isOwnerRole = isMasterOwner || user.role === 'owner' || user.role === 'platform_owner';
 
-    // Enforce test fixture zero-trust isolation for test runner
-    if (user.uid === 'test_owner_uid_sec' && (targetApp === 'RESTAURANT_MANAGER' || targetApp === 'DELIVERY')) {
-      res.status(403).json({
-        authorized: false,
-        app: targetApp,
-        email: user.email,
-        reason: targetApp === 'RESTAURANT_MANAGER'
-          ? 'Owner accounts are restricted from operational restaurant management access to preserve operational boundaries and branch privacy.'
-          : 'Owner accounts are restricted from operational delivery rider access.'
+    // ── 2. Owner Operational Privacy & Boundary Enforcement ──
+    // Owner accounts are strictly forbidden from operational POS, Restaurant Management, and Delivery access
+    if (isOwnerRole) {
+      if (targetApp === 'POS') {
+        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        await AuthAuditService.logEvent({
+          eventType: 'APP_AUTHORIZE_DENIED',
+          userId: user.uid,
+          identifier: user.email,
+          appTarget: targetApp,
+          status: 'BLOCKED',
+          metadata: { reason: 'OWNER_RESTRICTED_FROM_POS' }
+        });
+        res.status(403).json({
+          authorized: false,
+          app: targetApp,
+          email: user.email,
+          reason: 'Owner accounts are restricted from POS operational access to preserve store-level separation of duties and owner privacy.'
+        });
+        return;
+      }
+
+      if (targetApp === 'RESTAURANT_MANAGER') {
+        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        await AuthAuditService.logEvent({
+          eventType: 'APP_AUTHORIZE_DENIED',
+          userId: user.uid,
+          identifier: user.email,
+          appTarget: targetApp,
+          status: 'BLOCKED',
+          metadata: { reason: 'OWNER_RESTRICTED_FROM_RESTAURANT_MANAGER' }
+        });
+        res.status(403).json({
+          authorized: false,
+          app: targetApp,
+          email: user.email,
+          reason: 'Owner accounts are restricted from operational restaurant management access to preserve operational boundaries and branch privacy.'
+        });
+        return;
+      }
+
+      if (targetApp === 'DELIVERY') {
+        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        await AuthAuditService.logEvent({
+          eventType: 'APP_AUTHORIZE_DENIED',
+          userId: user.uid,
+          identifier: user.email,
+          appTarget: targetApp,
+          status: 'BLOCKED',
+          metadata: { reason: 'OWNER_RESTRICTED_FROM_DELIVERY' }
+        });
+        res.status(403).json({
+          authorized: false,
+          app: targetApp,
+          email: user.email,
+          reason: 'Owner accounts are restricted from operational delivery rider access.'
+        });
+        return;
+      }
+
+      if (targetApp === 'CUSTOMER') {
+        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        res.status(403).json({
+          authorized: false,
+          app: targetApp,
+          email: user.email,
+          reason: 'Owner accounts cannot access customer ordering application.'
+        });
+        return;
+      }
+
+      // Owner is authorized for OWNER and administrative FRANCHISE_MANAGER oversight
+      await LoginRateLimiterService.recordSuccess(userIdentifier, clientIp);
+      await AuthAuditService.logEvent({
+        eventType: 'APP_AUTHORIZE_SUCCESS',
+        userId: user.uid,
+        identifier: user.email,
+        appTarget: targetApp,
+        status: 'SUCCESS'
       });
-      return;
-    }
 
-    // 1. Master Owner & Platform Owner Global Access
-    // Real Owners have full operational and management access across all applications (OWNER, FRANCHISE_MANAGER, RESTAURANT_MANAGER, POS, DELIVERY)
-    if (isMasterOwner || req.user?.role === 'owner' || req.user?.role === 'platform_owner') {
       res.json({
         authorized: true,
         app: targetApp,
@@ -117,21 +203,20 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
           branchId: requestedBranchId || 'main_branch',
           branchName: 'Olive Pizza — Rajnandgaon HQ',
           franchiseId: 'fra_rajnandgaon',
-          terminalId: terminalId || 'pos_term_01',
           permissions: ['*'],
-          allowedApps: ['OWNER', 'FRANCHISE_MANAGER', 'RESTAURANT_MANAGER', 'POS', 'DELIVERY'],
+          allowedApps: ['OWNER', 'FRANCHISE_MANAGER'],
           applicationAccess: {
             app_franchise_management: true,
-            app_restaurant_management: true,
-            app_pos: true,
-            app_delivery: true
+            app_restaurant_management: false,
+            app_pos: false,
+            app_delivery: false
           }
         }
       });
       return;
     }
 
-    // 2. Fetch user document
+    // ── 3. Fetch user document from Firestore ──
     let userData: any = null;
     const userDocSnap = await adminDb.collection('users').doc(user.uid).get();
     if (userDocSnap.exists) {
@@ -143,8 +228,9 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       }
     }
 
-    // 3. Active status check
-    if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended')) {
+    // ── 4. Active status check ──
+    if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended' || userData.status === 'SUSPENDED')) {
+      await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
       await logSecurityEventServer({
         action: 'deactivated_account_access_attempt',
         route: '/api/auth/authorize-app',
@@ -175,37 +261,116 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     let isProfileComplete = true;
     let denialReason = 'This account is not authorized to use this Olive Pizza application.';
 
-    // 4. App-specific permission verification & gates
+    // ── 5. App-specific permission verification & gates ──
     if (targetApp === 'POS') {
-      const allowedRoles = ['owner', 'admin', 'developer', 'cashier', 'staff', 'manager', 'restaurant_manager', 'pos_user'];
-      if (allowedRoles.includes(role) || allowedApps.includes('POS')) {
-        isAuthorized = true;
-        // Check terminal binding
-        if (terminalId) {
-          try {
-            const termDoc = await adminDb.collection('pos_terminals').doc(terminalId).get();
-            if (termDoc.exists) {
-              const termData = termDoc.data()!;
-              if (termData.isActive === false || termData.status === 'INACTIVE') {
-                isAuthorized = false;
-                denialReason = `POS Terminal ${terminalId} is currently deactivated.`;
-              } else if (termData.branchId && termData.branchId !== branchId && role === 'cashier') {
-                isAuthorized = false;
-                denialReason = `Terminal belongs to branch ${termData.branchId}, but account is assigned to ${branchId}.`;
-              }
-            }
-          } catch (termErr) {
-            console.warn('[AuthorizeApp] Terminal check notice:', termErr);
-          }
-        }
-        if (userData?.terminalId && terminalId && userData.terminalId !== terminalId && role === 'cashier') {
-          isAuthorized = false;
-          denialReason = `Cashier account is bound to terminal ${userData.terminalId}. Access to ${terminalId} is denied.`;
+      // Rule: Allowed ONLY to Franchise Manager of that franchise OR the single Owner-approved POS account
+      let isPosAuthorized = false;
+      let franchiseIdResolved = franchiseId;
+
+      // Check if user is a Franchise Manager
+      const isFranchiseMgr = role === 'franchise_manager' || role === 'franchise_owner';
+      let fraSnap = null;
+      if (!isFranchiseMgr) {
+        fraSnap = await adminDb.collection('franchise_users').doc(user.uid).get();
+        if (!fraSnap.exists && emailLower) {
+          const q = await adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get();
+          if (!q.empty) fraSnap = q.docs[0];
         }
       }
+
+      if (isFranchiseMgr || (fraSnap && fraSnap.exists && fraSnap.data()?.isActive !== false)) {
+        isPosAuthorized = true;
+        role = 'franchise_manager';
+        if (fraSnap?.exists) {
+          franchiseIdResolved = fraSnap.data()?.franchiseId || franchiseIdResolved;
+        }
+      } else {
+        // Check pos_accounts collection
+        let posDoc = await adminDb.collection('pos_accounts').doc(user.uid).get();
+        if (!posDoc.exists && emailLower) {
+          const q = await adminDb.collection('pos_accounts').where('email', '==', emailLower).limit(1).get();
+          if (!q.empty) posDoc = q.docs[0];
+        }
+
+        if (posDoc && posDoc.exists) {
+          const posData = posDoc.data()!;
+          if (posData.status === 'PENDING_OWNER_APPROVAL') {
+            await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+            res.status(403).json({
+              authorized: false,
+              code: 'PENDING_OWNER_APPROVAL',
+              app: targetApp,
+              reason: 'Your POS terminal account is pending Owner approval. You will be able to log in once your store owner verifies and approves your account.'
+            });
+            return;
+          }
+
+          if (posData.status === 'REJECTED') {
+            await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+            res.status(403).json({
+              authorized: false,
+              code: 'ACCOUNT_REJECTED',
+              app: targetApp,
+              reason: 'Your POS account was rejected by the store owner.'
+            });
+            return;
+          }
+
+          if (posData.status === 'REVOKED' || posData.isActive === false) {
+            await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+            res.status(403).json({
+              authorized: false,
+              code: 'ACCOUNT_REVOKED',
+              app: targetApp,
+              reason: 'Your POS account access has been revoked.'
+            });
+            return;
+          }
+
+          if (posData.status === 'APPROVED' || posData.status === 'ACTIVE') {
+            isPosAuthorized = true;
+            role = 'pos_operator';
+            franchiseIdResolved = posData.franchiseId || franchiseIdResolved;
+          }
+        }
+      }
+
+      if (!isPosAuthorized) {
+        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        await AuthAuditService.logEvent({
+          eventType: 'APP_AUTHORIZE_DENIED',
+          userId: user.uid,
+          identifier: user.email,
+          appTarget: targetApp,
+          status: 'BLOCKED',
+          metadata: { reason: 'NOT_AUTHORIZED_FOR_POS' }
+        });
+        res.status(403).json({
+          authorized: false,
+          app: targetApp,
+          email: user.email,
+          reason: 'Access denied. Only the Franchise Manager and the authorized POS account are permitted to access POS.'
+        });
+        return;
+      }
+
+      // POS email verification check (if email-based authentication)
+      if (user.email_verified === false && !user.phone_number) {
+        res.status(403).json({
+          authorized: false,
+          code: 'EMAIL_NOT_VERIFIED',
+          reason: 'Email verification required. Please verify your email before accessing POS.',
+          app: targetApp
+        });
+        return;
+      }
+
+      isAuthorized = true;
+      requiresPin = true;
+      franchiseId = franchiseIdResolved;
     } else if (targetApp === 'RESTAURANT_MANAGER') {
-      // 1. Check email verification
-      if (user.email_verified === false) {
+      // 1. Check email verification (if not phone authenticated)
+      if (user.email_verified === false && !user.phone_number) {
         res.status(403).json({
           authorized: false,
           code: 'EMAIL_NOT_VERIFIED',
@@ -219,6 +384,12 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       let mgrDoc = await adminDb.collection('restaurant_managers').doc(user.uid).get();
       if (!mgrDoc.exists && emailLower) {
         const mgrSnap = await adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get();
+        if (!mgrSnap.empty) {
+          mgrDoc = mgrSnap.docs[0];
+        }
+      }
+      if (!mgrDoc.exists && user.phone_number) {
+        const mgrSnap = await adminDb.collection('restaurant_managers').where('phone', '==', user.phone_number).limit(1).get();
         if (!mgrSnap.empty) {
           mgrDoc = mgrSnap.docs[0];
         }
@@ -335,8 +506,8 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
         }
       }
     } else if (targetApp === 'DELIVERY') {
-      // 1. Check email verification
-      if (user.email_verified === false) {
+      // 1. Check email verification (if not phone authenticated)
+      if (user.email_verified === false && !user.phone_number) {
         res.status(403).json({
           authorized: false,
           code: 'EMAIL_NOT_VERIFIED',
@@ -357,6 +528,17 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
           dpDoc = dpSnap.docs[0];
         } else {
           const drSnap = await adminDb.collection('delivery_riders').where('email', '==', emailLower).limit(1).get();
+          if (!drSnap.empty) {
+            dpDoc = drSnap.docs[0];
+          }
+        }
+      }
+      if (!dpDoc.exists && user.phone_number) {
+        const dpSnap = await adminDb.collection('delivery_partners').where('phone', '==', user.phone_number).limit(1).get();
+        if (!dpSnap.empty) {
+          dpDoc = dpSnap.docs[0];
+        } else {
+          const drSnap = await adminDb.collection('delivery_riders').where('phone', '==', user.phone_number).limit(1).get();
           if (!drSnap.empty) {
             dpDoc = drSnap.docs[0];
           }
@@ -415,62 +597,69 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       franchiseId = dData.franchiseId || 'fra_rajnandgaon';
       isProfileComplete = Boolean(dData.name && dData.vehicleNumber);
     } else if (targetApp === 'OWNER') {
-      const allowedRoles = [
-        'owner', 
-        'admin', 
-        'developer', 
-        'platform_owner', 
-        'franchise_owner', 
-        'franchise_manager', 
-        'restaurant_manager', 
-        'manager', 
-        'staff', 
-        'cashier',
-        'delivery_partner'
-      ];
-      const hasAppGrant = allowedApps.length > 0 || 
-        Boolean(userData?.applicationAccess && Object.values(userData.applicationAccess).some(Boolean));
-
-      if (allowedRoles.includes(role) || allowedApps.includes('OWNER') || hasAppGrant) {
-        isAuthorized = true;
-      } else {
-        // Also check restaurant_managers collection
-        try {
-          let mgrSnap = await adminDb.collection('restaurant_managers').doc(user.uid).get();
-          if (!mgrSnap.exists && emailLower) {
-            const q = await adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get();
-            if (!q.empty) mgrSnap = q.docs[0];
-          }
-          if (mgrSnap.exists && mgrSnap.data()?.status === 'APPROVED' && mgrSnap.data()?.isActive !== false) {
-            isAuthorized = true;
-            role = 'restaurant_manager';
-            branchId = mgrSnap.data()?.branchId || branchId;
-          }
-        } catch (e) {}
-
-        // Also check franchise_users collection
-        if (!isAuthorized) {
-          try {
-            let fraSnap = await adminDb.collection('franchise_users').doc(user.uid).get();
-            if (!fraSnap.exists && emailLower) {
-              const q = await adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get();
-              if (!q.empty) fraSnap = q.docs[0];
-            }
-            if (fraSnap.exists && fraSnap.data()?.isActive !== false) {
-              isAuthorized = true;
-              role = 'franchise_manager';
-              franchiseId = fraSnap.data()?.franchiseId || franchiseId;
-            }
-          } catch (e) {}
-        }
-
-        if (!isAuthorized) {
-          denialReason = 'Your account is not authorized to access this Olive Pizza workspace. Please contact the platform owner to request access.';
-        }
+      // STRICT OWNER ENFORCEMENT: Only the verified platform owner email is permitted
+      const isOwnerAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
+      if (!isOwnerAccount) {
+        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        await AuthAuditService.logEvent({
+          eventType: 'APP_AUTHORIZE_DENIED',
+          userId: user.uid,
+          identifier: user.email,
+          appTarget: targetApp,
+          status: 'BLOCKED',
+          metadata: { reason: 'UNAUTHORIZED_OWNER_ATTEMPT' }
+        });
+        res.status(403).json({
+          authorized: false,
+          app: targetApp,
+          email: user.email,
+          reason: 'Access denied. Only the platform owner (olivepizzarjn@gmail.com) is authorized to access the Owner Console.'
+        });
+        return;
       }
+
+      isAuthorized = true;
+      role = 'owner';
+    } else if (targetApp === 'CUSTOMER') {
+      const staffRoles = [
+        'owner', 'platform_owner', 'restaurant_manager', 'delivery_partner', 
+        'delivery', 'pos_operator', 'cashier', 'kitchen_staff', 
+        'franchise_manager', 'franchise_owner', 'admin', 'developer'
+      ];
+      if (staffRoles.includes(role)) {
+        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        await AuthAuditService.logEvent({
+          eventType: 'APP_AUTHORIZE_DENIED',
+          userId: user.uid,
+          identifier: user.email,
+          appTarget: targetApp,
+          status: 'BLOCKED',
+          metadata: { reason: 'STAFF_ROLE_RESTRICTED_FROM_CUSTOMER_APP', currentRole: role }
+        });
+        res.status(403).json({
+          authorized: false,
+          code: 'STAFF_RESTRICTED_FROM_CUSTOMER',
+          app: targetApp,
+          email: user.email,
+          reason: `Operational accounts with role "${role}" cannot be used as customer accounts. Please use your designated Olive Pizza staff application.`
+        });
+        return;
+      }
+      isAuthorized = true;
+      role = 'customer';
     }
 
     if (!isAuthorized) {
+      await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+      await AuthAuditService.logEvent({
+        eventType: 'APP_AUTHORIZE_DENIED',
+        userId: user.uid,
+        identifier: user.email,
+        appTarget: targetApp,
+        status: 'BLOCKED',
+        metadata: { reason: denialReason }
+      });
+
       await logSecurityEventServer({
         action: 'unauthorized_operational_app_attempt',
         route: '/api/auth/authorize-app',
@@ -490,25 +679,35 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       return;
     }
 
+    // Record success in rate limiter and audit log
+    await LoginRateLimiterService.recordSuccess(userIdentifier, clientIp);
+    await AuthAuditService.logEvent({
+      eventType: 'APP_AUTHORIZE_SUCCESS',
+      userId: user.uid,
+      identifier: user.email,
+      appTarget: targetApp,
+      status: 'SUCCESS'
+    });
+
     const resolvedAllowedApps = allowedApps.length > 0 ? allowedApps : (
-      role === 'owner' || role === 'admin' || role === 'developer' || role === 'platform_owner'
-        ? ['OWNER', 'FRANCHISE_MANAGER', 'RESTAURANT_MANAGER', 'POS', 'DELIVERY']
+      role === 'owner' || role === 'platform_owner'
+        ? ['OWNER', 'FRANCHISE_MANAGER']
         : role === 'restaurant_manager'
-        ? ['RESTAURANT_MANAGER', 'OWNER']
+        ? ['RESTAURANT_MANAGER']
         : role === 'franchise_manager' || role === 'franchise_owner'
-        ? ['FRANCHISE_MANAGER', 'RESTAURANT_MANAGER', 'OWNER']
+        ? ['FRANCHISE_MANAGER']
         : role === 'delivery_partner'
-        ? ['DELIVERY', 'OWNER']
-        : role === 'cashier'
-        ? ['POS', 'OWNER']
-        : ['OWNER']
+        ? ['DELIVERY']
+        : role === 'pos_operator' || role === 'cashier'
+        ? ['POS']
+        : ['CUSTOMER']
     );
 
     const resolvedAppAccess = userData?.applicationAccess || {
       app_franchise_management: resolvedAllowedApps.includes('FRANCHISE_MANAGER') || role === 'franchise_manager' || role === 'franchise_owner' || role === 'owner',
-      app_restaurant_management: resolvedAllowedApps.includes('RESTAURANT_MANAGER') || role === 'restaurant_manager' || role === 'owner',
-      app_pos: resolvedAllowedApps.includes('POS') || role === 'cashier' || role === 'owner',
-      app_delivery: resolvedAllowedApps.includes('DELIVERY') || role === 'delivery_partner' || role === 'owner'
+      app_restaurant_management: resolvedAllowedApps.includes('RESTAURANT_MANAGER') || role === 'restaurant_manager',
+      app_pos: resolvedAllowedApps.includes('POS') || role === 'pos_operator' || role === 'cashier',
+      app_delivery: resolvedAllowedApps.includes('DELIVERY') || role === 'delivery_partner'
     };
 
     res.json({
@@ -782,6 +981,200 @@ router.post('/2fa/disable', verifyToken, requireRole(['owner', 'admin']), async 
     res.json({ success: true, message: '2FA disabled successfully' });
   } catch (error: any) {
     res.status(500).json({ success: false, error: 'Failed to disable 2FA' });
+  }
+});
+
+// ============================================================================
+// UNIVERSAL 4-DIGIT EMAIL VERIFICATION (5-MIN EXPIRY, SHA-256 HASH AT REST)
+// ============================================================================
+
+// POST /api/auth/email/send-code
+router.post('/email/send-code', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      res.status(400).json({ success: false, message: 'Email address is required' });
+      return;
+    }
+    const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
+    const result = await EmailVerificationService.sendVerificationCode(email, clientIp);
+
+    if (!result.success) {
+      const status = result.retryAfterSeconds ? 429 : 400;
+      res.status(status).json(result);
+      return;
+    }
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error sending verification code:', err);
+    res.status(500).json({ success: false, message: 'Failed to dispatch verification code' });
+  }
+});
+
+// POST /api/auth/email/verify-code
+router.post('/email/verify-code', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      res.status(400).json({ success: false, message: 'Email and 4-digit verification code are required' });
+      return;
+    }
+    const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
+    const result = await EmailVerificationService.verifyCode(email, code, clientIp);
+
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error verifying code:', err);
+    res.status(500).json({ success: false, message: 'Failed to verify code' });
+  }
+});
+
+// ============================================================================
+// POS 4-DIGIT OPERATIONAL PIN MANAGEMENT & UNLOCK
+// ============================================================================
+
+// GET /api/auth/pos/pin/status - Check whether PIN is configured and lock status
+router.get('/pos/pin/status', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+    const status = await PosPinService.checkPinStatus(uid);
+    res.json({ success: true, ...status });
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error checking POS PIN status:', err);
+    res.status(500).json({ success: false, message: 'Failed to query PIN status' });
+  }
+});
+
+// POST /api/auth/pos/pin/setup - Setup 4-digit PIN for first-time POS user
+router.post('/pos/pin/setup', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.user?.uid;
+    const { pin } = req.body;
+    if (!uid) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+    const result = await PosPinService.setupPin(uid, pin);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error setting POS PIN:', err);
+    res.status(500).json({ success: false, message: 'Failed to configure PIN' });
+  }
+});
+
+// POST /api/auth/pos/pin/verify - Verify 4-digit PIN on app unlock / restart
+router.post('/pos/pin/verify', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.user?.uid;
+    const { pin } = req.body;
+    if (!uid) {
+      res.status(401).json({ success: false, message: 'Unauthorized' });
+      return;
+    }
+    const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
+    const result = await PosPinService.verifyPin(uid, pin, clientIp);
+
+    if (!result.success) {
+      const status = result.locked ? 423 : 400; // 423 Locked
+      res.status(status).json(result);
+      return;
+    }
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error verifying POS PIN:', err);
+    res.status(500).json({ success: false, message: 'Failed to verify PIN' });
+  }
+});
+
+// ============================================================================
+// OWNER-CONTROLLED POS PASSWORD RESET WORKFLOW
+// ============================================================================
+
+// POST /api/auth/password-reset/request - POS operator submits reset request
+router.post('/password-reset/request', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email, appTarget = 'POS' } = req.body;
+    if (!email) {
+      res.status(400).json({ success: false, message: 'Email is required' });
+      return;
+    }
+    const result = await PasswordResetWorkflowService.requestReset(email, appTarget);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error requesting password reset:', err);
+    res.status(500).json({ success: false, message: 'Failed to submit password reset request' });
+  }
+});
+
+// GET /api/auth/password-reset/pending - Owner lists pending reset requests
+router.get('/password-reset/pending', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const requests = await PasswordResetWorkflowService.listPendingRequests();
+    res.json({ success: true, requests });
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error listing pending reset requests:', err);
+    res.status(500).json({ success: false, message: 'Failed to list reset requests' });
+  }
+});
+
+// POST /api/auth/password-reset/send-email - Owner approves and triggers Firebase password reset email
+router.post('/password-reset/send-email', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { requestId } = req.body;
+    if (!requestId) {
+      res.status(400).json({ success: false, message: 'Request ID is required' });
+      return;
+    }
+    const ownerEmail = req.user?.email || 'owner@olivepizza.in';
+    const result = await PasswordResetWorkflowService.sendResetEmail(requestId, ownerEmail);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error sending reset email:', err);
+    res.status(500).json({ success: false, message: 'Failed to send reset email' });
+  }
+});
+
+// POST /api/auth/password-reset/reject - Owner rejects reset request
+router.post('/password-reset/reject', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { requestId, reason } = req.body;
+    if (!requestId) {
+      res.status(400).json({ success: false, message: 'Request ID is required' });
+      return;
+    }
+    const ownerEmail = req.user?.email || 'owner@olivepizza.in';
+    const result = await PasswordResetWorkflowService.rejectReset(requestId, ownerEmail, reason);
+    if (!result.success) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error rejecting reset request:', err);
+    res.status(500).json({ success: false, message: 'Failed to reject reset request' });
   }
 });
 

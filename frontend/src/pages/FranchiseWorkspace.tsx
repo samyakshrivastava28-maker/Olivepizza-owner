@@ -13,6 +13,7 @@ import {
   Phone,
   Mail,
   ShieldCheck,
+  ShieldAlert,
   Power,
   Edit2,
   Plus,
@@ -76,6 +77,8 @@ export default function FranchiseWorkspace() {
   const [managers, setManagers] = useState<any[]>([]);
   const [riders, setRiders] = useState<any[]>([]);
   const [posTerminals, setPosTerminals] = useState<any[]>([]);
+  const [posAccounts, setPosAccounts] = useState<any[]>([]);
+  const [pendingPasswordResets, setPendingPasswordResets] = useState<any[]>([]);
   const [liveOrders, setLiveOrders] = useState<any[]>([]);
   const [historicalOrders, setHistoricalOrders] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
@@ -85,7 +88,6 @@ export default function FranchiseWorkspace() {
 
   // Modals
   const [showAddBranchModal, setShowAddBranchModal] = useState<boolean>(false);
-  const [showProvidePosModal, setShowProvidePosModal] = useState<boolean>(false);
   const [showEditAccessModal, setShowEditAccessModal] = useState<boolean>(false);
   const [selectedAccountForAccess, setSelectedAccountForAccess] = useState<any>(null);
 
@@ -156,7 +158,17 @@ export default function FranchiseWorkspace() {
         .then((d) => setRiders(Array.isArray(d.riders) ? d.riders : []))
         .catch(() => {});
 
-      // 5. Fetch POS Terminals
+      // 5. Fetch POS Accounts & Legacy Terminals
+      fetchApi(`/api/franchises/${fId}/pos-accounts`)
+        .then(async (r) => (r.ok ? r.json() : {}))
+        .then((d) => setPosAccounts(Array.isArray(d.accounts) ? d.accounts : []))
+        .catch(() => {});
+
+      fetchApi('/api/auth/password-reset/pending')
+        .then(async (r) => (r.ok ? r.json() : {}))
+        .then((d) => setPendingPasswordResets(Array.isArray(d.requests) ? d.requests : []))
+        .catch(() => {});
+
       const posRes = await fetchApi(`/api/franchises/${fId}/pos-terminals`);
       const posData = await posRes.json().catch(() => ({}));
       setPosTerminals(Array.isArray(posData.terminals) ? posData.terminals : []);
@@ -193,7 +205,16 @@ export default function FranchiseWorkspace() {
 
   useEffect(() => {
     loadFranchiseWorkspace();
-  }, [currentSlug, selectedBranchFilter]);
+  }, [currentSlug]);
+
+  // Fast targeted refresh for branch filter change without reloading the whole workspace
+  useEffect(() => {
+    if (!franchise?.id) return;
+    fetchApi(`/api/franchises/${franchise.id}/dashboard?branchId=${selectedBranchFilter}`)
+      .then(async (res) => (res.ok ? res.json() : {}))
+      .then((dashData) => setDashboardMetrics(dashData.dashboard || null))
+      .catch(() => {});
+  }, [selectedBranchFilter, franchise?.id]);
 
   // 3. Real-Time Scoped Live Orders Listener
   useEffect(() => {
@@ -251,24 +272,16 @@ export default function FranchiseWorkspace() {
     }
   };
 
-  // Only keep Rajnandgaon franchise in context (no HQ or fake franchises)
+  // Canonical franchises list for context switcher
   const canonicalFranchises = useMemo(() => {
-    return allFranchises
-      .filter((f) => f.id === 'fra_rajnandgaon' || f.slug === 'rajnandgaon' || f.city?.toLowerCase() === 'rajnandgaon')
-      .map((f) => ({
-        ...f,
-        name: (f.name || 'Olive Pizza — Rajnandgaon')
-          .replace(/\s*\(HQ\)/gi, '')
-          .replace(/\s*\(Main Branch\)/gi, '')
-          .replace(/\s*\(HQ Main Branch\)/gi, '')
-      }));
+    return allFranchises.map((f) => ({
+      ...f,
+      name: f.name || 'Olive Pizza'
+    }));
   }, [allFranchises]);
 
   const cleanFranchiseName = useMemo(() => {
-    return (franchise?.name || 'Olive Pizza — Rajnandgaon')
-      .replace(/\s*\(HQ\)/gi, '')
-      .replace(/\s*\(Main Branch\)/gi, '')
-      .replace(/\s*\(HQ Main Branch\)/gi, '');
+    return franchise?.name || 'Olive Pizza';
   }, [franchise]);
 
   // State for Live Dashboard Stream filters
@@ -424,47 +437,104 @@ export default function FranchiseWorkspace() {
     }
   };
 
-  // Handler: Provide POS (On-Demand Provisioning)
-  const handleProvidePos = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!franchise || !providePosData.branchId) {
-      toast.error('Please select a branch to provide POS');
-      return;
-    }
+  // Handler: Approve POS Account
+  const handleApprovePosAccount = async (posId: string) => {
+    if (!franchise) return;
     setActionLoading(true);
     try {
-      const res = await fetchApi(`/api/franchises/${franchise.id}/pos/provide`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(providePosData),
+      const res = await fetchApi(`/api/franchises/${franchise.id}/pos-accounts/${posId}/approve`, {
+        method: 'PUT'
       });
-
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Failed to provide POS');
-
-      const firstCode = data.terminals?.[0]?.activationCode || 'Generated';
-      toast.success(`POS Provisioned! Activation Code: ${firstCode}`, { duration: 6000 });
-      setShowProvidePosModal(false);
+      if (!res.ok) throw new Error(data.error || 'Failed to approve POS account');
+      toast.success('POS account verified and approved!');
       loadFranchiseWorkspace();
     } catch (err: any) {
-      toast.error(err.message || 'POS Provisioning failed');
+      toast.error(err.message || 'Approval failed');
     } finally {
       setActionLoading(false);
     }
   };
 
-  // Handler: Revoke POS Terminal
-  const handleRevokePos = async (termId: string) => {
-    if (!franchise || !confirm('Are you sure you want to revoke this POS terminal? Billing will be disabled immediately.')) return;
+  // Handler: Reject POS Account
+  const handleRejectPosAccount = async (posId: string) => {
+    if (!franchise) return;
+    const reason = window.prompt('Enter reason for rejecting this POS account (optional):') || 'Rejected by Store Owner';
+    setActionLoading(true);
     try {
-      const res = await fetchApi(`/api/franchises/${franchise.id}/pos-terminals/${termId}/revoke`, {
-        method: 'POST',
+      const res = await fetchApi(`/api/franchises/${franchise.id}/pos-accounts/${posId}/reject`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason })
       });
-      if (!res.ok) throw new Error('Failed to revoke terminal');
-      toast.success('POS Terminal revoked.');
-      setPosTerminals((prev) => prev.map((t) => (t.id === termId ? { ...t, isActive: false, activationStatus: 'REVOKED' } : t)));
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to reject POS account');
+      toast.success('POS account rejected');
+      loadFranchiseWorkspace();
     } catch (err: any) {
-      toast.error(err.message);
+      toast.error(err.message || 'Rejection failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Handler: Revoke POS Account
+  const handleRevokePosAccount = async (posId: string) => {
+    if (!franchise) return;
+    if (!window.confirm('Are you sure you want to revoke access for this POS account? Billing will be disabled immediately.')) return;
+    setActionLoading(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${franchise.id}/pos-accounts/${posId}/revoke`, {
+        method: 'PUT'
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to revoke POS account');
+      toast.success('POS account access revoked');
+      loadFranchiseWorkspace();
+    } catch (err: any) {
+      toast.error(err.message || 'Revocation failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Handler: Send Password Reset Email for POS
+  const handleSendResetEmail = async (requestId: string) => {
+    setActionLoading(true);
+    try {
+      const res = await fetchApi('/api/auth/password-reset/send-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to send reset email');
+      toast.success(data.message || 'Password reset link sent to operator email!');
+      loadFranchiseWorkspace();
+    } catch (err: any) {
+      toast.error(err.message || 'Reset dispatch failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Handler: Reject Password Reset
+  const handleRejectReset = async (requestId: string) => {
+    setActionLoading(true);
+    try {
+      const res = await fetchApi('/api/auth/password-reset/reject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestId, reason: 'Rejected by Store Owner' })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Failed to reject reset');
+      toast.success('Password reset request rejected');
+      loadFranchiseWorkspace();
+    } catch (err: any) {
+      toast.error(err.message || 'Reject failed');
+    } finally {
+      setActionLoading(false);
     }
   };
 
@@ -1459,74 +1529,162 @@ export default function FranchiseWorkspace() {
         </div>
       )}
 
-      {/* ─── 5. TAB: POS MANAGEMENT (WITH PROVIDE POS) ────────────────────────── */}
+      {/* ─── 5. TAB: POS ACCOUNT APPROVALS & CONTROL ────────────────────────── */}
       {activeTab === 'pos' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
+        <div className="space-y-6">
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-bold text-white">POS Terminal Provisioning & Control ({posTerminals.length})</h3>
-              <p className="text-xs text-slate-400">On-demand terminal creation with secure 6-digit activation codes</p>
+              <h3 className="text-sm font-bold text-white">POS Account Approvals & Access Control</h3>
+              <p className="text-xs text-slate-400">Review, verify, and approve POS terminal accounts provisioned by Franchise Management (Max 1 per franchise)</p>
             </div>
-            <button
-              onClick={() => setShowProvidePosModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-black rounded-xl text-xs font-bold transition shadow-lg shadow-amber-500/20"
-            >
-              <Plus className="w-4 h-4" /> + Provide POS
-            </button>
+            <div className="flex items-center gap-2">
+              <span className="px-3 py-1 bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs rounded-xl font-bold">
+                Franchise-Initiated POS Architecture
+              </span>
+            </div>
           </div>
 
-          {posTerminals.length === 0 ? (
-            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-8 text-center max-w-lg mx-auto space-y-3">
-              <Monitor className="w-10 h-10 mx-auto text-slate-600" />
-              <h4 className="text-sm font-bold text-white">No POS Terminals Provided Yet</h4>
-              <p className="text-xs text-slate-400">
-                This franchise currently operates without in-store POS billing. When ready, the Owner can provide POS terminals on demand.
-              </p>
-              <button
-                onClick={() => setShowProvidePosModal(true)}
-                className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black rounded-xl text-xs font-bold transition"
-              >
-                + Provide POS Now
-              </button>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {posTerminals.map((t) => (
-                <div key={t.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-sm font-bold text-white">{t.terminalName}</span>
-                      <p className="text-[10px] text-slate-400 font-mono">{t.id}</p>
+          {/* POS Accounts List */}
+          <div className="space-y-3">
+            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Configured POS Account</h4>
+            {posAccounts.length === 0 ? (
+              <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-6 sm:p-8 text-center max-w-lg mx-auto space-y-3">
+                <Monitor className="w-10 h-10 mx-auto text-slate-600" />
+                <h4 className="text-sm font-bold text-white">No POS Account Configured</h4>
+                <p className="text-xs text-slate-400">
+                  This franchise does not currently have a POS account. The Franchise Manager initiates POS account setup inside the Franchise Management App.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {posAccounts.map((account) => (
+                  <div key={account.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4 shadow-lg">
+                    <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2.5">
+                      <div className="min-w-0 flex-1">
+                        <span className="text-sm font-bold text-white flex items-center gap-2 truncate">
+                          <Monitor className="w-4 h-4 text-amber-400 shrink-0" />
+                          <span className="truncate">{account.name}</span>
+                        </span>
+                        <p className="text-xs text-slate-400 font-mono mt-0.5 truncate">{account.email}</p>
+                      </div>
+                      <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider self-start shrink-0 ${
+                        account.status === 'APPROVED' || account.status === 'ACTIVE'
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                          : account.status === 'PENDING_OWNER_APPROVAL'
+                          ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse'
+                          : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                      }`}>
+                        {account.status === 'PENDING_OWNER_APPROVAL' ? 'Pending Approval' : account.status}
+                      </span>
                     </div>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                      t.isActive ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
-                    }`}>
-                      {t.activationStatus || (t.isActive ? 'ACTIVATED' : 'REVOKED')}
-                    </span>
-                  </div>
 
-                  <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
-                    <span className="text-slate-400">Activation Code:</span>
-                    <span className="text-amber-400 font-mono font-bold text-sm tracking-widest">{t.activationCode || '—'}</span>
-                  </div>
+                    <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-1 text-xs">
+                      <div className="flex justify-between text-slate-400">
+                        <span>Franchise ID:</span>
+                        <span className="font-mono text-slate-300">{account.franchiseId}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Created Date:</span>
+                        <span className="text-slate-300">{account.createdAt ? new Date(account.createdAt).toLocaleDateString() : '—'}</span>
+                      </div>
+                      {account.approvedBy && (
+                        <div className="flex justify-between text-slate-400">
+                          <span>Approved By:</span>
+                          <span className="text-emerald-400 font-mono">{account.approvedBy}</span>
+                        </div>
+                      )}
+                    </div>
 
-                  <div className="flex justify-between items-center text-[11px] text-slate-400 pt-1">
-                    <span>Branch: {t.branchName || t.branchId}</span>
-                    {t.isActive ? (
-                      <button
-                        onClick={() => handleRevokePos(t.id)}
-                        className="px-2.5 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded text-[10px] font-semibold transition"
-                      >
-                        Revoke Access
-                      </button>
-                    ) : (
-                      <span className="text-red-400 text-[10px] font-semibold">Access Revoked</span>
-                    )}
+                    {/* Actions */}
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1 border-t border-slate-800">
+                      {account.status === 'PENDING_OWNER_APPROVAL' && (
+                        <>
+                          <button
+                            onClick={() => handleApprovePosAccount(account.id)}
+                            disabled={actionLoading}
+                            className="flex-1 min-h-[44px] py-2 px-3 bg-emerald-500 hover:bg-emerald-600 text-black font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 transition shadow-lg shadow-emerald-500/20 cursor-pointer active:scale-[0.98]"
+                          >
+                            <CheckCircle2 className="w-4 h-4 shrink-0" />
+                            <span>Verify & Approve</span>
+                          </button>
+                          <button
+                            onClick={() => handleRejectPosAccount(account.id)}
+                            disabled={actionLoading}
+                            className="min-h-[44px] px-4 py-2 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 rounded-xl text-xs font-semibold transition cursor-pointer active:scale-[0.98] flex items-center justify-center"
+                          >
+                            Reject
+                          </button>
+                        </>
+                      )}
+
+                      {(account.status === 'APPROVED' || account.status === 'ACTIVE') && (
+                        <button
+                          onClick={() => handleRevokePosAccount(account.id)}
+                          disabled={actionLoading}
+                          className="min-h-[44px] px-4 py-2 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-[0.98] w-full sm:w-auto"
+                        >
+                          <ShieldAlert className="w-4 h-4 shrink-0" />
+                          <span>Revoke Access</span>
+                        </button>
+                      )}
+
+                      {(account.status === 'REJECTED' || account.status === 'REVOKED') && (
+                        <span className="text-xs text-rose-400 font-medium py-2">Access Disabled</span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Pending Password Reset Requests Queue */}
+          <div className="space-y-3 pt-4 border-t border-slate-800">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                  POS Operator Password Reset Requests ({pendingPasswordResets.length})
+                </h4>
+                <p className="text-[11px] text-slate-400">Owner approves and dispatches secure password reset links directly to verified operators</p>
+              </div>
             </div>
-          )}
+
+            {pendingPasswordResets.length === 0 ? (
+              <div className="bg-slate-900/40 border border-slate-800/60 rounded-xl p-4 text-center text-xs text-slate-400">
+                No pending password reset requests.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {pendingPasswordResets.map((req) => (
+                  <div key={req.id} className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <span className="text-xs font-bold text-white truncate block">{req.email}</span>
+                      <p className="text-[10px] text-slate-400 mt-0.5">
+                        Requested: {new Date(req.requestedAt).toLocaleString()} • App: {req.appTarget || 'POS'}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 w-full sm:w-auto">
+                      <button
+                        onClick={() => handleSendResetEmail(req.id)}
+                        disabled={actionLoading}
+                        className="flex-1 sm:flex-initial min-h-[44px] px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-black font-bold rounded-xl text-xs transition cursor-pointer active:scale-[0.98] flex items-center justify-center"
+                      >
+                        Send Reset Email
+                      </button>
+                      <button
+                        onClick={() => handleRejectReset(req.id)}
+                        disabled={actionLoading}
+                        className="flex-1 sm:flex-initial min-h-[44px] px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs transition cursor-pointer active:scale-[0.98] flex items-center justify-center"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -2005,82 +2163,6 @@ export default function FranchiseWorkspace() {
                 <button type="button" onClick={() => setShowEditAccessModal(false)} className="px-4 py-2 bg-slate-800 text-white rounded-xl">Cancel</button>
                 <button type="submit" disabled={actionLoading} className="px-4 py-2 bg-amber-500 font-bold text-black rounded-xl">
                   {actionLoading ? 'Saving...' : 'Save Access Changes'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ─── MODAL: PROVIDE POS WIZARD ────────────────────────────────────────── */}
-      {showProvidePosModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-sm font-bold text-white">Provide POS to Franchise</h3>
-                <p className="text-xs text-slate-400">On-demand POS provisioning with instant 6-digit activation code</p>
-              </div>
-              <button onClick={() => setShowProvidePosModal(false)} className="text-slate-400 hover:text-white">✕</button>
-            </div>
-
-            <form onSubmit={handleProvidePos} className="space-y-3 text-xs">
-              <div>
-                <label className="text-slate-400 block mb-1">Step 1: Select Target Branch</label>
-                <select
-                  value={providePosData.branchId}
-                  onChange={(e) => setProvidePosData({ ...providePosData, branchId: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white"
-                >
-                  {branches.map((b) => (
-                    <option key={b.id} value={b.id}>{b.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-slate-400 block mb-1">Step 2: Terminal Label / Counter Name</label>
-                <input
-                  type="text"
-                  required
-                  value={providePosData.terminalName}
-                  onChange={(e) => setProvidePosData({ ...providePosData, terminalName: e.target.value })}
-                  placeholder="e.g. Counter 1 — Billing Terminal"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white"
-                />
-              </div>
-
-              <div>
-                <label className="text-slate-400 block mb-1">Step 3: Number of Terminals</label>
-                <select
-                  value={providePosData.posTerminalCount}
-                  onChange={(e) => setProvidePosData({ ...providePosData, posTerminalCount: Number(e.target.value) })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono"
-                >
-                  <option value={1}>1 Terminal</option>
-                  <option value={2}>2 Terminals</option>
-                  <option value={3}>3 Terminals</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="text-slate-400 block mb-1">Step 4: Assign POS Cashier / Staff (Optional)</label>
-                <select
-                  value={providePosData.assignedUserId}
-                  onChange={(e) => setProvidePosData({ ...providePosData, assignedUserId: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white"
-                >
-                  <option value="">-- Auto-generate terminal for branch --</option>
-                  {accessAccounts.map((acc) => (
-                    <option key={acc.id} value={acc.id}>{acc.name} ({acc.role})</option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
-                <button type="button" onClick={() => setShowProvidePosModal(false)} className="px-4 py-2 bg-slate-800 text-white rounded-xl">Cancel</button>
-                <button type="submit" disabled={actionLoading} className="px-4 py-2 bg-amber-500 font-bold text-black rounded-xl">
-                  {actionLoading ? 'Provisioning...' : 'Provision & Generate Code'}
                 </button>
               </div>
             </form>

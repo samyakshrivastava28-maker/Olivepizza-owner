@@ -330,12 +330,39 @@ export default function FranchiseManager() {
       if (res.ok || data?.success) {
         toast.success('Franchise, Staff Accounts & POS Terminals Provisioned!');
       } else {
-        // Fallback local set
+        const slug = wizCity.toLowerCase().replace(/[^a-z0-9]/g, '-');
+        const franchiseId = `fra_${wizCity.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
+        const now = new Date().toISOString();
+
+        await setDoc(doc(db, 'franchise_entities', franchiseId), {
+          id: franchiseId,
+          slug,
+          organizationId: 'org_olive_pizza',
+          name: payload.name,
+          code: payload.code,
+          region: payload.state,
+          city: payload.city,
+          contactEmail: payload.email,
+          contactPhone: payload.phone,
+          franchiseOwnerName: payload.franchiseOwnerName,
+          franchiseOwnerEmail: payload.franchiseOwnerEmail || undefined,
+          restaurantManagerName: payload.restaurantManagerName || undefined,
+          restaurantManagerEmail: payload.restaurantManagerEmail || undefined,
+          mainBranchId: branchId,
+          isActive: true,
+          status: 'ACTIVE',
+          createdAt: now,
+          updatedAt: now
+        }, { merge: true });
+
         await setDoc(doc(db, 'franchises', branchId), {
           id: branchId,
+          franchiseId,
+          slug,
           ...payload,
           isActive: true,
-          createdAt: new Date().toISOString()
+          createdAt: now,
+          updatedAt: now
         }, { merge: true });
         toast.success('Franchise created successfully');
       }

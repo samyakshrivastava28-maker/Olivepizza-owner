@@ -37,7 +37,9 @@ export const OwnerGuard: React.FC = () => {
 
   // If initialization complete and user is not authenticated or not authorized, redirect to login
   if (isInitialized && (!user || !isAuthorized)) {
-    return <Navigate to={`/login?redirect=${encodeURIComponent(location.pathname)}`} replace />;
+    const shouldAttachRedirect = location.pathname && location.pathname !== '/' && location.pathname !== '/login' && location.pathname !== '/dashboard';
+    const redirectParam = shouldAttachRedirect ? `?redirect=${encodeURIComponent(location.pathname)}` : '';
+    return <Navigate to={`/login${redirectParam}`} replace />;
   }
 
   return <Outlet />;

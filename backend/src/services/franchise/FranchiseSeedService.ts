@@ -23,9 +23,11 @@ export class FranchiseSeedService {
     if (FranchiseSeedService.seeded) return;
 
     try {
-      // 1. Seed organization document
-      await adminDb.collection('organizations').doc(FranchiseScopeService.DEFAULT_ORG_ID).set(
-        {
+      // 1. Seed organization document if not exists
+      const orgRef = adminDb.collection('organizations').doc(FranchiseScopeService.DEFAULT_ORG_ID);
+      const orgSnap = await orgRef.get();
+      if (!orgSnap.exists) {
+        await orgRef.set({
           id: FranchiseScopeService.DEFAULT_ORG_ID,
           name: 'Olive Pizza India',
           legalName: 'Olive Pizza Foodworks Private Limited',
@@ -35,13 +37,14 @@ export class FranchiseSeedService {
           country: 'IN',
           defaultFranchiseId: FranchiseScopeService.DEFAULT_FRANCHISE_ID,
           seededAt: new Date().toISOString()
-        },
-        { merge: true }
-      );
+        });
+      }
 
-      // 2. Seed franchise-level metadata document
-      await adminDb.collection('franchise_metadata').doc(FranchiseScopeService.DEFAULT_FRANCHISE_ID).set(
-        {
+      // 2. Seed franchise-level metadata document if not exists
+      const metaRef = adminDb.collection('franchise_metadata').doc(FranchiseScopeService.DEFAULT_FRANCHISE_ID);
+      const metaSnap = await metaRef.get();
+      if (!metaSnap.exists) {
+        await metaRef.set({
           id: FranchiseScopeService.DEFAULT_FRANCHISE_ID,
           organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
           name: 'Olive Pizza — Rajnandgaon',
@@ -51,19 +54,17 @@ export class FranchiseSeedService {
           contactPhone: '+91 91799 44445',
           isActive: true,
           defaultBranchId: FranchiseScopeService.DEFAULT_BRANCH_ID,
-          // Google Drive Billing folder — populated by GoogleSheetsReportService on first bill
           googleDriveBillingFolderId: null,
           seededAt: new Date().toISOString()
-        },
-        { merge: true }
-      );
+        });
+      }
 
-      // 3. Seed canonical branch documents (Only Rajnandgaon)
+      // 3. Seed canonical branch documents (Only if not already present)
       const defaultBranches = [
         {
           id: 'main_branch',
           organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
-          franchiseId: FranchiseScopeService.DEFAULT_FRANCHISE_ID,
+          franchiseId: 'fra_rajnandgaon',
           name: 'Olive Pizza — Rajnandgaon',
           code: 'OP-RJN-01',
           city: 'Rajnandgaon',
@@ -83,17 +84,23 @@ export class FranchiseSeedService {
       ];
 
       for (const branch of defaultBranches) {
-        await adminDb
-          .collection('franchises')
-          .doc(branch.id)
-          .set({ ...branch, seededAt: new Date().toISOString() }, { merge: true });
+        const branchRef = adminDb.collection('franchises').doc(branch.id);
+        const branchSnap = await branchRef.get();
+        if (!branchSnap.exists) {
+          await branchRef.set({ ...branch, seededAt: new Date().toISOString() });
+        } else {
+          // If branch exists, ensure franchiseId points to canonical fra_rajnandgaon without touching user fields
+          const existingData = branchSnap.data();
+          if (!existingData?.franchiseId || existingData.franchiseId === 'fra_primary') {
+            await branchRef.set({ franchiseId: 'fra_rajnandgaon' }, { merge: true });
+          }
+        }
       }
 
       FranchiseSeedService.seeded = true;
-      console.log('[FranchiseSeedService] Default organization, franchise, and branch documents seeded successfully.');
+      console.log('[FranchiseSeedService] Default organization, franchise, and branch verified.');
     } catch (err) {
-      // Seeding failure must not crash the server — log and continue
-      console.warn('[FranchiseSeedService] Warning: Failed to seed default franchise data:', err);
+      console.warn('[FranchiseSeedService] Warning: Failed to verify default franchise data:', err);
     }
   }
 }
