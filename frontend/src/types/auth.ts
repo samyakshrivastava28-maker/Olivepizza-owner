@@ -1,4 +1,16 @@
-﻿export type UserRole = 'owner' | 'admin' | 'developer' | 'customer' | 'delivery_partner' | 'franchise_owner' | 'restaurant_manager' | 'cashier';
+export type UserRole = 
+  | 'owner' 
+  | 'admin' 
+  | 'developer' 
+  | 'platform_owner'
+  | 'franchise_owner' 
+  | 'franchise_manager' 
+  | 'restaurant_manager' 
+  | 'manager'
+  | 'staff'
+  | 'cashier' 
+  | 'delivery_partner' 
+  | 'customer';
 
 export interface User {
   uid: string;
@@ -9,6 +21,18 @@ export interface User {
   role?: UserRole;
   phoneNumber?: string;
   phone?: string;
+  allowedApps?: string[];
+  applicationAccess?: {
+    app_franchise_management?: boolean;
+    app_restaurant_management?: boolean;
+    app_pos?: boolean;
+    app_delivery?: boolean;
+    [key: string]: boolean | undefined;
+  };
+  permissions?: string[];
+  branchId?: string;
+  branchIds?: string[];
+  franchiseId?: string;
 
   // Email
   emailVerified?: boolean;

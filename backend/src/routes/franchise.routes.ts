@@ -1881,10 +1881,10 @@ router.get('/:id/access-accounts', requireRole(['owner', 'admin', 'developer', '
         branchId: u.branchId || 'all_branches',
         accountStatus: u.isActive === false ? 'SUSPENDED' : 'ACTIVE',
         applicationAccess: {
-          app_franchise_management: perms.includes('app_franchise_management') || u.role === 'owner' || u.role === 'franchise_manager',
-          app_restaurant_management: perms.includes('app_restaurant_management') || u.role === 'owner',
-          app_pos: perms.includes('app_pos') || perms.includes('pos.billing'),
-          app_delivery: perms.includes('app_delivery') || u.role === 'delivery_partner'
+          app_franchise_management: Boolean(u.applicationAccess?.app_franchise_management ?? (perms.includes('app_franchise_management') || u.role === 'owner' || u.role === 'franchise_manager')),
+          app_restaurant_management: Boolean(u.applicationAccess?.app_restaurant_management ?? (perms.includes('app_restaurant_management') || u.role === 'owner')),
+          app_pos: Boolean(u.applicationAccess?.app_pos ?? (perms.includes('app_pos') || perms.includes('pos.billing') || u.role === 'owner')),
+          app_delivery: Boolean(u.applicationAccess?.app_delivery ?? (perms.includes('app_delivery') || u.role === 'delivery_partner' || u.role === 'owner'))
         },
         permissions: perms,
         updatedAt: u.updatedAt || new Date().toISOString()
@@ -1902,10 +1902,10 @@ router.get('/:id/access-accounts', requireRole(['owner', 'admin', 'developer', '
         branchId: m.branchId || 'main_branch',
         accountStatus: m.isActive === false ? 'SUSPENDED' : 'ACTIVE',
         applicationAccess: {
-          app_franchise_management: perms.includes('app_franchise_management'),
-          app_restaurant_management: perms.includes('app_restaurant_management') || true,
-          app_pos: perms.includes('app_pos') || perms.includes('pos.billing'),
-          app_delivery: perms.includes('app_delivery')
+          app_franchise_management: Boolean(m.applicationAccess?.app_franchise_management ?? perms.includes('app_franchise_management')),
+          app_restaurant_management: Boolean(m.applicationAccess?.app_restaurant_management ?? true),
+          app_pos: Boolean(m.applicationAccess?.app_pos ?? (perms.includes('app_pos') || perms.includes('pos.billing'))),
+          app_delivery: Boolean(m.applicationAccess?.app_delivery ?? perms.includes('app_delivery'))
         },
         permissions: perms,
         updatedAt: m.updatedAt || new Date().toISOString()
@@ -1924,10 +1924,10 @@ router.get('/:id/access-accounts', requireRole(['owner', 'admin', 'developer', '
         branchId: r.branchId || 'main_branch',
         accountStatus: r.isActive === false ? 'SUSPENDED' : 'ACTIVE',
         applicationAccess: {
-          app_franchise_management: false,
-          app_restaurant_management: false,
-          app_pos: false,
-          app_delivery: true
+          app_franchise_management: Boolean(r.applicationAccess?.app_franchise_management ?? false),
+          app_restaurant_management: Boolean(r.applicationAccess?.app_restaurant_management ?? false),
+          app_pos: Boolean(r.applicationAccess?.app_pos ?? false),
+          app_delivery: Boolean(r.applicationAccess?.app_delivery ?? true)
         },
         permissions: perms,
         updatedAt: r.updatedAt || new Date().toISOString()
@@ -1986,8 +1986,19 @@ router.post('/:id/access/edit', requireRole(['owner', 'admin', 'developer', 'pla
       }
     }
 
+    // Compute authorized operational applications
+    const allowedApps: string[] = [];
+    if (applicationAccess?.app_franchise_management) allowedApps.push('FRANCHISE_MANAGER');
+    if (applicationAccess?.app_restaurant_management) allowedApps.push('RESTAURANT_MANAGER');
+    if (applicationAccess?.app_pos) allowedApps.push('POS');
+    if (applicationAccess?.app_delivery) allowedApps.push('DELIVERY');
+    if (allowedApps.length > 0) allowedApps.push('OWNER');
+
     const updates: Record<string, any> = {
       permissions: updatedPerms,
+      applicationAccess: applicationAccess || {},
+      allowedApps,
+      franchiseId: id,
       updatedAt: new Date().toISOString(),
       updatedBy: req.user?.uid || 'owner'
     };
@@ -2000,13 +2011,34 @@ router.post('/:id/access/edit', requireRole(['owner', 'admin', 'developer', 'pla
       updates.branchId = assignedBranchId;
     }
 
-    // Update in target collection
-    if (targetRole === 'restaurant_manager') {
-      await adminDb.collection('restaurant_managers').doc(targetUserId).set(updates, { merge: true });
-    } else if (targetRole === 'delivery_partner') {
-      await adminDb.collection('delivery_partners').doc(targetUserId).set(updates, { merge: true });
-    } else {
-      await adminDb.collection('users').doc(targetUserId).set(updates, { merge: true });
+    // Always update users collection doc as source of truth
+    await adminDb.collection('users').doc(targetUserId).set(updates, { merge: true });
+
+    // Synchronize to role-specific collections
+    if (targetRole === 'restaurant_manager' || applicationAccess?.app_restaurant_management) {
+      await adminDb.collection('restaurant_managers').doc(targetUserId).set({
+        ...updates,
+        status: accountStatus === 'ACTIVE' ? 'APPROVED' : 'DEACTIVATED',
+        isActive: accountStatus === 'ACTIVE',
+        role: 'restaurant_manager'
+      }, { merge: true });
+    }
+
+    if (targetRole === 'delivery_partner' || applicationAccess?.app_delivery) {
+      await adminDb.collection('delivery_partners').doc(targetUserId).set({
+        ...updates,
+        status: accountStatus === 'ACTIVE' ? 'approved' : 'suspended',
+        isActive: accountStatus === 'ACTIVE',
+        role: 'delivery_partner'
+      }, { merge: true });
+    }
+
+    if (applicationAccess?.app_franchise_management) {
+      await adminDb.collection('franchise_users').doc(targetUserId).set({
+        ...updates,
+        role: 'franchise_manager',
+        isActive: accountStatus === 'ACTIVE'
+      }, { merge: true });
     }
 
     // Log Server-Authoritative Audit Event

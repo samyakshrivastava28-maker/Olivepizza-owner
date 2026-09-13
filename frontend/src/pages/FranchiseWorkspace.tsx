@@ -661,10 +661,10 @@ export default function FranchiseWorkspace() {
                   <tr>
                     <th className="p-3.5">Account & Email</th>
                     <th className="p-3.5">Role</th>
-                    <th className="p-3.5 text-center">Franchise App</th>
-                    <th className="p-3.5 text-center">Restaurant App</th>
+                    <th className="p-3.5 text-center">Franchise Workspace</th>
+                    <th className="p-3.5 text-center">Restaurant Operations</th>
                     <th className="p-3.5 text-center">POS Terminal</th>
-                    <th className="p-3.5 text-center">Delivery App</th>
+                    <th className="p-3.5 text-center">Delivery Fleet</th>
                     <th className="p-3.5">Status</th>
                     <th className="p-3.5 text-right">Action</th>
                   </tr>
@@ -1072,15 +1072,19 @@ export default function FranchiseWorkspace() {
               <button onClick={() => setShowEditAccessModal(false)} className="text-slate-400 hover:text-white">✕</button>
             </div>
 
+            <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-[11px] text-amber-300">
+              Granted applications empower this user to log in and use authorized features directly inside this unified console without requiring separate external web applications.
+            </div>
+
             <form onSubmit={handleSaveAccessChanges} className="space-y-4 text-xs">
               <div className="space-y-2">
                 <label className="text-slate-400 block font-semibold">Application Grants</label>
                 
                 {/* Franchise App */}
-                <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-950/60 cursor-pointer">
+                <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-950/60 cursor-pointer hover:border-amber-500/40 transition">
                   <div>
-                    <span className="font-semibold text-white block">Franchise Management App</span>
-                    <span className="text-[10px] text-slate-400">olive-pizza-franchise (Port 5175)</span>
+                    <span className="font-semibold text-white block">Franchise Management Workspace</span>
+                    <span className="text-[10px] text-emerald-400 font-medium">In-App Franchise Management & Configuration</span>
                   </div>
                   <input
                     type="checkbox"
@@ -1091,10 +1095,10 @@ export default function FranchiseWorkspace() {
                 </label>
 
                 {/* Restaurant App */}
-                <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-950/60 cursor-pointer">
+                <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-950/60 cursor-pointer hover:border-amber-500/40 transition">
                   <div>
-                    <span className="font-semibold text-white block">Restaurant Management App</span>
-                    <span className="text-[10px] text-slate-400">Olive Pizza restaurant manager (Port 5176)</span>
+                    <span className="font-semibold text-white block">Restaurant Operations & Kitchen KDS</span>
+                    <span className="text-[10px] text-emerald-400 font-medium">In-App Restaurant Controls, Store Status & Orders</span>
                   </div>
                   <input
                     type="checkbox"
@@ -1105,10 +1109,10 @@ export default function FranchiseWorkspace() {
                 </label>
 
                 {/* POS App */}
-                <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-950/60 cursor-pointer">
+                <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-950/60 cursor-pointer hover:border-amber-500/40 transition">
                   <div>
                     <span className="font-semibold text-white block">POS Billing Terminal</span>
-                    <span className="text-[10px] text-slate-400">olive-pizza-pos (Port 5178)</span>
+                    <span className="text-[10px] text-amber-400 font-medium">Terminal Billing & Cashier Shifts</span>
                   </div>
                   <input
                     type="checkbox"
@@ -1119,10 +1123,10 @@ export default function FranchiseWorkspace() {
                 </label>
 
                 {/* Delivery App */}
-                <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-950/60 cursor-pointer">
+                <label className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-950/60 cursor-pointer hover:border-amber-500/40 transition">
                   <div>
-                    <span className="font-semibold text-white block">Delivery Partner App</span>
-                    <span className="text-[10px] text-slate-400">olive-pizza-delivery (Port 5177)</span>
+                    <span className="font-semibold text-white block">Delivery Fleet Dispatch</span>
+                    <span className="text-[10px] text-sky-400 font-medium">Rider Dispatch, Tracking & Fleet Operations</span>
                   </div>
                   <input
                     type="checkbox"

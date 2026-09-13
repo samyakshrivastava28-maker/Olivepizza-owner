@@ -17,6 +17,8 @@ import {
   Pizza,
   Building2,
   LayoutTemplate,
+  Store,
+  Users,
   X,
   Menu,
 } from 'lucide-react';
@@ -28,19 +30,56 @@ export const OwnerLayout: React.FC = () => {
   const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  // Core Canonical Navigation Items including Home Page Manager
-  const navItems = [
-    { label: 'Analytics', path: '/analytics', icon: BarChart3 },
-    { label: 'Orders', path: '/orders', icon: Clock },
-    { label: 'Delivery Fleet', path: '/delivery', icon: Bike },
-    { label: 'Home Page Manager', path: '/home-manager', icon: LayoutTemplate },
-    { label: 'Restaurant Reports', path: '/reports', icon: FileText },
-    { label: 'Notifications', path: '/notifications', icon: Bell },
-    { label: 'Email', path: '/email', icon: Mail },
-    { label: 'Media', path: '/media', icon: FolderOpen },
-    { label: 'Product & Menu', path: '/products', icon: Pizza },
-    { label: 'Franchise Management', path: '/franchises', icon: Building2 },
+  // Determine user capabilities across unified platform
+  const isMasterOwner = !user?.email ? false : (
+    user.email.toLowerCase() === 'olivepizzarjn@gmail.com' ||
+    user.email.toLowerCase() === 'webhub2811@gmail.com' ||
+    user.email.toLowerCase() === 'olivepizzamaker@gmail.com' ||
+    user.role === 'owner' || 
+    user.role === 'admin' || 
+    user.role === 'developer' || 
+    user.role === 'platform_owner'
+  );
+
+  const appAccess = user?.applicationAccess || {};
+  const allowedApps = user?.allowedApps || [];
+
+  const hasRestaurantAccess = isMasterOwner || 
+    user?.role === 'restaurant_manager' || 
+    user?.role === 'franchise_manager' || 
+    user?.role === 'franchise_owner' ||
+    Boolean(appAccess.app_restaurant_management) ||
+    allowedApps.includes('RESTAURANT_MANAGER');
+
+  const hasFranchiseAccess = isMasterOwner || 
+    user?.role === 'franchise_manager' || 
+    user?.role === 'franchise_owner' || 
+    Boolean(appAccess.app_franchise_management) ||
+    allowedApps.includes('FRANCHISE_MANAGER');
+
+  const hasDeliveryAccess = isMasterOwner || 
+    user?.role === 'delivery_partner' || 
+    hasRestaurantAccess ||
+    Boolean(appAccess.app_delivery) ||
+    allowedApps.includes('DELIVERY');
+
+  // Core Canonical Navigation Items including Restaurant Operations & Managers
+  const allNavItems = [
+    { label: 'Analytics', path: '/analytics', icon: BarChart3, show: isMasterOwner },
+    { label: 'Orders', path: '/orders', icon: Clock, show: true },
+    { label: 'Restaurant Operations', path: '/restaurant', icon: Store, show: hasRestaurantAccess },
+    { label: 'Restaurant Managers', path: '/restaurant-managers', icon: Users, show: hasFranchiseAccess || isMasterOwner },
+    { label: 'Franchise Management', path: '/franchises', icon: Building2, show: hasFranchiseAccess || isMasterOwner },
+    { label: 'Delivery Fleet', path: '/delivery', icon: Bike, show: hasDeliveryAccess },
+    { label: 'Home Page Manager', path: '/home-manager', icon: LayoutTemplate, show: isMasterOwner },
+    { label: 'Restaurant Reports', path: '/reports', icon: FileText, show: hasRestaurantAccess || isMasterOwner },
+    { label: 'Notifications', path: '/notifications', icon: Bell, show: hasRestaurantAccess || isMasterOwner },
+    { label: 'Email Marketing', path: '/email', icon: Mail, show: isMasterOwner },
+    { label: 'Media Library', path: '/media', icon: FolderOpen, show: isMasterOwner },
+    { label: 'Product & Menu', path: '/products', icon: Pizza, show: hasRestaurantAccess || isMasterOwner },
   ];
+
+  const navItems = allNavItems.filter((item) => item.show);
 
   return (
     <div className="min-h-screen bg-[#0B0F17] flex font-sans text-slate-100 antialiased selection:bg-orange-500 selection:text-white">

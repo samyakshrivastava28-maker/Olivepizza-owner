@@ -43,8 +43,37 @@ const FranchiseManager = lazyWithRetry(() => import('./pages/FranchiseManager'))
 const FranchiseWorkspace = lazyWithRetry(() => import('./pages/FranchiseWorkspace'));
 const RestaurantControlPage = lazyWithRetry(() => import('./pages/RestaurantControlPage'));
 
-import { useAuthStore } from './lib/store';
+import { useAuthStore, isAuthorizedOwnerEmail } from './lib/store';
 import { AppRestrictedScreen } from './components/common/AppRestrictedScreen';
+
+function WorkspaceRedirect() {
+  const { user, role } = useAuthStore();
+  const isMasterOwner = !user?.email ? false : (
+    isAuthorizedOwnerEmail(user.email) ||
+    role === 'owner' ||
+    role === 'admin' ||
+    role === 'developer' ||
+    role === 'platform_owner'
+  );
+
+  if (isMasterOwner) {
+    return <Navigate to="/analytics" replace />;
+  }
+
+  if (role === 'restaurant_manager' || user?.applicationAccess?.app_restaurant_management) {
+    return <Navigate to="/restaurant" replace />;
+  }
+
+  if (role === 'franchise_manager' || role === 'franchise_owner' || user?.applicationAccess?.app_franchise_management) {
+    return <Navigate to="/franchises" replace />;
+  }
+
+  if (role === 'delivery_partner' || user?.applicationAccess?.app_delivery) {
+    return <Navigate to="/delivery" replace />;
+  }
+
+  return <Navigate to="/orders" replace />;
+}
 
 export default function App() {
   const { restrictedReason, restrictedEmail, clearRestricted, logout } = useAuthStore();
@@ -90,9 +119,9 @@ export default function App() {
               {/* Protected Owner Operations */}
               <Route element={<OwnerGuard />}>
                 <Route element={<OwnerLayout />}>
-                  {/* 1. Analytics */}
-                  <Route index element={<Navigate to="/analytics" replace />} />
-                  <Route path="/dashboard" element={<Navigate to="/analytics" replace />} />
+                  {/* 1. Analytics & Root Router */}
+                  <Route index element={<WorkspaceRedirect />} />
+                  <Route path="/dashboard" element={<WorkspaceRedirect />} />
                   <Route
                     path="/analytics"
                     element={
@@ -258,7 +287,7 @@ export default function App() {
               </Route>
 
               {/* Catch-all fallback */}
-              <Route path="*" element={<Navigate to="/analytics" replace />} />
+              <Route path="*" element={<WorkspaceRedirect />} />
             </Routes>
           </Suspense>
           </>

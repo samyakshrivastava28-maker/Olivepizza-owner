@@ -78,15 +78,16 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
               let phone = firebaseUser.phoneNumber;
 
               // Check Firestore user doc for extra fields if needed
+              let userDocData: any = null;
               try {
                 const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
                 if (userDoc.exists()) {
-                  const data = userDoc.data();
-                  if (data.role && !serverUser?.role) {
-                    resolvedRole = data.role as UserRole;
+                  userDocData = userDoc.data();
+                  if (userDocData.role && !serverUser?.role) {
+                    resolvedRole = userDocData.role as UserRole;
                   }
-                  if (data.name) name = data.name;
-                  if (data.phone) phone = data.phone;
+                  if (userDocData.name) name = userDocData.name;
+                  if (userDocData.phone) phone = userDocData.phone;
                 }
               } catch (fsErr: any) {
                 console.warn('[AuthProvider] Firestore user doc read notice:', fsErr?.message);
@@ -100,6 +101,17 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
                     name,
                     phone: phone || undefined,
                     role: resolvedRole,
+                    allowedApps: serverUser?.allowedApps || userDocData?.allowedApps || (isOwnerEmail ? ['OWNER', 'FRANCHISE_MANAGER', 'RESTAURANT_MANAGER', 'POS', 'DELIVERY'] : []),
+                    applicationAccess: serverUser?.applicationAccess || userDocData?.applicationAccess || {
+                      app_franchise_management: isOwnerEmail || resolvedRole === 'franchise_manager' || resolvedRole === 'franchise_owner',
+                      app_restaurant_management: isOwnerEmail || resolvedRole === 'restaurant_manager',
+                      app_pos: isOwnerEmail || resolvedRole === 'cashier',
+                      app_delivery: isOwnerEmail || resolvedRole === 'delivery_partner',
+                    },
+                    permissions: serverUser?.permissions || userDocData?.permissions || [],
+                    branchId: serverUser?.branchId || userDocData?.branchId || 'main_branch',
+                    branchIds: serverUser?.branchIds || userDocData?.branchIds || ['main_branch'],
+                    franchiseId: serverUser?.franchiseId || userDocData?.franchiseId || 'fra_rajnandgaon',
                   },
                   resolvedRole
                 );

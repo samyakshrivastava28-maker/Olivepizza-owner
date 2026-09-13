@@ -12,14 +12,26 @@ export const OwnerGuard: React.FC = () => {
     return <PizzaLoader text="Verifying owner authorization..." />;
   }
 
-  // Validate owner / staff role or whitelisted email
+  // Validate owner / staff role, granted application access, or whitelisted email
   const isEmailApproved = isAuthorizedOwnerEmail(user?.email);
+  const hasAppAccess = Boolean(
+    (user?.allowedApps && user.allowedApps.length > 0) ||
+    (user?.applicationAccess && Object.values(user.applicationAccess).some(Boolean))
+  );
+
   const isAuthorized = !!user && (
     role === 'owner' || 
     role === 'admin' || 
     role === 'developer' || 
+    role === 'platform_owner' ||
     role === 'restaurant_manager' ||
     role === 'franchise_owner' ||
+    role === 'franchise_manager' ||
+    role === 'manager' ||
+    role === 'staff' ||
+    role === 'cashier' ||
+    role === 'delivery_partner' ||
+    hasAppAccess ||
     isEmailApproved
   );
 

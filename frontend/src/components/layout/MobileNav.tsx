@@ -1,17 +1,30 @@
 import React from 'react';
 import { NavLink } from 'react-router';
-import { BarChart3, Clock, Pizza, Bell, Menu } from 'lucide-react';
+import { BarChart3, Clock, Pizza, Store, Menu } from 'lucide-react';
+import { useAuthStore, isAuthorizedOwnerEmail } from '../../lib/store';
 
 interface MobileNavProps {
   onOpenDrawer: () => void;
 }
 
 export const MobileNav: React.FC<MobileNavProps> = ({ onOpenDrawer }) => {
-  const items = [
+  const user = useAuthStore((s) => s.user);
+  const isMasterOwner = !user?.email ? false : (
+    isAuthorizedOwnerEmail(user.email) ||
+    user.role === 'owner' || 
+    user.role === 'admin' || 
+    user.role === 'developer'
+  );
+
+  const items = isMasterOwner ? [
     { label: 'Analytics', path: '/analytics', icon: BarChart3 },
     { label: 'Orders', path: '/orders', icon: Clock },
-    { label: 'Products', path: '/products', icon: Pizza },
-    { label: 'Alerts', path: '/notifications', icon: Bell },
+    { label: 'Restaurant', path: '/restaurant', icon: Store },
+    { label: 'Menu', path: '/products', icon: Pizza },
+  ] : [
+    { label: 'Orders', path: '/orders', icon: Clock },
+    { label: 'Restaurant', path: '/restaurant', icon: Store },
+    { label: 'Menu', path: '/products', icon: Pizza },
   ];
 
   return (
