@@ -59,6 +59,17 @@ router.post('/build-platform', requireAuth, requireRole(['owner', 'admin']), asy
     }
 
     const platform = String(req.body.platform || req.query.platform || 'android').toLowerCase();
+    const appKey = String(req.body.app || req.query.app || 'customer').trim().toLowerCase();
+    const isMobileOnly = appKey === 'customer' || appKey === 'delivery';
+
+    if (isMobileOnly && (platform === 'windows' || platform === 'macos')) {
+      return res.status(400).json({
+        error: `Desktop targets (windows/macos) are strictly forbidden for ${appKey} application per platform matrix. Allowed targets: android, ios.`,
+        app: appKey,
+        platform
+      });
+    }
+
     const workflowMap: Record<string, string> = {
       android: 'build-android.yml',
       ios: 'build-ios.yml',
@@ -91,7 +102,7 @@ router.post('/build-platform', requireAuth, requireRole(['owner', 'admin']), asy
   }
 });
 
-// Trigger all platform builds (Android, iOS, Windows, macOS)
+// Trigger all platform builds (Android, iOS, Windows, macOS where authorized)
 router.post('/build-all', requireAuth, requireRole(['owner', 'admin']), async (req, res) => {
   try {
     const token = process.env.GITHUB_TOKEN;
@@ -99,8 +110,14 @@ router.post('/build-all', requireAuth, requireRole(['owner', 'admin']), async (r
       return res.status(500).json({ error: 'GITHUB_TOKEN is not configured on the server.' });
     }
 
+    const appKey = String(req.body.app || req.query.app || 'customer').trim().toLowerCase();
+    const isMobileOnly = appKey === 'customer' || appKey === 'delivery';
     const targetRepo = getTargetRepo(req.body.app || req.query.app);
-    const workflows = ['build-android.yml', 'build-ios.yml', 'build-windows.yml', 'build-macos.yml'];
+
+    // Customer and Delivery only build mobile artifacts (Android APK and iOS/iPadOS IPA)
+    const workflows = isMobileOnly
+      ? ['build-android.yml', 'build-ios.yml']
+      : ['build-android.yml', 'build-ios.yml', 'build-windows.yml', 'build-macos.yml'];
     const results: Record<string, boolean> = {};
 
     for (const wf of workflows) {
@@ -202,9 +219,12 @@ router.get('/latest-release', async (req, res) => {
       return res.status(404).json({ error: 'No release found for repository', repo: targetRepo });
     }
 
+    const appKey = String(req.query.app || 'customer').trim().toLowerCase();
+    const isMobileOnly = appKey === 'customer' || appKey === 'delivery';
+
     const apkAsset = data.assets?.find((asset: any) => asset.name?.endsWith('.apk'));
-    const exeAsset = data.assets?.find((asset: any) => asset.name?.endsWith('.exe'));
-    const dmgAsset = data.assets?.find((asset: any) => asset.name?.endsWith('.dmg'));
+    const exeAsset = isMobileOnly ? null : data.assets?.find((asset: any) => asset.name?.endsWith('.exe'));
+    const dmgAsset = isMobileOnly ? null : data.assets?.find((asset: any) => asset.name?.endsWith('.dmg'));
     const ipaAsset = data.assets?.find((asset: any) => asset.name?.endsWith('.ipa'));
 
     res.json({
@@ -246,6 +266,17 @@ router.get('/latest-release', async (req, res) => {
 
 // Helper function for asset redirection
 async function redirectReleaseAsset(res: any, appParam: any, extension: string) {
+  const appKey = String(appParam || 'customer').trim().toLowerCase();
+  const isMobileOnly = appKey === 'customer' || appKey === 'delivery';
+  const ext = extension.toLowerCase();
+
+  if (isMobileOnly && (ext === '.exe' || ext === '.dmg')) {
+    return res.status(400).json({
+      error: `Desktop downloads (${ext}) are strictly forbidden for ${appKey} application per platform matrix. Only .apk and .ipa are supported.`,
+      app: appKey
+    });
+  }
+
   const targetRepo = getTargetRepo(appParam);
   const headers: Record<string, string> = {
     'Accept': 'application/vnd.github.v3+json',
