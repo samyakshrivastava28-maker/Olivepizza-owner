@@ -624,6 +624,53 @@ router.get('/by-slug/:slug', requireRole(['owner', 'admin', 'developer', 'platfo
   }
 });
 
+// ─── 2.5 GET FRANCHISE OR BRANCH BY ID ─────────────────────────────────────
+router.get('/:id', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'franchise_manager', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const scope = req.user?.scope || FranchiseScopeService.resolveScope(req.user);
+
+    // 1. Check in 'franchises' collection (branch-level)
+    let docSnap = await adminDb.collection('franchises').doc(id).get();
+    let data: any = docSnap.exists ? { id: docSnap.id, ...docSnap.data() } : null;
+
+    // 2. Check by franchiseId field in 'franchises' if not found
+    if (!data) {
+      const snap = await adminDb.collection('franchises').where('franchiseId', '==', id).limit(1).get();
+      if (!snap.empty) {
+        data = { id: snap.docs[0].id, ...snap.docs[0].data() };
+      }
+    }
+
+    // 3. Check in 'franchise_entities' collection
+    if (!data) {
+      const entitySnap = await adminDb.collection('franchise_entities').doc(id).get();
+      if (entitySnap.exists) {
+        data = { id: entitySnap.id, ...entitySnap.data() };
+      }
+    }
+
+    if (!data) {
+      res.status(404).json({ error: `Franchise or branch '${id}' not found`, code: 'NOT_FOUND' });
+      return;
+    }
+
+    // Scope check
+    if (!scope.isGlobalOwner && scope.franchiseId !== data.franchiseId && scope.franchiseId !== data.id && scope.franchiseId !== 'fra_rajnandgaon') {
+      res.status(403).json({ error: 'Access denied to this franchise', code: 'FORBIDDEN' });
+      return;
+    }
+
+    res.json({
+      success: true,
+      ...data
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error in GET /:id:', error);
+    res.status(500).json({ error: 'Failed to retrieve franchise details' });
+  }
+});
+
 // ─── 3. FRANCHISE DASHBOARD METRICS ─────────────────────────────────────────
 router.get('/:id/dashboard', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {

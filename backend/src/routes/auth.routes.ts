@@ -182,7 +182,37 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
         return;
       }
 
-      // Owner is authorized for OWNER and administrative FRANCHISE_MANAGER oversight
+      if (targetApp === 'FRANCHISE_MANAGER') {
+        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        await AuthAuditService.logEvent({
+          eventType: 'APP_AUTHORIZE_DENIED',
+          userId: user.uid,
+          identifier: user.email,
+          appTarget: targetApp,
+          status: 'BLOCKED',
+          metadata: { reason: 'OWNER_RESTRICTED_FROM_FRANCHISE_MANAGER' }
+        });
+        res.status(403).json({
+          authorized: false,
+          app: targetApp,
+          email: user.email,
+          reason: 'Owner accounts are restricted from operational Franchise Management application access. Owner must use the Owner Console.'
+        });
+        return;
+      }
+
+      if (targetApp !== 'OWNER') {
+        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        res.status(403).json({
+          authorized: false,
+          app: targetApp,
+          email: user.email,
+          reason: 'Owner accounts are restricted to the Owner Console only.'
+        });
+        return;
+      }
+
+      // Owner is authorized strictly for OWNER Console
       await LoginRateLimiterService.recordSuccess(userIdentifier, clientIp);
       await AuthAuditService.logEvent({
         eventType: 'APP_AUTHORIZE_SUCCESS',
@@ -204,9 +234,9 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
           branchName: 'Olive Pizza — Rajnandgaon HQ',
           franchiseId: 'fra_rajnandgaon',
           permissions: ['*'],
-          allowedApps: ['OWNER', 'FRANCHISE_MANAGER'],
+          allowedApps: ['OWNER'],
           applicationAccess: {
-            app_franchise_management: true,
+            app_franchise_management: false,
             app_restaurant_management: false,
             app_pos: false,
             app_delivery: false

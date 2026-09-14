@@ -45,8 +45,8 @@ export class LoginRateLimiterService {
       return { allowed: true, attempts: 0, remainingAttempts: this.MAX_ATTEMPTS, retryAfterSeconds: 0 };
     }
 
-    // If attempts have already exceeded MAX_ATTEMPTS (2), block the next attempt
-    if (attempts > this.MAX_ATTEMPTS) {
+    // If attempts have already reached MAX_ATTEMPTS (2), block the 3rd attempt
+    if (attempts >= this.MAX_ATTEMPTS) {
       const retryAfterSeconds = Math.max(1, Math.ceil((firstAttemptAt + this.WINDOW_MS - now) / 1000));
       
       await AuthAuditService.logEvent({

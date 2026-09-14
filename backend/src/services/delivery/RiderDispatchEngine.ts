@@ -117,11 +117,42 @@ export class RiderDispatchEngine {
   }
 
   /**
-   * Automatically assigns best candidate and sends high-priority assignment alert
+   * Automatically assigns best candidate and sends high-priority assignment alert.
+   * Prioritizes Store-Bound FIFO queue for the order's branch first.
+   * If FIFO queue has no available rider, gracefully falls back to GPS proximity ranking.
    */
   public static async autoDispatchRider(orderId: string): Promise<{ success: boolean; rider?: EligibleRider; reason?: string }> {
-    const candidates = await this.findEligibleRiders(orderId);
     const orderRef = adminDb.collection('orders').doc(orderId);
+    const orderDoc = await orderRef.get();
+    if (!orderDoc.exists) return { success: false, reason: 'Order not found' };
+    const orderData = orderDoc.data()!;
+    const branchId = orderData.branchId || 'main_branch';
+
+    // 1. Primary: Server-authoritative store-bound FIFO queue
+    try {
+      const { StoreBoundDeliveryFleetService } = await import('./StoreBoundDeliveryFleetService.js');
+      const fifoResult = await StoreBoundDeliveryFleetService.assignOrderToFifoRider(orderId, branchId);
+      if (fifoResult.success && fifoResult.rider) {
+        return {
+          success: true,
+          rider: {
+            uid: fifoResult.rider.uid,
+            name: fifoResult.rider.name,
+            phone: fifoResult.rider.phone,
+            latitude: fifoResult.rider.latitude || 0,
+            longitude: fifoResult.rider.longitude || 0,
+            distanceMeters: 0,
+            score: 10000,
+            branchId: fifoResult.rider.branchId,
+          }
+        };
+      }
+    } catch (fifoErr) {
+      console.warn('[RiderDispatchEngine] Store FIFO assignment bypassed, attempting proximity fallback:', fifoErr);
+    }
+
+    // 2. Fallback: Proximity-based candidate search
+    const candidates = await this.findEligibleRiders(orderId);
 
     if (candidates.length === 0) {
       await orderRef.set({
@@ -191,20 +222,20 @@ export class RiderDispatchEngine {
       return { success: false, reason: 'All eligible candidates are currently busy' };
     }
 
-    const orderDoc = await orderRef.get();
-    const orderData = orderDoc.data() || {};
-    const orderNumber = orderData.orderNumber || ('#' + orderId.slice(-6).toUpperCase());
+    const latestOrderDoc = await orderRef.get();
+    const latestOrderData = latestOrderDoc.data() || {};
+    const orderNumber = latestOrderData.orderNumber || ('#' + orderId.slice(-6).toUpperCase());
 
     const { DeliveryTemplates } = await import('../notification/NotificationTemplates.js');
     const riderPayload = DeliveryTemplates.newAssignment(orderId, {
       orderNumber,
-      customerName: orderData.customerName || 'Customer',
-      customerPhone: orderData.contactPhone || 'N/A',
-      deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
+      customerName: latestOrderData.customerName || 'Customer',
+      customerPhone: latestOrderData.contactPhone || 'N/A',
+      deliveryAddress: latestOrderData.deliveryAddress?.addressLine || latestOrderData.deliveryAddress || 'Delivery Address',
       distance: `${((assignedRider as EligibleRider).distanceMeters / 1000).toFixed(1)} km`,
       eta: `${Math.ceil((assignedRider as EligibleRider).distanceMeters / 400) || 10} mins`,
-      totalAmount: Number(orderData.totalAmount || 0),
-      paymentMethod: orderData.paymentMethod || 'COD',
+      totalAmount: Number(latestOrderData.totalAmount || 0),
+      paymentMethod: latestOrderData.paymentMethod || 'COD',
     });
 
     // Notify Rider with actionable alert
