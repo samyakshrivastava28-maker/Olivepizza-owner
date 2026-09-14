@@ -81,8 +81,9 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
         headers.set('Authorization', `Bearer ${token}`);
       }
     }
-  } catch (err) {
-    console.warn('[fetchApi] Could not attach bearer token:', err);
+  if (!headers.has('X-Device-Id')) {
+    const ownerDeviceId = localStorage.getItem('owner_device_id') || 'dev_owner_console';
+    headers.set('X-Device-Id', ownerDeviceId);
   }
 
   const config: RequestInit = {

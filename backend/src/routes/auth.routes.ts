@@ -91,15 +91,22 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       return;
     }
 
+    const rawDeviceId = (req.headers['x-device-id'] || req.headers['x-installation-id'] || req.body?.deviceId || req.body?.device_id || '') as string;
+    const userAgent = (req.headers['user-agent'] || '') as string;
     const userIdentifier = (user.email || user.uid || '').toLowerCase().trim();
     const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
 
-    // ── 1. Server-Enforced Login Rate Limiter (Max 2 attempts per 15 min, 3rd blocked) ──
-    const rateStatus = await LoginRateLimiterService.checkLimit(userIdentifier, clientIp);
+    // ── 1. Server-Enforced Login Rate Limiter (Max 2 attempts per 15 min per device, 3rd blocked) ──
+    const rateStatus = await LoginRateLimiterService.consumeAttempt(rawDeviceId, clientIp, userAgent, userIdentifier, targetApp);
     if (!rateStatus.allowed) {
+      res.setHeader('Retry-After', String(rateStatus.retryAfterSeconds));
       res.status(429).json({
+        success: false,
         authorized: false,
-        reason: 'Too many login attempts. Please try again later.',
+        code: 'AUTH_RATE_LIMITED',
+        message: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
+        reason: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
+        retryAfter: rateStatus.retryAfterSeconds,
         retryAfterSeconds: rateStatus.retryAfterSeconds
       });
       return;

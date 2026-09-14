@@ -31,9 +31,13 @@ import {
   adminLimiter, 
   expensiveLimiter 
 } from './config/security.config.js';
+import { errorSanitizerMiddleware, sanitizeErrorDetails, generateReferenceId } from './middleware/errorSanitizer.middleware.js';
 
 const app = express();
 app.set('trust proxy', 1);
+
+// ─── CENTRALIZED PRODUCTION ERROR SANITIZER & LEAK DEFENSE ────────────────────
+app.use(errorSanitizerMiddleware);
 
 // ─── PRODUCTION SECURITY HEADERS (HELMET + CLOUDFLARE EDGE HARDENING) ────────
 app.use(helmet({
@@ -427,22 +431,25 @@ app.use((req: express.Request, res: express.Response) => {
   });
 });
 
-// Global Error Handler - SANITIZES 500 INTERNAL ERRORS IN PRODUCTION
+// Global Error Handler - SANITIZES ALL ERRORS TO PRODUCTION-SAFE FORMAT
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const isProd = process.env.NODE_ENV === 'production';
-  const requestId = (req as any).requestId || req.headers['x-request-id'] || 'UNKNOWN';
-  console.error(`[Global Error][${requestId}][${new Date().toISOString()}][${req.method} ${req.url}]`, err.message || err);
-
+  const referenceId = generateReferenceId();
   const statusCode = typeof err.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 500;
-  const severity = statusCode >= 500 ? 'critical' : statusCode >= 400 ? 'warning' : 'info';
+  
+  // Log full raw error server-side for developers
+  console.error(`[Global Error][${referenceId}][${new Date().toISOString()}][${req.method} ${req.url}]`, err);
+
+  const sanitized = sanitizeErrorDetails(err, statusCode);
 
   res.status(statusCode).json({
     success: false,
-    error: isProd && statusCode === 500 ? 'An unexpected error occurred. Please try again later.' : (err.message || 'Internal Server Error'),
-    code: err.code || (statusCode === 500 ? 'INTERNAL_ERROR' : 'CLIENT_ERROR'),
-    requestId,
-    severity,
-    ...(isProd ? {} : { stack: err.stack })
+    code: sanitized.code,
+    message: sanitized.message,
+    referenceId,
+    ...(sanitized.retryAfter ? { retryAfter: sanitized.retryAfter, retryAfterSeconds: sanitized.retryAfter } : {}),
+    // Backward compatibility fields
+    error: sanitized.message,
+    requestId: referenceId
   });
 });
 
