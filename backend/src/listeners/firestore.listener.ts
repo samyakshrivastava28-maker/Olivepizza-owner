@@ -114,9 +114,10 @@ export class FirestoreListener {
             // 1. FCM PUSH NOTIFICATION FOR NEW ORDER (RESTAURANT MANAGEMENT ALARM & CUSTOMER PLACED)
             (async () => {
               try {
-                // Dispatch Restaurant Management Alarm strictly to authorized staff of this branch
+                // Dispatch Restaurant Management Alarm strictly to authorized staff of this branch and franchise
                 const branchId = orderData.branchId || 'main_branch';
-                const branchStaffRecipients = await notificationEngine.resolveBranchStaff(branchId);
+                const franchiseId = orderData.franchiseId || 'fra_rajnandgaon';
+                const branchStaffRecipients = await notificationEngine.resolveBranchStaff(branchId, franchiseId);
                 if (branchStaffRecipients.length > 0) {
                   const restaurantPayload = RestaurantTemplates.newOrder(orderData.id, {
                     customerName: orderData.customerName || orderData.customer_name || 'Customer',
@@ -127,6 +128,7 @@ export class FirestoreListener {
                     deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Pickup',
                     phone: orderData.contactPhone || orderData.phone,
                     branchId,
+                    franchiseId,
                     orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
                   });
                   await notificationEngine.sendBulk(branchStaffRecipients, restaurantPayload, {
@@ -314,14 +316,15 @@ export class FirestoreListener {
                 // If order was delivered, notify the branch restaurant staff with delivery success sound
                 if (currentStatus === 'delivered') {
                   const branchId = orderData.branchId || 'main_branch';
-                  const branchStaff = await notificationEngine.resolveBranchStaff(branchId);
+                  const franchiseId = orderData.franchiseId || 'fra_rajnandgaon';
+                  const branchStaff = await notificationEngine.resolveBranchStaff(branchId, franchiseId);
                   if (branchStaff.length > 0) {
                     const deliveredPayload = RestaurantTemplates.orderDelivered(orderData.id, {
                       orderNumber,
                       customerName: orderData.customerName || 'Customer',
                       totalAmount,
                       branchId,
-                      franchiseId: orderData.franchiseId || 'default',
+                      franchiseId,
                       riderName: orderData.deliveryPartnerName,
                       deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
                       deliveredAt: new Date().toISOString(),

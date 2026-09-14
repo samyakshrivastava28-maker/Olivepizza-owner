@@ -16,22 +16,8 @@ export default function NewOrderEmergencyOverlay({ order, onClose, onAccept }: N
   const [isMuted, setIsMuted] = useState(false);
 
   useEffect(() => {
-    if (!order) return;
-    
-    // Play loud new order notification sound
-    if (!isMuted) {
-      playNotificationSound('new_order');
-    }
-
-    // Repeat alarm every 4 seconds until owner interacts
-    const interval = setInterval(() => {
-      if (!isMuted) {
-        playNotificationSound('new_order');
-      }
-    }, 4000);
-
-    return () => clearInterval(interval);
-  }, [order, isMuted]);
+    // Owner app is an executive oversight portal; kitchen emergency alarms are strictly silenced.
+  }, [order]);
 
   if (!order || (order.status && !['pending', 'placed', 'created', 'new_order'].includes(order.status))) return null;
 

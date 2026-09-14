@@ -81,6 +81,10 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
         headers.set('Authorization', `Bearer ${token}`);
       }
     }
+  } catch (authErr) {
+    console.warn('[fetchApi] Auth state ready notice:', authErr);
+  }
+
   if (!headers.has('X-Device-Id')) {
     const ownerDeviceId = localStorage.getItem('owner_device_id') || 'dev_owner_console';
     headers.set('X-Device-Id', ownerDeviceId);

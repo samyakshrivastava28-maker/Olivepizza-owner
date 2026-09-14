@@ -488,6 +488,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     }
 
     // 0.4. Dynamic Branch & Franchise Resolution
+    const deliveryType = req.body.deliveryType || 'delivery';
     const callerRole = req.user?.role || 'customer';
     const isStaffMember = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(callerRole);
 
@@ -506,24 +507,45 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
       const explicitBranch = (req.body.branchId || req.headers['x-branch-id'] || req.body.session?.branchId || '').trim();
       const explicitFranchise = (req.body.franchiseId || req.body.session?.franchiseId || '').trim();
 
-      if (explicitBranch) {
-        resolvedBranchId = explicitBranch;
-      } else if (explicitFranchise) {
-        resolvedFranchiseId = explicitFranchise;
+      if (explicitFranchise) {
+        let franchiseExists = false;
         try {
           const feDoc = await adminDb.collection('franchise_entities').doc(explicitFranchise).get();
-          if (feDoc.exists && feDoc.data()?.mainBranchId) {
-            resolvedBranchId = feDoc.data()!.mainBranchId;
+          if (feDoc.exists && feDoc.data()?.isActive !== false) {
+            franchiseExists = true;
+            resolvedFranchiseId = explicitFranchise;
+            if (feDoc.data()?.mainBranchId) {
+              resolvedBranchId = feDoc.data()!.mainBranchId;
+            }
+          } else {
+            const fDoc = await adminDb.collection('franchises').doc(explicitFranchise).get();
+            if (fDoc.exists && fDoc.data()?.isActive !== false) {
+              franchiseExists = true;
+              resolvedFranchiseId = fDoc.data()?.franchiseId || explicitFranchise;
+              resolvedBranchId = fDoc.id;
+            }
           }
         } catch (fErr) {
           console.warn('[Orders] Franchise entity lookup warning:', fErr);
         }
+
+        if (!franchiseExists) {
+          res.status(400).json({
+            error: 'The specified franchise is invalid or inactive.',
+            code: 'INVALID_FRANCHISE'
+          });
+          return;
+        }
+      } else if (explicitBranch) {
+        resolvedBranchId = explicitBranch;
       } else {
         // 2. Resolve via GPS / coordinates if provided
-        const custLat = Number(location?.lat || userData.lat || userData.location?.lat);
-        const custLng = Number(location?.lng || userData.lng || userData.location?.lng);
+        const rawLat = location?.lat ?? req.body.deliveryAddress?.lat ?? userData.lat ?? userData.location?.lat;
+        const rawLng = location?.lng ?? req.body.deliveryAddress?.lng ?? userData.lng ?? userData.location?.lng;
+        const custLat = rawLat != null ? Number(rawLat) : NaN;
+        const custLng = rawLng != null ? Number(rawLng) : NaN;
 
-        if (!isNaN(custLat) && !isNaN(custLng) && custLat !== 0 && custLng !== 0) {
+        if (!isNaN(custLat) && !isNaN(custLng)) {
           try {
             const allBranchesSnap = await adminDb.collection('franchises').get();
             let closestBranch: any = null;
@@ -534,7 +556,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
               if (bData.isActive === false) continue;
               const bLat = Number(bData.lat ?? bData.coordinates?.lat ?? bData.location?.lat);
               const bLng = Number(bData.lng ?? bData.coordinates?.lng ?? bData.location?.lng);
-              if (!isNaN(bLat) && !isNaN(bLng) && bLat !== 0 && bLng !== 0) {
+              if (!isNaN(bLat) && !isNaN(bLng)) {
                 const dist = calculateDistance(custLat, custLng, bLat, bLng);
                 const maxRadius = Number(bData.deliveryRadiusKm || bData.deliveryRadius || 25);
                 if (dist <= maxRadius && dist < minDistance) {
@@ -547,6 +569,12 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
             if (closestBranch) {
               resolvedBranchId = closestBranch.id;
               resolvedFranchiseId = closestBranch.franchiseId || resolvedFranchiseId;
+            } else if (deliveryType === 'delivery') {
+              res.status(400).json({
+                error: "We currently don't deliver to this location.",
+                code: 'OUT_OF_DELIVERY_ZONE'
+              });
+              return;
             }
           } catch (geoErr) {
             console.warn('[Orders] Geolocation branch resolution notice:', geoErr);
@@ -599,7 +627,6 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     }
 
     // 0.5. Check Delivery Availability if delivery requested
-    const deliveryType = req.body.deliveryType || 'delivery';
     if (deliveryType === 'delivery') {
       const avail = await DeliveryCapacityService.getRestaurantAvailability(resolvedBranchId);
       if (!avail.canAcceptDeliveries) {
@@ -989,7 +1016,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     // 5. Asynchronous Background Dispatch (Targeted Restaurant Management Notification with Action Buttons)
     setImmediate(async () => {
       try {
-        const branchStaffUids = await notificationEngine.resolveBranchStaff(resolvedBranchId);
+        const branchStaffUids = await notificationEngine.resolveBranchStaff(resolvedBranchId, resolvedFranchiseId);
         if (branchStaffUids.length > 0) {
           const restaurantPayload = RestaurantTemplates.newOrder(newOrderId, {
             customerName: userData.name || 'Customer',

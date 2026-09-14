@@ -673,12 +673,14 @@ export class NotificationEngine {
   }
 
   /**
-   * Resolves active user UIDs for restaurant managers/staff for a specific branch.
-   * Strictly scopes new-order and operational alerts to the target branch.
+   * Resolves active user UIDs for restaurant managers/staff for a specific branch and franchise.
+   * Strictly scopes new-order and operational alerts to the target branch & franchise.
+   * Excludes franchise_manager from operational kitchen alarms.
    */
   public async resolveBranchStaff(
     branchId: string,
-    roles: string[] = ['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef', 'franchise_manager']
+    franchiseId?: string,
+    roles: string[] = ['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef']
   ): Promise<string[]> {
     if (!branchId || typeof branchId !== 'string' || branchId.trim() === '') {
       console.warn('[NotificationEngine] Cannot resolve branch staff: invalid or empty branchId');
@@ -686,43 +688,79 @@ export class NotificationEngine {
     }
 
     const cleanBranchId = branchId.trim();
+    const cleanFranchiseId = franchiseId ? franchiseId.trim() : undefined;
     const uidsSet = new Set<string>();
 
     try {
-      // 1. Query Firestore users by branchId + role
+      // 1. Query Firestore users by branchId + role (+ franchiseId if provided)
       for (const r of roles) {
-        const snap = await db.collection('users')
+        let q: any = db.collection('users')
           .where('branchId', '==', cleanBranchId)
-          .where('role', '==', r)
-          .get();
-        snap.docs.forEach(doc => {
-          if (doc.data()?.isActive !== false) {
-            uidsSet.add(doc.id);
+          .where('role', '==', r);
+        if (cleanFranchiseId) {
+          q = q.where('franchiseId', '==', cleanFranchiseId);
+        }
+        const snap = await q.get();
+        snap.docs.forEach((doc: any) => {
+          const d = doc.data();
+          if (d?.isActive !== false) {
+            if (!cleanFranchiseId || !d?.franchiseId || d.franchiseId === cleanFranchiseId) {
+              uidsSet.add(doc.id);
+            }
           }
         });
       }
 
-      // 2. Also check branchIds array (multi-branch managers)
-      const multiSnap = await db.collection('users')
-        .where('branchIds', 'array-contains', cleanBranchId)
-        .get();
-      multiSnap.docs.forEach(doc => {
+      // 2. Query restaurant_managers collection for approved managers
+      try {
+        let rmQ: any = db.collection('restaurant_managers')
+          .where('branchId', '==', cleanBranchId)
+          .where('status', '==', 'APPROVED');
+        if (cleanFranchiseId) {
+          rmQ = rmQ.where('franchiseId', '==', cleanFranchiseId);
+        }
+        const rmSnap = await rmQ.get();
+        rmSnap.docs.forEach((doc: any) => {
+          const d = doc.data();
+          if (d?.isActive !== false) {
+            if (!cleanFranchiseId || !d?.franchiseId || d.franchiseId === cleanFranchiseId) {
+              uidsSet.add(doc.id);
+            }
+          }
+        });
+      } catch (rmErr) {
+        // Non-fatal
+      }
+
+      // 3. Also check branchIds array (multi-branch managers)
+      let multiQ: any = db.collection('users')
+        .where('branchIds', 'array-contains', cleanBranchId);
+      if (cleanFranchiseId) {
+        multiQ = multiQ.where('franchiseId', '==', cleanFranchiseId);
+      }
+      const multiSnap = await multiQ.get();
+      multiSnap.docs.forEach((doc: any) => {
         const d = doc.data();
         if (d?.isActive !== false && roles.includes(d?.role)) {
-          uidsSet.add(doc.id);
+          if (!cleanFranchiseId || !d?.franchiseId || d.franchiseId === cleanFranchiseId) {
+            uidsSet.add(doc.id);
+          }
         }
       });
 
-      // 3. Also check PostgreSQL fcm_tokens table for tokens registered directly under this branch
+      // 4. Also check PostgreSQL fcm_tokens table for tokens registered directly under this branch (+ franchise)
       try {
-        const pgRes = await pgPool.query(
-          `SELECT DISTINCT user_id 
-           FROM fcm_tokens 
-           WHERE is_active = TRUE 
-             AND branch_id = $1 
-             AND role = ANY($2)`,
-          [cleanBranchId, roles]
-        );
+        let pgSql = `SELECT DISTINCT user_id 
+                     FROM fcm_tokens 
+                     WHERE is_active = TRUE 
+                       AND branch_id = $1 
+                       AND role = ANY($2)`;
+        const pgParams: any[] = [cleanBranchId, roles];
+        if (cleanFranchiseId) {
+          pgSql += ` AND (franchise_id = $3 OR franchise_id IS NULL)`;
+          pgParams.push(cleanFranchiseId);
+        }
+        const pgRes = await pgPool.query(pgSql, pgParams);
         pgRes.rows.forEach((r: any) => {
           if (r.user_id) uidsSet.add(r.user_id);
         });
@@ -730,7 +768,7 @@ export class NotificationEngine {
         // Postgres query non-fatal fallback
       }
     } catch (e: any) {
-      console.warn(`[NotificationEngine] Branch staff lookup failed for branch ${cleanBranchId}:`, e.message);
+      console.warn(`[NotificationEngine] Branch staff lookup failed for branch ${cleanBranchId} (franchise: ${cleanFranchiseId}):`, e.message);
     }
 
     return Array.from(uidsSet);
