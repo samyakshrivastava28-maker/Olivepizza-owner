@@ -46,12 +46,85 @@ router.post('/build-apk', requireAuth, requireRole(['owner', 'admin']), async (r
       res.status(response.status).json({ error: 'Failed to trigger build', details: errorText, repo: targetRepo });
     }
   } catch (error: any) {
-    console.error('Error triggering APK build:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
-// Get the latest Android APK Build status
+// Trigger specific platform build (android, ios, windows, macos)
+router.post('/build-platform', requireAuth, requireRole(['owner', 'admin']), async (req, res) => {
+  try {
+    const token = process.env.GITHUB_TOKEN;
+    if (!token) {
+      return res.status(500).json({ error: 'GITHUB_TOKEN is not configured on the server.' });
+    }
+
+    const platform = String(req.body.platform || req.query.platform || 'android').toLowerCase();
+    const workflowMap: Record<string, string> = {
+      android: 'build-android.yml',
+      ios: 'build-ios.yml',
+      windows: 'build-windows.yml',
+      macos: 'build-macos.yml'
+    };
+
+    const workflowFile = workflowMap[platform] || 'build-android.yml';
+    const targetRepo = getTargetRepo(req.body.app || req.query.app);
+
+    const response = await fetch(`https://api.github.com/repos/${targetRepo}/actions/workflows/${workflowFile}/dispatches`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ref: 'main' }),
+    });
+
+    if (response.ok) {
+      res.json({ success: true, message: `Build triggered successfully for ${platform} on ${targetRepo}`, repo: targetRepo, platform });
+    } else {
+      const errorText = await response.text();
+      res.status(response.status).json({ error: 'Failed to trigger build', details: errorText, repo: targetRepo, platform });
+    }
+  } catch (error: any) {
+    console.error('Error triggering platform build:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Trigger all platform builds (Android, iOS, Windows, macOS)
+router.post('/build-all', requireAuth, requireRole(['owner', 'admin']), async (req, res) => {
+  try {
+    const token = process.env.GITHUB_TOKEN;
+    if (!token) {
+      return res.status(500).json({ error: 'GITHUB_TOKEN is not configured on the server.' });
+    }
+
+    const targetRepo = getTargetRepo(req.body.app || req.query.app);
+    const workflows = ['build-android.yml', 'build-ios.yml', 'build-windows.yml', 'build-macos.yml'];
+    const results: Record<string, boolean> = {};
+
+    for (const wf of workflows) {
+      try {
+        const r = await fetch(`https://api.github.com/repos/${targetRepo}/actions/workflows/${wf}/dispatches`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ ref: 'main' }),
+        });
+        results[wf] = r.ok;
+      } catch {
+        results[wf] = false;
+      }
+    }
+
+    res.json({ success: true, targetRepo, results });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Failed to trigger all builds', details: error.message });
+  }
+});
 router.get('/build-status', requireAuth, requireRole(['owner', 'admin']), async (req, res) => {
   try {
     const token = process.env.GITHUB_TOKEN;
@@ -171,57 +244,89 @@ router.get('/latest-release', async (req, res) => {
   }
 });
 
-// Direct APK download redirect
-router.get('/download-apk', async (req, res) => {
+// Helper function for asset redirection
+async function redirectReleaseAsset(res: any, appParam: any, extension: string) {
+  const targetRepo = getTargetRepo(appParam);
+  const headers: Record<string, string> = {
+    'Accept': 'application/vnd.github.v3+json',
+    'User-Agent': 'OlivePizza-Backend'
+  };
+  if (process.env.GITHUB_TOKEN) {
+    headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
+  }
+
+  let asset: any = null;
+
   try {
-    const targetRepo = getTargetRepo(req.query.app);
-    const headers: Record<string, string> = {
-      'Accept': 'application/vnd.github.v3+json',
-      'User-Agent': 'OlivePizza-Backend'
-    };
-    if (process.env.GITHUB_TOKEN) {
-      headers['Authorization'] = `Bearer ${process.env.GITHUB_TOKEN}`;
+    const latestRes = await fetch(`https://api.github.com/repos/${targetRepo}/releases/latest`, { headers });
+    if (latestRes.ok) {
+      const data = await latestRes.json();
+      asset = data.assets?.find((a: any) => a.name?.toLowerCase().endsWith(extension.toLowerCase()));
     }
+  } catch (e) {
+    console.warn(`[GitHub Router] Latest release fetch error for ${extension}:`, e);
+  }
 
-    let apkAsset: any = null;
-
+  if (!asset) {
     try {
-      const latestRes = await fetch(`https://api.github.com/repos/${targetRepo}/releases/latest`, { headers });
-      if (latestRes.ok) {
-        const data = await latestRes.json();
-        apkAsset = data.assets?.find((asset: any) => asset.name?.endsWith('.apk'));
-      }
-    } catch (e) {
-      console.warn('[GitHub Router] Latest release fetch error:', e);
-    }
-
-    if (!apkAsset) {
-      try {
-        const allRes = await fetch(`https://api.github.com/repos/${targetRepo}/releases?per_page=5`, { headers });
-        if (allRes.ok) {
-          const releases = await allRes.json();
-          if (Array.isArray(releases)) {
-            for (const r of releases) {
-              const asset = r.assets?.find((a: any) => a.name?.endsWith('.apk'));
-              if (asset) {
-                apkAsset = asset;
-                break;
-              }
+      const allRes = await fetch(`https://api.github.com/repos/${targetRepo}/releases?per_page=5`, { headers });
+      if (allRes.ok) {
+        const releases = await allRes.json();
+        if (Array.isArray(releases)) {
+          for (const r of releases) {
+            const found = r.assets?.find((a: any) => a.name?.toLowerCase().endsWith(extension.toLowerCase()));
+            if (found) {
+              asset = found;
+              break;
             }
           }
         }
-      } catch (e) {
-        console.warn('[GitHub Router] All releases fetch failed:', e);
       }
+    } catch (e) {
+      console.warn(`[GitHub Router] All releases fetch failed for ${extension}:`, e);
     }
+  }
 
-    if (apkAsset && apkAsset.browser_download_url) {
-      return res.redirect(302, apkAsset.browser_download_url);
-    }
+  if (asset && asset.browser_download_url) {
+    return res.redirect(302, asset.browser_download_url);
+  }
 
-    return res.redirect(`https://github.com/${targetRepo}/releases`);
+  return res.redirect(`https://github.com/${targetRepo}/releases`);
+}
+
+// Direct platform download redirects
+router.get('/download-apk', async (req, res) => {
+  try {
+    return await redirectReleaseAsset(res, req.query.app, '.apk');
   } catch (error: any) {
     console.error('Error redirecting to APK:', error);
+    return res.redirect(`https://github.com/${DEFAULT_REPO}/releases`);
+  }
+});
+
+router.get('/download-ipa', async (req, res) => {
+  try {
+    return await redirectReleaseAsset(res, req.query.app, '.ipa');
+  } catch (error: any) {
+    console.error('Error redirecting to IPA:', error);
+    return res.redirect(`https://github.com/${DEFAULT_REPO}/releases`);
+  }
+});
+
+router.get('/download-exe', async (req, res) => {
+  try {
+    return await redirectReleaseAsset(res, req.query.app, '.exe');
+  } catch (error: any) {
+    console.error('Error redirecting to EXE:', error);
+    return res.redirect(`https://github.com/${DEFAULT_REPO}/releases`);
+  }
+});
+
+router.get('/download-dmg', async (req, res) => {
+  try {
+    return await redirectReleaseAsset(res, req.query.app, '.dmg');
+  } catch (error: any) {
+    console.error('Error redirecting to DMG:', error);
     return res.redirect(`https://github.com/${DEFAULT_REPO}/releases`);
   }
 });
