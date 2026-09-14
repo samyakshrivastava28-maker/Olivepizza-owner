@@ -297,10 +297,32 @@ router.get('/order/:orderId', optionalAuth, async (req: AuthRequest, res: Respon
     client.release();
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Tracking not found for order' });
+      // Graceful fallback from Firestore order record
+      return res.json({
+        order_id: orderId,
+        status: order?.status || 'accepted',
+        restaurant_lat: order?.restaurantLat || DEFAULT_BRANCH_LAT,
+        restaurant_lng: order?.restaurantLng || DEFAULT_BRANCH_LNG,
+        customer_lat: order?.deliveryAddress?.lat || null,
+        customer_lng: order?.deliveryAddress?.lng || null,
+        delivery_partner_id: order?.deliveryPartnerId || null,
+        partner_lat: order?.driverLocation?.lat || null,
+        partner_lng: order?.driverLocation?.lng || null,
+        heading: order?.driverLocation?.heading || 0,
+        speed: order?.driverLocation?.speed || 0,
+        distance_km: null,
+        estimated_minutes: null,
+        partner_name: order?.deliveryPartnerName || null,
+        partner_phone: order?.deliveryPartnerPhone || null,
+        last_updated: order?.driverLocation?.updatedAt || order?.updatedAt || new Date().toISOString()
+      });
     }
 
-    res.json(result.rows[0]);
+    res.json({
+      ...result.rows[0],
+      partner_name: order?.deliveryPartnerName || null,
+      partner_phone: order?.deliveryPartnerPhone || null,
+    });
   } catch (error) {
     console.error('Error getting tracking info:', error);
     res.status(500).json({ error: 'Internal server error' });

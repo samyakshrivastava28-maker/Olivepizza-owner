@@ -182,6 +182,133 @@ router.post('/truecaller', authLimiter, async (req: Request, res: Response) => {
   }
 });
 
+router.post('/signin', authLimiter, async (req: Request, res: Response) => {
+  const { method, phoneNumber, otp, pinId, requestId, payload, signature } = req.body;
+
+  try {
+    let verifiedPhone: string | null = null;
+    let verifiedName: string | null = null;
+
+    if (method === 'sms') {
+      if (!phoneNumber || !otp) {
+        return res.status(400).json({ success: false, error: 'Phone number and OTP code are required.' });
+      }
+      const verifyRes = await phoneVerificationService.verifyOtp(phoneNumber, otp, 'phone_signin', pinId);
+      if (!verifyRes.success || !verifyRes.phone) {
+        return res.status(400).json({ success: false, error: verifyRes.error || 'Invalid OTP code.' });
+      }
+      verifiedPhone = verifyRes.phone;
+    } else if (method === 'truecaller') {
+      const verifyInput = payload ? (typeof payload === 'string' && signature ? { payload, signature } : payload) : { requestId };
+      const tcRes = await truecaller.verifyProfile(verifyInput, 'phone_signin');
+      if (!tcRes.success || !tcRes.phone) {
+        return res.status(400).json({ success: false, error: tcRes.error || 'Truecaller verification failed.' });
+      }
+      verifiedPhone = tcRes.phone;
+      verifiedName = (tcRes as any).name || null;
+    } else {
+      return res.status(400).json({ success: false, error: 'Invalid verification method specified.' });
+    }
+
+    // Resolve or provision account
+    let uid: string | null = null;
+    let userData: any = null;
+    let isNewUser = false;
+
+    // 1. Check customer_identities
+    const identSnap = await adminDb.collection('customer_identities').doc(verifiedPhone).get();
+    if (identSnap.exists) {
+      uid = identSnap.data()?.primaryUid || null;
+    }
+
+    // 2. Check users collection by phone
+    if (!uid) {
+      const userSnap = await adminDb.collection('users')
+        .where('phone', '==', verifiedPhone)
+        .limit(1)
+        .get();
+      if (!userSnap.empty) {
+        uid = userSnap.docs[0].id;
+        userData = userSnap.docs[0].data();
+      }
+    } else {
+      const userDoc = await adminDb.collection('users').doc(uid).get();
+      if (userDoc.exists) {
+        userData = userDoc.data();
+      }
+    }
+
+    // 3. If account does not exist, provision clean customer account
+    if (!uid) {
+      isNewUser = true;
+      try {
+        const createdFirebaseUser = await adminAuth.createUser({
+          phoneNumber: verifiedPhone,
+          displayName: verifiedName || 'Customer',
+        });
+        uid = createdFirebaseUser.uid;
+      } catch (authErr: any) {
+        if (authErr.code === 'auth/phone-number-already-exists') {
+          const existing = await adminAuth.getUserByPhoneNumber(verifiedPhone);
+          uid = existing.uid;
+        } else {
+          uid = 'cust_' + Buffer.from(verifiedPhone).toString('hex').slice(0, 20);
+        }
+      }
+
+      await adminAuth.setCustomUserClaims(uid, { role: 'customer' }).catch(() => {});
+
+      userData = {
+        firebase_uid: uid,
+        phone: verifiedPhone,
+        phoneVerified: true,
+        phoneSetupCompleted: true,
+        role: 'customer',
+        name: verifiedName || 'Customer',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        verificationMethod: method,
+      };
+
+      await adminDb.collection('users').doc(uid).set(userData, { merge: true });
+    } else {
+      await adminDb.collection('users').doc(uid).set({
+        phone: verifiedPhone,
+        phoneVerified: true,
+        phoneSetupCompleted: true,
+        updatedAt: new Date().toISOString(),
+        lastLoginAt: new Date().toISOString(),
+      }, { merge: true });
+    }
+
+    // Update customer_identities
+    await adminDb.collection('customer_identities').doc(verifiedPhone).set({
+      primaryUid: uid,
+      verifiedAt: Date.now(),
+    }, { merge: true });
+
+    // Generate custom token for client-side Firebase Auth sign-in
+    const customToken = await adminAuth.createCustomToken(uid, { role: userData?.role || 'customer' });
+
+    return res.json({
+      success: true,
+      customToken,
+      user: {
+        uid,
+        phone: verifiedPhone,
+        name: userData?.name || verifiedName || 'Customer',
+        email: userData?.email || null,
+        role: userData?.role || 'customer',
+        phoneVerified: true,
+      },
+      isNewUser,
+    });
+  } catch (err: any) {
+    console.error('[PhoneVerification] signin error:', err);
+    return res.status(500).json({ success: false, error: 'Sign in with phone failed. Please try again.' });
+  }
+});
+
 router.get('/status', async (_req: Request, res: Response) => {
   const health = await phoneVerificationService.getHealthStatus();
   res.json({

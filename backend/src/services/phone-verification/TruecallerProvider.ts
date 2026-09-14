@@ -227,33 +227,12 @@ export class TruecallerProvider implements PhoneVerificationProvider {
     }
 
     if (typeof payload === 'string') {
-      return this.verifyNativePayload(payload, payload, undefined, expectedPhone);
+      return { success: false, error: 'Truecaller signature required.' };
     }
     if (payload.payload && payload.signature) {
       return this.verifyNativePayload(payload.payload, payload.signature, payload.signatureAlgorithm, expectedPhone);
     }
-    if (payload.phoneNumber || payload.phone) {
-      const formattedPhone = this.normalizeE164(payload.phoneNumber || payload.phone || '');
-      
-      if (expectedPhone) {
-        const normalizedExpected = this.normalizeE164(expectedPhone);
-        if (formattedPhone !== normalizedExpected) {
-          return {
-            success: false,
-            error: `The verified phone number (${formattedPhone}) does not match the number on this Olive Pizza account (${normalizedExpected}).`
-          };
-        }
-      }
-
-      return {
-        success: true,
-        phone: formattedPhone,
-        provider: 'truecaller',
-        name: `${payload.firstName || payload.name || ''} ${payload.lastName || ''}`.trim(),
-        country: payload.countryCode || 'IN'
-      };
-    }
-    return { success: false, error: 'Unrecognized Truecaller payload format.' };
+    return { success: false, error: 'Unrecognized or unverified Truecaller payload format. Cryptographic verification required.' };
   }
 
   /**

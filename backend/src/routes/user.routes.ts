@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { emailService } from '../lib/email.service.js';
 import { verifyToken, AuthRequest } from '../middleware/auth.middleware.js';
 import { adminAuth, adminDb } from '../config/firebase.js';
+import { LoyaltyService } from '../services/loyalty/LoyaltyService.js';
 
 const router = Router();
 
@@ -192,6 +193,105 @@ router.get('/profile', async (req: AuthRequest, res: Response): Promise<void> =>
   } catch (error) {
     console.error("Profile fetch error", error);
     res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
+
+// Update Customer Profile Details
+router.put('/profile', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.uid;
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { name, email, photoURL } = req.body;
+    const userRef = adminDb.collection('users').doc(userId);
+    const docSnap = await userRef.get();
+
+    if (!docSnap.exists) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    const updates: Record<string, any> = {
+      updatedAt: new Date().toISOString()
+    };
+
+    if (typeof name === 'string' && name.trim()) {
+      updates.name = name.trim();
+      updates.displayName = name.trim();
+    }
+    if (typeof email === 'string' && email.includes('@')) {
+      updates.email = email.trim().toLowerCase();
+    }
+    if (typeof photoURL === 'string') {
+      updates.photoURL = photoURL;
+      updates.photoUrl = photoURL;
+    }
+
+    await userRef.update(updates);
+    const updatedDoc = await userRef.get();
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully',
+      user: { id: updatedDoc.id, ...updatedDoc.data() }
+    });
+  } catch (error: any) {
+    console.error('[UserRoutes] Profile update error:', error);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// Get User Authoritative Loyalty Points Summary & Ledger
+router.get('/loyalty', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.uid;
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const summary = await LoyaltyService.getLoyaltySummary(userId);
+    res.json({ success: true, ...summary });
+  } catch (error: any) {
+    console.error('[UserRoutes] Failed to fetch loyalty summary:', error);
+    res.status(500).json({ error: 'Failed to fetch loyalty points summary' });
+  }
+});
+
+// Get Customer Saved Addresses
+router.get('/addresses', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.uid;
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    const userDoc = await adminDb.collection('users').doc(userId).get();
+    const addresses = userDoc.data()?.savedAddresses || [];
+    res.json({ success: true, addresses });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Failed to fetch addresses' });
+  }
+});
+
+// Save Customer Addresses
+router.put('/addresses', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.uid;
+    const { addresses } = req.body;
+    if (!userId || !Array.isArray(addresses)) {
+      res.status(400).json({ error: 'Invalid addresses payload' });
+      return;
+    }
+    await adminDb.collection('users').doc(userId).set({
+      savedAddresses: addresses,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+    res.json({ success: true, message: 'Addresses saved successfully', addresses });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Failed to save addresses' });
   }
 });
 

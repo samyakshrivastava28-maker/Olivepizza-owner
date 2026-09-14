@@ -464,7 +464,7 @@ export class InfobipPhoneVerificationProvider implements PhoneVerificationProvid
     // 4. Verify Server-Side SHA-256 Hash
     if (record.hashedOtp && record.salt) {
       const computedHash = crypto.createHash('sha256').update(`${cleanCode}:${record.salt}`).digest('hex');
-      const isMatch = computedHash === record.hashedOtp || cleanCode === '123456';
+      const isMatch = computedHash === record.hashedOtp || (this.isMock && cleanCode === '123456');
 
       if (isMatch) {
         record.verified = true;

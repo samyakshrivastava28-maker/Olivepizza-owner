@@ -6,6 +6,7 @@ import { RiderDispatchEngine } from '../delivery/RiderDispatchEngine.js';
 import { StoreBoundDeliveryFleetService } from '../delivery/StoreBoundDeliveryFleetService.js';
 import { notificationEngine } from '../notification/NotificationEngine.js';
 import { OwnerTemplates, CustomerTemplates, RestaurantTemplates, DeliveryTemplates } from '../notification/NotificationTemplates.js';
+import { LoyaltyService } from '../loyalty/LoyaltyService.js';
 
 export type CanonicalOrderStatus =
   | 'pending'
@@ -463,6 +464,13 @@ export class OrderStateMachine {
           targetApp: 'customer',
           eventId,
         });
+
+        // 1.05 Award authoritative loyalty points upon successful delivery
+        if (toState === 'delivered') {
+          LoyaltyService.awardPointsForOrder(orderId, customerUid, Number(order.totalAmount || 0)).catch((lErr) => {
+            console.warn('[OrderStateMachine] Loyalty points award warning:', lErr.message);
+          });
+        }
 
         // 1.1 Dispatch ActivityKit Live Activity update to registered iOS tokens
         try {
