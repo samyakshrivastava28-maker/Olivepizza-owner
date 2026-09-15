@@ -55,7 +55,7 @@ jobs:
 
       # 5. Setup Android SDK
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       # 6. Sync Capacitor Web Directory with Android native project
       - name: Sync Capacitor
@@ -140,8 +140,9 @@ jobs:
           fi
           SIZE=$(du -sh "$APK" | cut -f1)
           echo "✅ APK found ($SIZE)"
-          BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)
-          $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner verify --verbose "$APK" \
+          SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          BUILD_TOOLS=$(ls "$SDK_DIR/build-tools" | sort -V | tail -1)
+          "$SDK_DIR/build-tools/$BUILD_TOOLS/apksigner" verify --verbose "$APK" \
             && echo "✅ APK is properly signed." \
             || { echo "❌ APK signature verification FAILED — APK is unsigned or corrupted."; exit 1; }
 
