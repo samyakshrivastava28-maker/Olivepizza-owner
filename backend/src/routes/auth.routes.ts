@@ -64,7 +64,7 @@ router.post('/verify-recaptcha', async (req: Request, res: Response) => {
 import { verifyToken, requireRole, AuthRequest, logSecurityEventServer } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { TOTPService } from '../services/auth/TOTPService.js';
-import { adminDb } from '../config/firebase.js';
+import { adminDb, adminAuth } from '../config/firebase.js';
 import { EmailVerificationService } from '../services/auth/EmailVerificationService.js';
 import { LoginRateLimiterService } from '../services/auth/LoginRateLimiterService.js';
 import { PosAccountService } from '../services/auth/PosAccountService.js';
@@ -96,20 +96,22 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     const userIdentifier = (user.email || user.uid || '').toLowerCase().trim();
     const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
 
-    // ── 1. Server-Enforced Login Rate Limiter (Max 2 attempts per 15 min per device, 3rd blocked) ──
-    const rateStatus = await LoginRateLimiterService.consumeAttempt(rawDeviceId, clientIp, userAgent, userIdentifier, targetApp);
-    if (!rateStatus.allowed) {
-      res.setHeader('Retry-After', String(rateStatus.retryAfterSeconds));
-      res.status(429).json({
-        success: false,
-        authorized: false,
-        code: 'AUTH_RATE_LIMITED',
-        message: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
-        reason: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
-        retryAfter: rateStatus.retryAfterSeconds,
-        retryAfterSeconds: rateStatus.retryAfterSeconds
-      });
-      return;
+    // ── 1. Server-Enforced Login Rate Limiter (Max 2 attempts per 15 min per device, 3rd blocked for operational staff) ──
+    if (targetApp !== 'CUSTOMER') {
+      const rateStatus = await LoginRateLimiterService.consumeAttempt(rawDeviceId, clientIp, userAgent, userIdentifier, targetApp);
+      if (!rateStatus.allowed) {
+        res.setHeader('Retry-After', String(rateStatus.retryAfterSeconds));
+        res.status(429).json({
+          success: false,
+          authorized: false,
+          code: 'AUTH_RATE_LIMITED',
+          message: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
+          reason: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
+          retryAfter: rateStatus.retryAfterSeconds,
+          retryAfterSeconds: rateStatus.retryAfterSeconds
+        });
+        return;
+      }
     }
 
     const emailLower = (user.email || '').toLowerCase().trim();
@@ -186,7 +188,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
           user: {
             uid: user.uid,
             email: user.email,
-            name: user.name || 'Owner',
+            name: (user as any).name || 'Owner',
             role: 'customer',
             isOwner: true
           }
@@ -1051,6 +1053,102 @@ router.post('/email/verify-code', async (req: Request, res: Response): Promise<v
   } catch (err: any) {
     console.error('[AuthRoutes] Error verifying code:', err);
     res.status(500).json({ success: false, message: 'Failed to verify code' });
+  }
+});
+
+// POST /api/auth/email/signin - Customer sign in & token issuance with verified 4-digit code
+router.post('/email/signin', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { email, code, name } = req.body;
+    if (!email || !code) {
+      res.status(400).json({ success: false, message: 'Email and 4-digit verification code are required' });
+      return;
+    }
+    const cleanEmail = email.toLowerCase().trim();
+    const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
+
+    // 1. Verify 4-digit OTP
+    const verifyResult = await EmailVerificationService.verifyCode(cleanEmail, String(code).trim(), clientIp);
+    if (!verifyResult.success) {
+      res.status(400).json(verifyResult);
+      return;
+    }
+
+    // 2. Resolve or create Firebase Auth user
+    let uid: string | null = null;
+    let isNewUser = false;
+    let userData: any = null;
+
+    try {
+      const userRecord = await adminAuth.getUserByEmail(cleanEmail);
+      uid = userRecord.uid;
+    } catch (authErr: any) {
+      if (authErr.code === 'auth/user-not-found') {
+        const newUser = await adminAuth.createUser({
+          email: cleanEmail,
+          emailVerified: true,
+          displayName: name || cleanEmail.split('@')[0],
+        });
+        uid = newUser.uid;
+        isNewUser = true;
+      } else {
+        console.error('[AuthRoutes] Firebase getUserByEmail error:', authErr);
+        throw authErr;
+      }
+    }
+
+    // 3. Set custom user claims for role
+    await adminAuth.setCustomUserClaims(uid, { role: 'customer' }).catch((e) => {
+      console.warn('[AuthRoutes] Failed setting custom claims:', e.message);
+    });
+
+    // 4. Resolve or create Firestore users document
+    const userRef = adminDb.collection('users').doc(uid);
+    const userDoc = await userRef.get();
+
+    if (userDoc.exists) {
+      userData = userDoc.data();
+      await userRef.set({
+        email: cleanEmail,
+        emailVerified: true,
+        lastLoginAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }, { merge: true });
+    } else {
+      isNewUser = true;
+      userData = {
+        firebase_uid: uid,
+        email: cleanEmail,
+        emailVerified: true,
+        role: 'customer',
+        name: name || cleanEmail.split('@')[0] || 'Customer',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastLoginAt: new Date().toISOString(),
+        verificationMethod: 'email_otp',
+      };
+      await userRef.set(userData);
+    }
+
+    // 5. Generate custom token for client-side Firebase Auth sign-in
+    const customToken = await adminAuth.createCustomToken(uid, { role: 'customer' });
+
+    res.json({
+      success: true,
+      customToken,
+      user: {
+        uid,
+        email: cleanEmail,
+        name: userData?.name || name || cleanEmail.split('@')[0],
+        phone: userData?.phone || null,
+        phoneVerified: Boolean(userData?.phoneVerified),
+        role: 'customer',
+      },
+      isNewUser,
+    });
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error in email signin:', err);
+    res.status(500).json({ success: false, message: 'Failed to complete sign in. Please try again.' });
   }
 });
 

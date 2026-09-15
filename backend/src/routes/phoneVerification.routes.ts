@@ -30,6 +30,26 @@ router.post('/truecaller/session', authLimiter, authenticateUser, async (req: Re
   try {
     const { expectedPhone } = req.body;
     const uid = (req as any).user?.uid;
+
+    if (!truecaller.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        code: 'TRUECALLER_CONFIG_MISSING',
+        error: 'Truecaller verification is not configured for this environment.'
+      });
+    }
+
+    if (expectedPhone && typeof expectedPhone === 'string') {
+      const digits = expectedPhone.replace(/\D/g, '');
+      if (digits.length < 10) {
+        return res.status(400).json({
+          success: false,
+          code: 'TRUECALLER_REQUEST_INVALID',
+          error: 'Invalid phone number format provided.'
+        });
+      }
+    }
+
     const session = truecaller.createWebSession(expectedPhone, uid);
     return res.json({
       success: true,
@@ -39,16 +59,32 @@ router.post('/truecaller/session', authLimiter, authenticateUser, async (req: Re
     });
   } catch (error: any) {
     console.error('[PhoneVerification] Create Truecaller session error:', error);
-    return res.status(500).json({ success: false, error: 'Failed to create Truecaller verification session.' });
+    return res.status(500).json({
+      success: false,
+      code: 'TRUECALLER_SESSION_CREATE_FAILED',
+      error: 'Failed to create Truecaller verification session.'
+    });
   }
 });
 
-router.get('/truecaller/session/:requestId', authLimiter, async (req: Request, res: Response) => {
+router.get('/truecaller/session/:requestId', async (req: Request, res: Response) => {
   try {
     const { requestId } = req.params;
-    const session = truecaller.getWebSession(requestId);
+    if (!requestId || requestId.length < 8) {
+      return res.status(400).json({
+        success: false,
+        code: 'TRUECALLER_REQUEST_INVALID',
+        error: 'Invalid requestId parameter.'
+      });
+    }
+
+    const session = await truecaller.getWebSession(requestId);
     if (!session) {
-      return res.status(404).json({ success: false, error: 'Session not found or expired.' });
+      return res.status(404).json({
+        success: false,
+        code: 'TRUECALLER_SESSION_EXPIRED',
+        error: 'Verification session not found or expired.'
+      });
     }
     return res.json({
       success: true,
@@ -59,17 +95,30 @@ router.get('/truecaller/session/:requestId', authLimiter, async (req: Request, r
       country: session.country
     });
   } catch (error: any) {
-    return res.status(500).json({ success: false, error: 'Failed to query Truecaller session.' });
+    return res.status(500).json({
+      success: false,
+      code: 'TRUECALLER_PROVIDER_UNAVAILABLE',
+      error: 'Failed to query Truecaller session.'
+    });
   }
 });
 
 router.post('/truecaller/callback', authLimiter, async (req: Request, res: Response) => {
   try {
-    const { requestId, payload, signature } = req.body;
-    if (!requestId || !payload || !signature) {
-      return res.status(400).json({ success: false, error: 'Missing required callback fields.' });
+    const { requestId, accessToken, endpoint, payload, signature } = req.body;
+    if (!requestId) {
+      return res.status(400).json({ success: false, error: 'Missing requestId parameter in callback.' });
     }
-    const result = await truecaller.handleWebCallback(requestId, payload, signature);
+
+    if ((!accessToken || !endpoint) && (!payload || !signature)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required callback fields (expected accessToken+endpoint or payload+signature).'
+      });
+    }
+
+    const payloadOrOptions = accessToken && endpoint ? { accessToken, endpoint } : payload;
+    const result = await truecaller.handleWebCallback(requestId, payloadOrOptions, signature);
     return res.json(result);
   } catch (error: any) {
     console.error('[PhoneVerification] Truecaller callback error:', error);

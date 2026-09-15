@@ -1,6 +1,7 @@
 import axios from 'axios';
 import crypto from 'crypto';
 import { PhoneVerificationProvider, VerificationResult } from './PhoneVerificationProvider.js';
+import { adminDb } from '../../config/firebase.js';
 
 interface TruecallerKey {
   keyType: string;
@@ -18,6 +19,7 @@ export interface TruecallerWebSession {
   deepLink?: string;
   createdAt: number;
   expiresAt: number;
+  verifiedAt?: number;
   error?: string;
 }
 
@@ -38,6 +40,14 @@ export class TruecallerProvider implements PhoneVerificationProvider {
         }
       }
     }, 5 * 60 * 1000);
+  }
+
+  public isConfigured(): boolean {
+    return Boolean(this.CLIENT_ID && this.CLIENT_ID.length > 5);
+  }
+
+  public getClientId(): string {
+    return this.CLIENT_ID;
   }
 
   public normalizeE164(phone: string): string {
@@ -99,20 +109,47 @@ export class TruecallerProvider implements PhoneVerificationProvider {
     };
 
     this.webSessions.set(requestId, session);
+
+    // Persist to Firestore asynchronously for multi-instance / webhook reliability
+    adminDb.collection('truecaller_web_sessions').doc(requestId).set({
+      ...session,
+      updatedAt: now
+    }).catch(err => {
+      console.warn('[Truecaller] Firestore session creation warning:', err?.message);
+    });
+
     return session;
   }
 
   /**
-   * Retrieves a Web verification session
+   * Retrieves a Web verification session (checks in-memory first, then Firestore)
    */
-  public getWebSession(requestId: string): TruecallerWebSession | null {
-    const session = this.webSessions.get(requestId);
-    if (!session) return null;
-    if (session.expiresAt < Date.now()) {
+  public async getWebSession(requestId: string): Promise<TruecallerWebSession | null> {
+    const memSession = this.webSessions.get(requestId);
+    if (memSession && memSession.expiresAt < Date.now()) {
       this.webSessions.delete(requestId);
       return null;
     }
-    return session;
+
+    if (memSession && memSession.status === 'VERIFIED') {
+      return memSession;
+    }
+
+    // Check Firestore if missing or still PENDING
+    try {
+      const snap = await adminDb.collection('truecaller_web_sessions').doc(requestId).get();
+      if (snap.exists) {
+        const firestoreData = snap.data() as TruecallerWebSession;
+        if (firestoreData.expiresAt && firestoreData.expiresAt >= Date.now()) {
+          this.webSessions.set(requestId, firestoreData);
+          return firestoreData;
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Truecaller] Firestore session fetch error:', err?.message);
+    }
+
+    return memSession || null;
   }
 
   /**
@@ -212,16 +249,23 @@ export class TruecallerProvider implements PhoneVerificationProvider {
       return { success: false, error: 'Payload is required.' };
     }
 
-    // Check if session requestId is provided
-    if (payload.requestId && this.webSessions.has(payload.requestId)) {
-      const session = this.webSessions.get(payload.requestId)!;
-      if (session.status === 'VERIFIED' && session.phone) {
+    // Check if session requestId is provided (Web QR / Deep link flow)
+    if (payload.requestId) {
+      const session = await this.getWebSession(payload.requestId);
+      if (session && session.status === 'VERIFIED' && session.phone) {
+        if (expectedPhone && this.normalizeE164(session.phone) !== this.normalizeE164(expectedPhone)) {
+          return {
+            success: false,
+            error: `Verified number (${session.phone}) does not match expected account number (${expectedPhone}).`
+          };
+        }
         return {
           success: true,
           phone: session.phone,
           provider: 'truecaller',
           name: session.name || '',
-          country: session.country || 'IN'
+          country: session.country || 'IN',
+          verifiedAt: session.verifiedAt || Date.now()
         };
       }
     }
@@ -236,26 +280,136 @@ export class TruecallerProvider implements PhoneVerificationProvider {
   }
 
   /**
-   * Completes a web session callback
+   * Completes a web session callback (handles both Truecaller Web SDK accessToken+endpoint and RSA signed payload)
    */
-  public async handleWebCallback(requestId: string, payload: any, signature: string): Promise<VerificationResult> {
-    const session = this.getWebSession(requestId);
+  public async handleWebCallback(
+    requestId: string,
+    payloadOrOptions: any,
+    signature?: string
+  ): Promise<VerificationResult> {
+    const session = await this.getWebSession(requestId);
     if (!session) {
       return { success: false, error: 'Session not found or expired.' };
     }
 
-    const result = await this.verifyNativePayload(payload, signature, undefined, session.expectedPhone);
-    if (result.success && result.phone) {
-      session.status = 'VERIFIED';
-      session.phone = result.phone;
-      session.name = (result as any).name;
-      session.country = (result as any).country;
-      this.webSessions.set(requestId, session);
-    } else {
-      session.status = 'FAILED';
-      session.error = result.error;
-      this.webSessions.set(requestId, session);
+    // 1. Truecaller Web SDK Format: { accessToken, endpoint }
+    const accessToken = payloadOrOptions?.accessToken || (typeof payloadOrOptions === 'object' ? payloadOrOptions.accessToken : undefined);
+    const endpoint = payloadOrOptions?.endpoint || (typeof payloadOrOptions === 'object' ? payloadOrOptions.endpoint : undefined);
+
+    if (accessToken && endpoint) {
+      try {
+        console.log(`[Truecaller Callback] Fetching profile from ${endpoint} for request ${requestId}`);
+        const response = await axios.get(endpoint, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            Accept: 'application/json'
+          },
+          timeout: 10000
+        });
+
+        const profile = response.data;
+        if (!profile) {
+          throw new Error('Empty profile response from Truecaller API.');
+        }
+
+        // Parse phone number from various Truecaller response formats
+        const rawPhone = (
+          (Array.isArray(profile.phoneNumbers) && profile.phoneNumbers[0]) ||
+          profile.phone_number ||
+          profile.phoneNumber ||
+          ''
+        ).toString();
+
+        if (!rawPhone) {
+          throw new Error('No phone number returned in Truecaller profile.');
+        }
+
+        const formattedPhone = this.normalizeE164(rawPhone);
+
+        // Validate against expectedPhone if requested
+        if (session.expectedPhone) {
+          const normalizedExpected = this.normalizeE164(session.expectedPhone);
+          if (formattedPhone !== normalizedExpected) {
+            session.status = 'FAILED';
+            session.error = `The verified phone number (${formattedPhone}) does not match expected account number (${normalizedExpected}).`;
+            this.webSessions.set(requestId, session);
+            await adminDb.collection('truecaller_web_sessions').doc(requestId).set({ ...session, updatedAt: Date.now() }).catch(() => {});
+            return {
+              success: false,
+              error: session.error
+            };
+          }
+        }
+
+        const firstName = profile.firstName || profile.given_name || '';
+        const lastName = profile.lastName || profile.family_name || '';
+        const name = (profile.name || `${firstName} ${lastName}`.trim()) || 'Truecaller User';
+        const country = profile.phone_number_country_code || (Array.isArray(profile.addresses) && profile.addresses[0]?.countryCode) || profile.countryCode || 'IN';
+        const now = Date.now();
+
+        session.status = 'VERIFIED';
+        session.phone = formattedPhone;
+        session.name = name;
+        session.country = country;
+        session.verifiedAt = now;
+        session.error = undefined;
+
+        this.webSessions.set(requestId, session);
+
+        await adminDb.collection('truecaller_web_sessions').doc(requestId).set({
+          ...session,
+          updatedAt: now
+        }).catch(err => {
+          console.warn('[Truecaller] Firestore session verified update error:', err?.message);
+        });
+
+        console.log(`[Truecaller Callback] Session ${requestId} verified successfully for ${formattedPhone}`);
+        return {
+          success: true,
+          phone: formattedPhone,
+          name,
+          country,
+          provider: 'truecaller',
+          verifiedAt: now
+        };
+      } catch (err: any) {
+        console.error('[Truecaller Callback] Error retrieving profile:', err.message);
+        session.status = 'FAILED';
+        session.error = err.response?.data?.message || err.message || 'Failed to retrieve Truecaller profile.';
+        this.webSessions.set(requestId, session);
+        await adminDb.collection('truecaller_web_sessions').doc(requestId).set({ ...session, updatedAt: Date.now() }).catch(() => {});
+        return { success: false, error: session.error };
+      }
     }
-    return result;
+
+    // 2. Native RSA Format: payload + signature
+    const payloadStr = typeof payloadOrOptions === 'string' ? payloadOrOptions : payloadOrOptions?.payload;
+    const sig = signature || payloadOrOptions?.signature;
+
+    if (payloadStr && sig) {
+      const result = await this.verifyNativePayload(payloadStr, sig, undefined, session.expectedPhone);
+      const now = Date.now();
+      if (result.success && result.phone) {
+        session.status = 'VERIFIED';
+        session.phone = result.phone;
+        session.name = (result as any).name;
+        session.country = (result as any).country;
+        session.verifiedAt = now;
+        session.error = undefined;
+        this.webSessions.set(requestId, session);
+        await adminDb.collection('truecaller_web_sessions').doc(requestId).set({ ...session, updatedAt: now }).catch(() => {});
+      } else {
+        session.status = 'FAILED';
+        session.error = result.error;
+        this.webSessions.set(requestId, session);
+        await adminDb.collection('truecaller_web_sessions').doc(requestId).set({ ...session, updatedAt: now }).catch(() => {});
+      }
+      return result;
+    }
+
+    return {
+      success: false,
+      error: 'Unrecognized Truecaller callback parameters. Expected accessToken+endpoint or payload+signature.'
+    };
   }
 }

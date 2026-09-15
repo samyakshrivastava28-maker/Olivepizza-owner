@@ -75,7 +75,7 @@ async function runTests() {
   const tcSession = tcProvider.createWebSession(testPhone, 'test_user_01');
   assert(tcSession.status === 'PENDING' && tcSession.deepLink?.includes('truecallersdk://'), 'Truecaller Web/QR session creates valid deepLink');
 
-  const fetchedSession = tcProvider.getWebSession(tcSession.requestId);
+  const fetchedSession = await tcProvider.getWebSession(tcSession.requestId);
   assert(fetchedSession?.requestId === tcSession.requestId, 'Truecaller session is queryable by requestId');
 
   // Test 9: Provider Service Health Status
