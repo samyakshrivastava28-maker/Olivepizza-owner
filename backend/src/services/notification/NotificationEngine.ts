@@ -711,7 +711,7 @@ export class NotificationEngine {
         });
       }
 
-      // 2. Query restaurant_managers collection for approved managers
+      // 2. Query restaurant_managers collection for approved managers (strictly 1:1 branch & franchise)
       try {
         let rmQ: any = db.collection('restaurant_managers')
           .where('branchId', '==', cleanBranchId)
@@ -731,22 +731,6 @@ export class NotificationEngine {
       } catch (rmErr) {
         // Non-fatal
       }
-
-      // 3. Also check branchIds array (multi-branch managers)
-      let multiQ: any = db.collection('users')
-        .where('branchIds', 'array-contains', cleanBranchId);
-      if (cleanFranchiseId) {
-        multiQ = multiQ.where('franchiseId', '==', cleanFranchiseId);
-      }
-      const multiSnap = await multiQ.get();
-      multiSnap.docs.forEach((doc: any) => {
-        const d = doc.data();
-        if (d?.isActive !== false && roles.includes(d?.role)) {
-          if (!cleanFranchiseId || !d?.franchiseId || d.franchiseId === cleanFranchiseId) {
-            uidsSet.add(doc.id);
-          }
-        }
-      });
 
       // 4. Also check PostgreSQL fcm_tokens table for tokens registered directly under this branch (+ franchise)
       try {

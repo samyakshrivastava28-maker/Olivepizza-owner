@@ -1,4 +1,4 @@
-import { Router, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { adminDb, adminAuth } from '../config/firebase.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
@@ -7,8 +7,49 @@ import { FranchisePinService } from '../services/franchise/FranchisePinService.j
 import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogleSheetsService.js';
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 import { PosAccountService } from '../services/auth/PosAccountService.js';
+import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
 
 const router = Router();
+
+// ============================================================================
+// PUBLIC ORDERING CONTEXT & DELIVERY RADIUS RESOLUTION (CUSTOMER APP)
+// ============================================================================
+
+const handleOrderingContextResolve = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { customerId, lat, lng, addressLine } = req.body;
+    const custId = customerId || (req as any).user?.uid || 'guest';
+
+    const resolution = await CustomerOrderingContextService.resolveOrderingContext({
+      customerId: custId,
+      lat: Number(lat),
+      lng: Number(lng),
+      addressLine
+    });
+
+    if (!resolution.isServiceable) {
+      res.status(400).json({
+        success: false,
+        isServiceable: false,
+        error: resolution.error || "We currently don't deliver to this location.",
+        code: resolution.code || 'OUT_OF_DELIVERY_ZONE'
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      isServiceable: true,
+      context: resolution.context
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error resolving ordering context:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+router.post('/ordering-context/resolve', handleOrderingContextResolve);
+router.post('/service-area/resolve', handleOrderingContextResolve);
 
 const DEFAULT_ORGANIZATION = {
   id: 'org_olive_pizza',

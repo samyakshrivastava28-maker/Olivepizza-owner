@@ -3,6 +3,7 @@ import { emailService } from '../lib/email.service.js';
 import { verifyToken, AuthRequest } from '../middleware/auth.middleware.js';
 import { adminAuth, adminDb } from '../config/firebase.js';
 import { LoyaltyService } from '../services/loyalty/LoyaltyService.js';
+import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
 
 const router = Router();
 
@@ -93,14 +94,44 @@ router.put('/phone', async (req: AuthRequest, res: Response): Promise<void> => {
   }
 });
 
-// Setup Location
+// Setup Location with Authoritative Delivery Radius & Franchise Resolution (Enforcement Point 1)
 router.put('/location', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user?.uid;
     const email = req.user?.email;
     const { addressLine, city, state, pincode, lat, lng } = req.body;
 
-    const userRef = adminDb.collection('users').doc(userId!);
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized: missing user identifier' });
+      return;
+    }
+
+    const custLat = lat != null ? Number(lat) : NaN;
+    const custLng = lng != null ? Number(lng) : NaN;
+
+    // Delivery radius check: If coordinates provided, verify serviceability
+    let orderingContext: any = null;
+    if (!isNaN(custLat) && !isNaN(custLng)) {
+      const resolution = await CustomerOrderingContextService.resolveOrderingContext({
+        customerId: userId,
+        lat: custLat,
+        lng: custLng,
+        addressLine: addressLine || ''
+      });
+
+      if (!resolution.isServiceable) {
+        res.status(400).json({
+          success: false,
+          isServiceable: false,
+          error: resolution.error || "We currently don't deliver to this location.",
+          code: resolution.code || 'OUT_OF_DELIVERY_ZONE'
+        });
+        return;
+      }
+      orderingContext = resolution.context;
+    }
+
+    const userRef = adminDb.collection('users').doc(userId);
     const doc = await userRef.get();
 
     let userData: any = {
@@ -108,19 +139,24 @@ router.put('/location', async (req: AuthRequest, res: Response): Promise<void> =
       email,
       name: 'Customer',
       full_address: addressLine,
+      fullAddress: addressLine,
       city,
       state,
-      lat,
-      lng,
+      pincode,
+      lat: custLat,
+      lng: custLng,
       location_setup_completed: true,
+      locationSetupCompleted: true,
       role: 'customer',
+      franchiseId: orderingContext?.franchiseId,
+      branchId: orderingContext?.branchId,
       updatedAt: new Date().toISOString()
     };
 
     if (!doc.exists) {
       userData.createdAt = new Date().toISOString();
       await userRef.set(userData);
-      await adminAuth.setCustomUserClaims(userId!, { role: 'customer' });
+      await adminAuth.setCustomUserClaims(userId, { role: 'customer' });
     } else {
       userData = { 
         ...doc.data(), 
@@ -129,10 +165,12 @@ router.put('/location', async (req: AuthRequest, res: Response): Promise<void> =
         city, 
         state, 
         pincode,
-        lat, 
-        lng, 
+        lat: custLat, 
+        lng: custLng, 
         location_setup_completed: true, 
         locationSetupCompleted: true,
+        franchiseId: orderingContext?.franchiseId || doc.data()?.franchiseId,
+        branchId: orderingContext?.branchId || doc.data()?.branchId,
         updatedAt: new Date().toISOString() 
       };
       await userRef.update({ 
@@ -141,13 +179,31 @@ router.put('/location', async (req: AuthRequest, res: Response): Promise<void> =
         city, 
         state, 
         pincode,
-        lat, 
-        lng, 
+        lat: custLat, 
+        lng: custLng, 
         location_setup_completed: true, 
         locationSetupCompleted: true,
+        franchiseId: userData.franchiseId,
+        branchId: userData.branchId,
         updatedAt: userData.updatedAt 
       });
     }
+
+    // Return successful response with ordering context
+    res.json({
+      success: true,
+      isServiceable: true,
+      context: orderingContext,
+      user: {
+        uid: userId,
+        fullAddress: addressLine,
+        city,
+        state,
+        pincode,
+        lat: custLat,
+        lng: custLng
+      }
+    });
 
     // Send Welcome Email and Notify Owner
     try {

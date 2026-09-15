@@ -72,7 +72,12 @@ export class RiderDispatchEngine {
       if (excludedUids.has(uid)) continue;
 
       const riderBranchId = rData.branchId || 'main_branch';
-      if (riderBranchId !== branchId && riderBranchId !== 'all' && branchId !== 'all') continue;
+      const riderFranchiseId = rData.franchiseId;
+      const orderFranchiseId = orderData.franchiseId;
+
+      // Strict branch & franchise isolation: never cross-assign riders
+      if (riderBranchId !== branchId) continue;
+      if (orderFranchiseId && riderFranchiseId && riderFranchiseId !== orderFranchiseId) continue;
       if (rData.isOnline === false || rData.isActive === false) continue;
       if (rData.activeOrderId && rData.activeOrderId !== orderId) continue; // single-assignment rule
 

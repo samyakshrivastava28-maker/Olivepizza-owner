@@ -1,4 +1,4 @@
-﻿/**
+/**
  * NotificationRouter.ts
  *
  * Centralized, authoritative notification & alarm routing engine for the Olive Pizza ecosystem.
@@ -122,15 +122,15 @@ export class NotificationRouter {
       }
 
       // Rule 7: Strict Franchise Scoping (Cross-Franchise Isolation)
-      if (recipient.franchiseId && order.franchiseId && recipient.franchiseId !== order.franchiseId) {
+      if (!recipient.franchiseId || !order.franchiseId || recipient.franchiseId !== order.franchiseId) {
         return {
           allowed: false,
           reason: `Franchise mismatch: recipient franchise "${recipient.franchiseId}" does not match order franchise "${order.franchiseId}".`
         };
       }
 
-      // Rule 8: Strict Branch Scoping (Cross-Branch Isolation)
-      if (recipient.branchId && recipient.branchId !== 'all' && order.branchId && recipient.branchId !== order.branchId) {
+      // Rule 8: Strict Branch Scoping (Cross-Branch Isolation - strictly 1:1, no 'all' permitted)
+      if (!recipient.branchId || !order.branchId || recipient.branchId !== order.branchId) {
         return {
           allowed: false,
           reason: `Branch mismatch: recipient branch "${recipient.branchId}" does not match order branch "${order.branchId}".`

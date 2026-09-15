@@ -88,7 +88,7 @@ export class StoreBoundDeliveryFleetService {
     for (const [uid, data] of combinedCandidates.entries()) {
       const riderBranchId = data.branchId || 'main_branch';
       
-      if (branchId !== 'all' && riderBranchId !== branchId && riderBranchId !== 'all') {
+      if (riderBranchId !== branchId) {
         continue;
       }
 

@@ -16,6 +16,7 @@ import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogl
 import { CanonicalOrderService } from '../services/pos/CanonicalOrderService.js';
 import { BillingNumberService } from '../services/pos/BillingNumberService.js';
 import { calculateDistance } from '../lib/utils.js';
+import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
 import crypto from 'crypto';
 
 // Restaurant local timezone for daily order counter reset
@@ -410,6 +411,55 @@ router.get('/:id', verifyToken, async (req: AuthRequest, res: Response): Promise
   }
 });
 
+// Re-verifies customer location and delivery radius before allowing checkout to begin (Enforcement Point 3)
+router.post('/validate-checkout', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { lat, lng, address, items, targetFranchiseId, targetBranchId } = req.body;
+    const custLat = Number(lat);
+    const custLng = Number(lng);
+
+    if (isNaN(custLat) || isNaN(custLng)) {
+      res.status(400).json({
+        success: false,
+        isServiceable: false,
+        error: "We currently don't deliver to this location.",
+        code: 'OUT_OF_DELIVERY_ZONE'
+      });
+      return;
+    }
+
+    const valResult = await CustomerOrderingContextService.validateCustomerOrderLocation({
+      lat: custLat,
+      lng: custLng,
+      targetFranchiseId: targetFranchiseId ? String(targetFranchiseId).trim() : undefined,
+      targetBranchId: targetBranchId ? String(targetBranchId).trim() : undefined,
+      customerId: (req as any).user?.uid || 'guest'
+    });
+
+    if (!valResult.isValid) {
+      const statusCode = valResult.code === 'FRANCHISE_MISMATCH' ? 403 : 400;
+      res.status(statusCode).json({
+        success: false,
+        isServiceable: false,
+        error: valResult.error || "We currently don't deliver to this location.",
+        code: valResult.code || 'OUT_OF_DELIVERY_ZONE'
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      isServiceable: true,
+      franchiseId: valResult.resolvedFranchiseId,
+      branchId: valResult.resolvedBranchId,
+      distanceKm: valResult.distanceKm
+    });
+  } catch (error: any) {
+    console.error('[Orders] Error validating checkout:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Create a new order securely
 router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user?.uid;
@@ -502,82 +552,58 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
       resolvedFranchiseId = req.user?.franchiseId || req.body.franchiseId || 'fra_rajnandgaon';
       resolvedOrgId = req.user?.organizationId || 'org_olive_pizza';
     } else {
-      // Customer: 
-      // 1. Check explicit store selection from body/headers
+      // Customer: Enforcement Point 4 (Authoritative radius verification & single-franchise lock immediately before persisting)
       const explicitBranch = (req.body.branchId || req.headers['x-branch-id'] || req.body.session?.branchId || '').trim();
       const explicitFranchise = (req.body.franchiseId || req.body.session?.franchiseId || '').trim();
 
-      if (explicitFranchise) {
-        let franchiseExists = false;
-        try {
-          const feDoc = await adminDb.collection('franchise_entities').doc(explicitFranchise).get();
-          if (feDoc.exists && feDoc.data()?.isActive !== false) {
-            franchiseExists = true;
-            resolvedFranchiseId = explicitFranchise;
-            if (feDoc.data()?.mainBranchId) {
-              resolvedBranchId = feDoc.data()!.mainBranchId;
-            }
-          } else {
-            const fDoc = await adminDb.collection('franchises').doc(explicitFranchise).get();
-            if (fDoc.exists && fDoc.data()?.isActive !== false) {
-              franchiseExists = true;
-              resolvedFranchiseId = fDoc.data()?.franchiseId || explicitFranchise;
-              resolvedBranchId = fDoc.id;
-            }
-          }
-        } catch (fErr) {
-          console.warn('[Orders] Franchise entity lookup warning:', fErr);
-        }
+      const rawLat = location?.lat ?? effectiveLocation?.lat ?? req.body.deliveryAddress?.lat ?? userData.lat ?? userData.location?.lat;
+      const rawLng = location?.lng ?? effectiveLocation?.lng ?? req.body.deliveryAddress?.lng ?? userData.lng ?? userData.location?.lng;
+      const custLat = rawLat != null ? Number(rawLat) : NaN;
+      const custLng = rawLng != null ? Number(rawLng) : NaN;
 
-        if (!franchiseExists) {
+      if (deliveryType === 'delivery') {
+        if (isNaN(custLat) || isNaN(custLng)) {
           res.status(400).json({
-            error: 'The specified franchise is invalid or inactive.',
-            code: 'INVALID_FRANCHISE'
+            error: "We currently don't deliver to this location.",
+            code: 'OUT_OF_DELIVERY_ZONE'
           });
           return;
         }
-      } else if (explicitBranch) {
-        resolvedBranchId = explicitBranch;
+
+        const valResult = await CustomerOrderingContextService.validateCustomerOrderLocation({
+          lat: custLat,
+          lng: custLng,
+          targetFranchiseId: explicitFranchise || undefined,
+          targetBranchId: explicitBranch || undefined,
+          customerId: userId
+        });
+
+        if (!valResult.isValid) {
+          const statusCode = valResult.code === 'FRANCHISE_MISMATCH' ? 403 : 400;
+          res.status(statusCode).json({
+            error: valResult.error || "We currently don't deliver to this location.",
+            code: valResult.code || 'OUT_OF_DELIVERY_ZONE'
+          });
+          return;
+        }
+
+        resolvedBranchId = valResult.resolvedBranchId;
+        resolvedFranchiseId = valResult.resolvedFranchiseId;
       } else {
-        // 2. Resolve via GPS / coordinates if provided
-        const rawLat = location?.lat ?? req.body.deliveryAddress?.lat ?? userData.lat ?? userData.location?.lat;
-        const rawLng = location?.lng ?? req.body.deliveryAddress?.lng ?? userData.lng ?? userData.location?.lng;
-        const custLat = rawLat != null ? Number(rawLat) : NaN;
-        const custLng = rawLng != null ? Number(rawLng) : NaN;
-
-        if (!isNaN(custLat) && !isNaN(custLng)) {
-          try {
-            const allBranchesSnap = await adminDb.collection('franchises').get();
-            let closestBranch: any = null;
-            let minDistance = Infinity;
-
-            for (const bDoc of allBranchesSnap.docs) {
-              const bData = bDoc.data();
-              if (bData.isActive === false) continue;
-              const bLat = Number(bData.lat ?? bData.coordinates?.lat ?? bData.location?.lat);
-              const bLng = Number(bData.lng ?? bData.coordinates?.lng ?? bData.location?.lng);
-              if (!isNaN(bLat) && !isNaN(bLng)) {
-                const dist = calculateDistance(custLat, custLng, bLat, bLng);
-                const maxRadius = Number(bData.deliveryRadiusKm || bData.deliveryRadius || 25);
-                if (dist <= maxRadius && dist < minDistance) {
-                  minDistance = dist;
-                  closestBranch = { id: bDoc.id, ...bData };
-                }
-              }
-            }
-
-            if (closestBranch) {
-              resolvedBranchId = closestBranch.id;
-              resolvedFranchiseId = closestBranch.franchiseId || resolvedFranchiseId;
-            } else if (deliveryType === 'delivery') {
-              res.status(400).json({
-                error: "We currently don't deliver to this location.",
-                code: 'OUT_OF_DELIVERY_ZONE'
-              });
-              return;
-            }
-          } catch (geoErr) {
-            console.warn('[Orders] Geolocation branch resolution notice:', geoErr);
+        // Pickup order: resolve explicit or closest branch
+        if (explicitBranch) {
+          resolvedBranchId = explicitBranch;
+        } else if (explicitFranchise) {
+          resolvedFranchiseId = explicitFranchise;
+        } else if (!isNaN(custLat) && !isNaN(custLng)) {
+          const res = await CustomerOrderingContextService.resolveOrderingContext({
+            customerId: userId,
+            lat: custLat,
+            lng: custLng
+          });
+          if (res.isServiceable && res.context) {
+            resolvedBranchId = res.context.branchId;
+            resolvedFranchiseId = res.context.franchiseId;
           }
         }
       }
