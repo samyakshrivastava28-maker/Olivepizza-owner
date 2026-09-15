@@ -246,12 +246,23 @@ export class LoginRateLimiterService {
   public static async recordSuccess(identifier: string, ipAddress: string, rawDeviceId?: string): Promise<void> {
     const clientIp = (ipAddress || '127.0.0.1').trim();
     const deviceId = this.resolveDeviceId(rawDeviceId, clientIp);
+    const cleanIp = clientIp.replace(/[^a-zA-Z0-9_]/g, '_');
     if (!adminDb) return;
     try {
-      await adminDb.collection(this.COLLECTION).doc(`dev_${deviceId}`).update({
-        lastSuccessAt: Date.now(),
-        lastSuccessfulIdentifier: identifier ? identifier.toLowerCase().trim() : null
-      }).catch(() => {});
+      const now = Date.now();
+      await Promise.all([
+        adminDb.collection(this.COLLECTION).doc(`dev_${deviceId}`).set({
+          attempts: 0,
+          lastSuccessAt: now,
+          lastSuccessfulIdentifier: identifier ? identifier.toLowerCase().trim() : null,
+          updatedAt: now
+        }, { merge: true }).catch(() => {}),
+        adminDb.collection(this.COLLECTION).doc(`ip_${cleanIp}`).set({
+          attempts: 0,
+          lastSuccessAt: now,
+          updatedAt: now
+        }, { merge: true }).catch(() => {})
+      ]);
     } catch {
       // Non-critical
     }

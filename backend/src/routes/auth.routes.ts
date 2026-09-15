@@ -179,12 +179,17 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       }
 
       if (targetApp === 'CUSTOMER') {
-        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
-        res.status(403).json({
-          authorized: false,
+        await LoginRateLimiterService.recordSuccess(userIdentifier, clientIp, rawDeviceId);
+        res.json({
+          authorized: true,
           app: targetApp,
-          email: user.email,
-          reason: 'Owner accounts cannot access customer ordering application.'
+          user: {
+            uid: user.uid,
+            email: user.email,
+            name: user.name || 'Owner',
+            role: 'customer',
+            isOwner: true
+          }
         });
         return;
       }
@@ -658,30 +663,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
       isAuthorized = true;
       role = 'owner';
     } else if (targetApp === 'CUSTOMER') {
-      const staffRoles = [
-        'owner', 'platform_owner', 'restaurant_manager', 'delivery_partner', 
-        'delivery', 'pos_operator', 'cashier', 'kitchen_staff', 
-        'franchise_manager', 'franchise_owner', 'admin', 'developer'
-      ];
-      if (staffRoles.includes(role)) {
-        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
-        await AuthAuditService.logEvent({
-          eventType: 'APP_AUTHORIZE_DENIED',
-          userId: user.uid,
-          identifier: user.email,
-          appTarget: targetApp,
-          status: 'BLOCKED',
-          metadata: { reason: 'STAFF_ROLE_RESTRICTED_FROM_CUSTOMER_APP', currentRole: role }
-        });
-        res.status(403).json({
-          authorized: false,
-          code: 'STAFF_RESTRICTED_FROM_CUSTOMER',
-          app: targetApp,
-          email: user.email,
-          reason: `Operational accounts with role "${role}" cannot be used as customer accounts. Please use your designated Olive Pizza staff application.`
-        });
-        return;
-      }
+      // All valid authenticated accounts are authorized to use the customer ordering application
       isAuthorized = true;
       role = 'customer';
     }
