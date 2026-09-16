@@ -419,6 +419,10 @@ import kitchenRoutes from './routes/kitchen.routes.js';
 app.use('/kitchen', kitchenRoutes);
 app.use('/api/kitchen', kitchenRoutes);
 
+import deviceAlarmRoutes from './routes/deviceAlarm.routes.js';
+app.use('/device', deviceAlarmRoutes);
+app.use('/api/device', deviceAlarmRoutes);
+
 // Start background payment reconciliation cron job
 PaymentReconciliationService.startCronJob();
 

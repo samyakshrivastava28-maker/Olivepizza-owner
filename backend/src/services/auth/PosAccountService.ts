@@ -180,6 +180,18 @@ export class PosAccountService {
       updatedAt: now,
     }, { merge: true });
 
+    // Update franchises collection to ensure franchise.posEnabled is true and bound to this account
+    if (franchiseId) {
+      await adminDb.collection('franchises').doc(franchiseId).set({
+        posEnabled: true,
+        posAccountUid: posId,
+        posAccountEmail: data.email,
+        posApprovedAt: now,
+        posApprovedBy: ownerEmail,
+        updatedAt: now,
+      }, { merge: true });
+    }
+
     // Update custom claims
     try {
       await adminAuth.setCustomUserClaims(posId, {
@@ -233,6 +245,13 @@ export class PosAccountService {
       updatedAt: now,
     }, { merge: true });
 
+    if (data.franchiseId) {
+      await adminDb.collection('franchises').doc(data.franchiseId).set({
+        posEnabled: false,
+        updatedAt: now,
+      }, { merge: true });
+    }
+
     await AuthAuditService.logEvent({
       eventType: 'POS_ACCOUNT_REJECTED',
       userId: posId,
@@ -278,6 +297,13 @@ export class PosAccountService {
       updatedAt: now,
     }, { merge: true });
 
+    if (data.franchiseId) {
+      await adminDb.collection('franchises').doc(data.franchiseId).set({
+        posEnabled: false,
+        updatedAt: now,
+      }, { merge: true });
+    }
+
     // Revoke Firebase Auth session tokens if possible
     try {
       await adminAuth.revokeRefreshTokens(posId);
@@ -322,5 +348,286 @@ export class PosAccountService {
       .get();
 
     return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as PosAccountData));
+  }
+
+  /**
+   * Franchise Manager requests POS access for their own franchise.
+   * Derives franchise scope server-side.
+   */
+  public static async requestPosAccess(params: {
+    managerUid: string;
+    managerEmail: string;
+    managerName?: string;
+    franchiseId?: string;
+  }): Promise<{ success: boolean; message: string; request?: any }> {
+    const { managerUid, managerEmail, managerName } = params;
+    if (!adminDb) return { success: false, message: 'Database service unavailable.' };
+
+    // 1. Derive manager's franchiseId server-side
+    let franchiseId: string | null = params.franchiseId || null;
+    if (!franchiseId && managerUid) {
+      const userDoc = await adminDb.collection('users').doc(managerUid).get();
+      if (userDoc.exists) {
+        franchiseId = userDoc.data()?.franchiseId || null;
+      }
+    }
+    if (!franchiseId) {
+      const fraDoc = await adminDb.collection('franchise_users').doc(managerUid).get();
+      if (fraDoc.exists) {
+        franchiseId = fraDoc.data()?.franchiseId || null;
+      }
+    }
+
+    if (!franchiseId) {
+      return { success: false, message: 'Forbidden: No authorized franchise is bound to your account.' };
+    }
+
+    // 2. Check if franchise is already POS-enabled
+    const fraRef = adminDb.collection('franchises').doc(franchiseId);
+    const fraSnap = await fraRef.get();
+    if (fraSnap.exists && fraSnap.data()?.posEnabled === true) {
+      return { success: false, message: 'POS is already enabled and active for this franchise.' };
+    }
+
+    // 3. Check for existing pending request (duplicate / rate-limiting protection)
+    const existingReqSnap = await adminDb
+      .collection('pos_access_requests')
+      .where('franchiseId', '==', franchiseId)
+      .where('status', '==', 'PENDING')
+      .limit(1)
+      .get();
+
+    if (!existingReqSnap.empty) {
+      return { success: false, message: 'A POS access request is already pending Owner approval for this franchise.' };
+    }
+
+    // 4. Create request record
+    const now = new Date().toISOString();
+    const reqRef = adminDb.collection('pos_access_requests').doc();
+    const franchiseName = (fraSnap.exists && fraSnap.data()?.name) ? fraSnap.data()!.name : franchiseId;
+    const requestData = {
+      id: reqRef.id,
+      requestId: reqRef.id,
+      franchiseId,
+      franchiseName,
+      managerUid,
+      managerEmail,
+      managerName: managerName || managerEmail.split('@')[0] || 'Franchise Manager',
+      status: 'PENDING',
+      requestedAt: now,
+      updatedAt: now
+    };
+
+    await reqRef.set(requestData);
+
+    // 5. Notify Owner with deep link to exact franchise
+    try {
+      await adminDb.collection('notifications').add({
+        type: 'POS_ACCESS_REQUEST',
+        recipientRole: 'owner',
+        title: 'New POS Access Request',
+        body: `Franchise Manager (${managerEmail}) has requested POS access for franchise "${franchiseName}".`,
+        franchiseId,
+        actionUrl: `/franchise-management/${franchiseId}?tab=pos`,
+        metadata: { requestId: reqRef.id, franchiseId, managerUid, managerEmail },
+        read: false,
+        createdAt: now
+      });
+    } catch (notifErr) {
+      console.warn('[PosAccountService] Failed to record owner notification:', notifErr);
+    }
+
+    await AuthAuditService.logEvent({
+      eventType: 'POS_ACCESS_REQUESTED',
+      userId: managerUid,
+      identifier: managerEmail,
+      franchiseId,
+      status: 'SUCCESS',
+      metadata: { requestId: reqRef.id }
+    });
+
+    return {
+      success: true,
+      message: 'POS access request submitted successfully and is pending Owner review.',
+      request: requestData
+    };
+  }
+
+  /**
+   * Owner approves a pending POS access request with concurrency protection.
+   */
+  public static async approvePosRequest(requestId: string, ownerEmail: string): Promise<{ success: boolean; message: string }> {
+    if (!adminDb || !adminAuth) return { success: false, message: 'Database service unavailable.' };
+
+    const reqRef = adminDb.collection('pos_access_requests').doc(requestId);
+    const now = new Date().toISOString();
+
+    try {
+      const result = await adminDb.runTransaction(async (t) => {
+        const reqSnap = await t.get(reqRef);
+        if (!reqSnap.exists) {
+          throw new Error('POS access request not found.');
+        }
+        const rData = reqSnap.data()!;
+        if (rData.status !== 'PENDING') {
+          throw new Error(`Request cannot be approved because current status is ${rData.status}.`);
+        }
+
+        let fraRef = adminDb.collection('franchises').doc(rData.franchiseId);
+        let fraSnap = await t.get(fraRef);
+        if (!fraSnap.exists) {
+          fraRef = adminDb.collection('franchise_entities').doc(rData.franchiseId);
+          fraSnap = await t.get(fraRef);
+        }
+        if (!fraSnap.exists) {
+          throw new Error('Associated franchise record not found.');
+        }
+
+        // Mark request as APPROVED
+        t.update(reqRef, {
+          status: 'APPROVED',
+          approvedAt: now,
+          approvedBy: ownerEmail,
+          updatedAt: now
+        });
+
+        // Update franchise to posEnabled: true
+        t.set(fraRef, {
+          posEnabled: true,
+          posAccountUid: rData.managerUid,
+          posAccountEmail: rData.managerEmail,
+          posApprovedAt: now,
+          posApprovedBy: ownerEmail,
+          updatedAt: now
+        }, { merge: true });
+
+        // Update user record
+        const userRef = adminDb.collection('users').doc(rData.managerUid);
+        t.set(userRef, {
+          posApproved: true,
+          posApprovedAt: now,
+          posApprovedBy: ownerEmail,
+          applicationAccess: { app_pos: true },
+          updatedAt: now
+        }, { merge: true });
+
+        return {
+          success: true,
+          message: `POS access approved for franchise "${rData.franchiseName}".`,
+          managerUid: rData.managerUid,
+          franchiseId: rData.franchiseId,
+          managerEmail: rData.managerEmail
+        };
+      });
+
+      // Update custom claims
+      if (result.managerUid) {
+        try {
+          await adminAuth.setCustomUserClaims(result.managerUid, {
+            franchiseId: result.franchiseId,
+            posApproved: true
+          });
+        } catch (claimErr) {
+          console.warn('[PosAccountService] Failed to set claim after request approval:', claimErr);
+        }
+      }
+
+      await AuthAuditService.logEvent({
+        eventType: 'POS_REQUEST_APPROVED',
+        userId: result.managerUid,
+        identifier: result.managerEmail,
+        franchiseId: result.franchiseId,
+        status: 'SUCCESS',
+        metadata: { requestId, approvedBy: ownerEmail }
+      });
+
+      return { success: true, message: result.message };
+    } catch (err: any) {
+      console.error('[PosAccountService] Error approving POS request:', err);
+      return { success: false, message: err.message || 'Approval transaction failed' };
+    }
+  }
+
+  /**
+   * Owner rejects a pending POS access request.
+   */
+  public static async rejectPosRequest(requestId: string, ownerEmail: string, reason?: string): Promise<{ success: boolean; message: string }> {
+    if (!adminDb) return { success: false, message: 'Database service unavailable.' };
+
+    const reqRef = adminDb.collection('pos_access_requests').doc(requestId);
+    const now = new Date().toISOString();
+
+    try {
+      const result = await adminDb.runTransaction(async (t) => {
+        const reqSnap = await t.get(reqRef);
+        if (!reqSnap.exists) {
+          throw new Error('POS access request not found.');
+        }
+        const rData = reqSnap.data()!;
+        if (rData.status !== 'PENDING') {
+          throw new Error(`Request cannot be rejected because current status is ${rData.status}.`);
+        }
+
+        let fraRef = adminDb.collection('franchises').doc(rData.franchiseId);
+        let fraSnap = await t.get(fraRef);
+        if (!fraSnap.exists) {
+          fraRef = adminDb.collection('franchise_entities').doc(rData.franchiseId);
+          fraSnap = await t.get(fraRef);
+        }
+
+        t.update(reqRef, {
+          status: 'REJECTED',
+          rejectedAt: now,
+          rejectedBy: ownerEmail,
+          rejectReason: reason || 'Rejected by Owner',
+          updatedAt: now
+        });
+
+        if (fraSnap.exists) {
+          t.set(fraRef, {
+            posEnabled: false,
+            updatedAt: now
+          }, { merge: true });
+        }
+
+        return { success: true, message: 'POS access request rejected.' };
+      });
+
+      return result;
+    } catch (err: any) {
+      console.error('[PosAccountService] Error rejecting POS request:', err);
+      return { success: false, message: err.message || 'Rejection failed' };
+    }
+  }
+
+  /**
+   * Get POS access request status for a specific franchise.
+   */
+  public static async getPosRequestStatus(franchiseId: string): Promise<any> {
+    if (!adminDb) return null;
+    const snapshot = await adminDb
+      .collection('pos_access_requests')
+      .where('franchiseId', '==', franchiseId)
+      .get();
+
+    if (snapshot.empty) return null;
+    const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    docs.sort((a: any, b: any) => new Date(b.requestedAt || 0).getTime() - new Date(a.requestedAt || 0).getTime());
+    return docs[0];
+  }
+
+  /**
+   * List all pending POS access requests across franchises.
+   */
+  public static async listPendingPosRequests(): Promise<any[]> {
+    if (!adminDb) return [];
+    const snapshot = await adminDb
+      .collection('pos_access_requests')
+      .where('status', 'in', ['PENDING', 'PENDING_OWNER_APPROVAL'])
+      .get();
+
+    const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    docs.sort((a: any, b: any) => new Date(b.requestedAt || 0).getTime() - new Date(a.requestedAt || 0).getTime());
+    return docs;
   }
 }

@@ -2533,7 +2533,106 @@ router.post('/:id/access/edit', requireRole(['owner', 'admin', 'developer', 'pla
   }
 });
 
-// ─── 18. SECURE POS ACCOUNT PROVISIONING & APPROVAL ──────────────────────────
+// ─── 18. SECURE POS ACCESS REQUESTS & APPROVAL ──────────────────────────
+
+// POST /api/franchises/pos-request - Franchise Manager requests POS access for their own franchise
+router.post('/pos-request', requireRole(['franchise_manager', 'franchise_owner', 'owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user!;
+    const result = await PosAccountService.requestPosAccess({
+      managerUid: user.uid,
+      managerEmail: user.email || 'manager@olivepizza.in',
+      managerName: req.body.name || user.email?.split('@')[0],
+      franchiseId: user.franchiseId
+    });
+
+    if (!result.success) {
+      const status = result.message.includes('already') ? 409 : 400;
+      res.status(status).json({ success: false, error: result.message });
+      return;
+    }
+
+    res.status(201).json({ success: true, message: result.message, request: result.request });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error creating POS access request:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to request POS access' });
+  }
+});
+
+// GET /api/franchises/pos-requests - Owner: List all pending POS access requests
+router.get('/pos-requests', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const requests = await PosAccountService.listPendingPosRequests();
+    res.json({ success: true, requests });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error listing POS requests:', error);
+    res.status(500).json({ success: false, error: 'Failed to list POS access requests' });
+  }
+});
+
+// GET /api/franchises/pos-request/my - Franchise Manager: Get status of POS request for own franchise
+router.get('/pos-request/my', requireRole(['franchise_manager', 'franchise_owner', 'owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user!;
+    let franchiseId = user.franchiseId;
+    if (!franchiseId) {
+      const uDoc = await adminDb.collection('users').doc(user.uid).get();
+      franchiseId = uDoc.data()?.franchiseId;
+    }
+    if (!franchiseId) {
+      res.status(403).json({ success: false, error: 'No franchise assigned to account' });
+      return;
+    }
+
+    const request = await PosAccountService.getPosRequestStatus(franchiseId);
+    const fraSnap = await adminDb.collection('franchises').doc(franchiseId).get();
+    const posEnabled = fraSnap.exists ? fraSnap.data()?.posEnabled === true : false;
+
+    res.json({ success: true, posEnabled, request });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error fetching my POS request:', error);
+    res.status(500).json({ success: false, error: 'Failed to get POS request status' });
+  }
+});
+
+// PUT /api/franchises/pos-request/:requestId/approve - Owner approves POS request with concurrency protection
+router.put('/pos-request/:requestId/approve', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { requestId } = req.params;
+    const ownerEmail = req.user?.email || 'owner@olivepizza.in';
+    const result = await PosAccountService.approvePosRequest(requestId, ownerEmail);
+
+    if (!result.success) {
+      res.status(400).json({ success: false, error: result.message });
+      return;
+    }
+
+    res.json({ success: true, message: result.message });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error approving POS request:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to approve POS request' });
+  }
+});
+
+// PUT /api/franchises/pos-request/:requestId/reject - Owner rejects POS request
+router.put('/pos-request/:requestId/reject', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { requestId } = req.params;
+    const { reason } = req.body;
+    const ownerEmail = req.user?.email || 'owner@olivepizza.in';
+    const result = await PosAccountService.rejectPosRequest(requestId, ownerEmail, reason);
+
+    if (!result.success) {
+      res.status(400).json({ success: false, error: result.message });
+      return;
+    }
+
+    res.json({ success: true, message: result.message });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error rejecting POS request:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to reject POS request' });
+  }
+});
 
 // GET /api/franchises/pos-accounts/pending - Owner: List all pending POS accounts across franchises
 router.get('/pos-accounts/pending', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {

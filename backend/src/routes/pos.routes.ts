@@ -49,6 +49,57 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
     return;
   }
 
+  // Enforce server-authoritative franchise and branch scope (no fallbacks!)
+  let franchiseId = user.franchiseId;
+  let branchId = user.branchId;
+
+  if (!franchiseId || !branchId) {
+    try {
+      const uDoc = await adminDb.collection('users').doc(user.uid).get();
+      if (uDoc.exists) {
+        const uData = uDoc.data()!;
+        franchiseId = franchiseId || uData.franchiseId;
+        branchId = branchId || uData.branchId;
+      }
+    } catch {}
+  }
+
+  if (!franchiseId) {
+    res.status(403).json({
+      error: 'Forbidden: POS access denied. No authorized franchise scope assigned to this account.'
+    });
+    return;
+  }
+
+  // Check if franchise has POS enabled
+  try {
+    const fraSnap = await adminDb.collection('franchises').doc(franchiseId).get();
+    if (!fraSnap.exists || fraSnap.data()?.posEnabled !== true) {
+      res.status(403).json({
+        error: 'Forbidden: POS is not enabled for this franchise. A Franchise Manager must request POS access.'
+      });
+      return;
+    }
+    if (!branchId) {
+      const fData = fraSnap.data()!;
+      branchId = fData.primaryBranchId || fData.branchId || franchiseId;
+    }
+  } catch {
+    res.status(503).json({ error: 'Database service unavailable for POS authorization.' });
+    return;
+  }
+
+  if (!branchId) {
+    res.status(403).json({
+      error: 'Forbidden: POS access denied. No authorized branch scope assigned to this account.'
+    });
+    return;
+  }
+
+  req.user.franchiseId = franchiseId;
+  req.user.branchId = branchId;
+  req.user.terminalId = `pos_${franchiseId}`;
+
   next();
 };
 
@@ -58,26 +109,27 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
 router.get('/session', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const terminalId = user.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01';
-    const branchId = user.branchId || 'main_branch';
-    const franchiseId = user.franchiseId || 'fra_primary';
+    const terminalId = user.terminalId || `pos_${user.franchiseId}`;
+    const branchId = user.branchId!;
+    const franchiseId = user.franchiseId!;
 
     // Retrieve active shift if any
     const activeShift = await POSService.getActiveShift(branchId, terminalId);
 
     // Retrieve branch details
-    let branchName = 'Olive Pizza — Rajnandgaon HQ';
-    let branchAddress = 'Dongargaon Rd, near Saraswati school, Rajnandgaon, CG 491441';
-    let branchPhone = '+91 91799 44445';
-    let gstNumber = '22AAAAA0000A1Z5';
+    let branchName = 'Olive Pizza';
+    let branchAddress = '';
+    let branchPhone = '';
+    let gstNumber = '';
 
     try {
-      const branchSnap = await adminDb.collection('franchises').doc(branchId).get();
+      const branchSnap = await adminDb.collection('franchises').doc(franchiseId).get();
       if (branchSnap.exists) {
         const bData = branchSnap.data()!;
         branchName = bData.name || branchName;
         branchAddress = bData.address || branchAddress;
         branchPhone = bData.phone || branchPhone;
+        gstNumber = bData.gstNumber || gstNumber;
       }
     } catch {}
 
@@ -116,8 +168,8 @@ router.get('/menu', verifyToken, requirePOSRole, async (req: AuthRequest, res: R
     
     // Effective branch: Owner can pass ?branchId=...; Cashiers are strictly scoped
     const requestedBranchId = (req.query.branchId as string) || (req.headers['x-branch-id'] as string);
-    const effectiveBranchId = isOwner && requestedBranchId ? requestedBranchId : (user.branchId || 'main_branch');
-    const effectiveFranchiseId = isOwner && req.query.franchiseId ? (req.query.franchiseId as string) : (user.franchiseId || 'fra_primary');
+    const effectiveBranchId = isOwner && requestedBranchId ? requestedBranchId : user.branchId!;
+    const effectiveFranchiseId = isOwner && req.query.franchiseId ? (req.query.franchiseId as string) : user.franchiseId!;
 
     const itemsMap = new Map<string, any>();
 
@@ -309,10 +361,10 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
       couponCode
     });
 
-    const terminalId = reqTerminalId || user.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01';
-    const branchId = user.branchId || 'main_branch';
-    let franchiseId = user.franchiseId;
-    let branchName = 'Olive Pizza — Rajnandgaon HQ';
+    const terminalId = user.terminalId || `pos_${user.franchiseId}`;
+    const branchId = user.branchId!;
+    let franchiseId = user.franchiseId!;
+    let branchName = 'Olive Pizza';
 
     try {
       const bDoc = await adminDb.collection('franchises').doc(branchId).get();
@@ -549,8 +601,8 @@ router.get('/search', verifyToken, requirePOSRole, async (req: AuthRequest, res:
   try {
     const user = req.user!;
     const isOwner = FranchiseScopeService.isGlobalOwner(user.email, user.role);
-    const branchId = isOwner && req.query.branchId ? (req.query.branchId as string) : (user.branchId || 'main_branch');
-    const franchiseId = isOwner && req.query.franchiseId ? (req.query.franchiseId as string) : (user.franchiseId || 'fra_primary');
+    const branchId = isOwner && req.query.branchId ? (req.query.branchId as string) : user.branchId!;
+    const franchiseId = isOwner && req.query.franchiseId ? (req.query.franchiseId as string) : user.franchiseId!;
 
     const permBillNo = req.query.permanentBillNo ? parseInt(req.query.permanentBillNo as string, 10) : undefined;
     const dailyOrderNo = req.query.dailyOrderNo ? parseInt(req.query.dailyOrderNo as string, 10) : undefined;
@@ -596,7 +648,7 @@ router.get('/search', verifyToken, requirePOSRole, async (req: AuthRequest, res:
 router.get('/online-orders/live', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const branchId = user.branchId || 'main_branch';
+    const branchId = user.branchId!;
     const orders = await CanonicalOrderService.getLiveOnlineOrders(branchId);
     const projectedOrders = orders.map((o: any) => OrderProjectionService.projectForPOS(o, o.order_id || o.id));
     res.json({ success: true, count: projectedOrders.length, orders: projectedOrders });
@@ -688,7 +740,7 @@ router.post('/orders/:id/cancel', verifyToken, requirePOSRole, async (req: AuthR
 router.get('/history', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const branchId = user.branchId || 'main_branch';
+    const branchId = user.branchId!;
     const limitCount = Math.min(100, Math.max(10, Number(req.query.limit) || 30));
     const searchQuery = (req.query.q as string || '').trim().toLowerCase();
 
@@ -736,8 +788,8 @@ router.post('/void', verifyToken, requirePOSRole, async (req: AuthRequest, res: 
       reason,
       voidedByUid: user.uid,
       voidedByName: user.email || 'Cashier',
-      terminalId: user.terminalId || 'POS-TERM-01',
-      branchId: user.branchId || 'main_branch'
+      terminalId: user.terminalId || `pos_${user.franchiseId}`,
+      branchId: user.branchId!
     });
 
     res.json({ ...result });
@@ -751,7 +803,7 @@ router.post('/void', verifyToken, requirePOSRole, async (req: AuthRequest, res: 
 // ============================================================================
 router.get('/held-bills', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = req.user?.branchId || 'main_branch';
+    const branchId = req.user?.branchId!;
     const heldBills = await POSService.getHeldBills(branchId);
     res.json({ success: true, count: heldBills.length, heldBills });
   } catch (error: any) {
@@ -782,9 +834,9 @@ router.post('/hold', verifyToken, requirePOSRole, async (req: AuthRequest, res: 
       taxes: Number(taxes || 0),
       finalTotal: Number(finalTotal || 0),
       heldByCashier: user.email?.split('@')[0] || 'Cashier',
-      terminalId: user.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01',
-      branchId: user.branchId || 'main_branch',
-      franchiseId: user.franchiseId || 'fra_primary'
+      terminalId: user.terminalId || `pos_${user.franchiseId}`,
+      branchId: user.branchId!,
+      franchiseId: user.franchiseId!
     });
 
     res.status(201).json({ success: true, heldBill });
@@ -796,7 +848,7 @@ router.post('/hold', verifyToken, requirePOSRole, async (req: AuthRequest, res: 
 router.delete('/held-bills/:id', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const branchId = user.branchId || 'main_branch';
+    const branchId = user.branchId!;
     const isGlobal = ['owner', 'admin', 'developer', 'platform_owner'].includes(user.role || '');
 
     const heldDoc = await adminDb.collection('pos_held_bills').doc(req.params.id).get();
@@ -823,8 +875,8 @@ router.delete('/held-bills/:id', verifyToken, requirePOSRole, async (req: AuthRe
 // ============================================================================
 router.get('/shifts/current', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = req.user?.branchId || 'main_branch';
-    const terminalId = req.user?.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01';
+    const branchId = req.user?.branchId!;
+    const terminalId = req.user?.terminalId || `pos_${req.user?.franchiseId}`;
 
     const activeShift = await POSService.getActiveShift(branchId, terminalId);
     res.json({ success: true, shift: activeShift });
@@ -836,9 +888,9 @@ router.get('/shifts/current', verifyToken, requirePOSRole, async (req: AuthReque
 router.post('/shifts/open', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const branchId = user.branchId || 'main_branch';
-    const franchiseId = user.franchiseId || 'fra_primary';
-    const terminalId = user.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01';
+    const branchId = user.branchId!;
+    const franchiseId = user.franchiseId!;
+    const terminalId = user.terminalId || `pos_${user.franchiseId}`;
     const { openingCash, notes } = req.body;
 
     const shift = await POSService.openShift({
@@ -866,7 +918,7 @@ router.post('/shifts/close', verifyToken, requirePOSRole, async (req: AuthReques
     }
 
     const user = req.user!;
-    const branchId = user.branchId || 'main_branch';
+    const branchId = user.branchId!;
     const isGlobal = ['owner', 'admin', 'developer', 'platform_owner'].includes(user.role || '');
 
     const shiftDoc = await adminDb.collection('pos_shifts').doc(shiftId).get();
@@ -890,7 +942,7 @@ router.post('/shifts/close', verifyToken, requirePOSRole, async (req: AuthReques
 // ============================================================================
 router.get('/summary', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = req.user?.branchId || 'main_branch';
+    const branchId = req.user?.branchId!;
     const summary = await POSService.getDailySummary(branchId);
     res.json({ success: true, summary });
   } catch (error: any) {
@@ -911,7 +963,7 @@ router.get('/receipt/:orderId', verifyToken, requirePOSRole, async (req: AuthReq
 
     const d = doc.data()!;
     const user = req.user!;
-    const branchId = user.branchId || 'main_branch';
+    const branchId = user.branchId!;
     const isGlobal = ['owner', 'admin', 'developer', 'platform_owner'].includes(user.role || '');
 
     if (!isGlobal && d.branchId && d.branchId !== branchId) {
@@ -1121,8 +1173,8 @@ router.get('/analytics/summary', verifyToken, requirePOSRole, async (req: AuthRe
   try {
     const user = req.user!;
     const isOwner = FranchiseScopeService.isGlobalOwner(user.email, user.role);
-    const branchId = isOwner && req.query.branchId ? (req.query.branchId as string) : (user.branchId || 'main_branch');
-    const franchiseId = isOwner && req.query.franchiseId ? (req.query.franchiseId as string) : (user.franchiseId || 'fra_primary');
+    const branchId = isOwner && req.query.branchId ? (req.query.branchId as string) : user.branchId!;
+    const franchiseId = isOwner && req.query.franchiseId ? (req.query.franchiseId as string) : user.franchiseId!;
     const period = (req.query.period as any) || 'today';
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
@@ -1146,7 +1198,7 @@ router.get('/analytics/summary', verifyToken, requirePOSRole, async (req: AuthRe
 router.get('/analytics/hourly-trend', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const branchId = user.branchId || 'main_branch';
+    const branchId = user.branchId!;
     const dateStr = (req.query.date as string) || BillingNumberService.getLocalDateString();
 
     const hourlyRes = await query(`
@@ -1201,8 +1253,8 @@ router.get('/analytics/hourly-trend', verifyToken, requirePOSRole, async (req: A
 router.get('/analytics/product-performance', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const branchId = user.branchId || 'main_branch';
-    const franchiseId = user.franchiseId || 'fra_primary';
+    const branchId = user.branchId!;
+    const franchiseId = user.franchiseId!;
     const limitCount = Number(req.query.limit) || 8;
 
     const { dateRange } = SalesCalculationEngine.resolveDateRange('this_month');
@@ -1231,7 +1283,7 @@ router.get('/analytics/product-performance', verifyToken, requirePOSRole, async 
 
 router.get('/analytics/sync-status', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = req.user?.branchId || 'main_branch';
+    const branchId = req.user?.branchId!;
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 
     const pendingSnap = await adminDb.collection('orders')
@@ -1265,8 +1317,8 @@ router.post('/shifts/cash-adjustment', verifyToken, requirePOSRole, async (req: 
 
     const result = await POSService.recordCashAdjustment({
       shiftId,
-      branchId: user.branchId || 'main_branch',
-      terminalId: user.terminalId || 'POS-TERM-01',
+      branchId: user.branchId!,
+      terminalId: user.terminalId || `pos_${user.franchiseId}`,
       type,
       amount: Number(amount),
       reason: reason || 'Manual drawer adjustment',
@@ -1417,8 +1469,8 @@ router.post('/owner-context/switch', verifyToken, requireRole(['owner', 'admin',
 // GET /api/pos/pending-online-prints — Retrieve accepted online orders pending POS print
 router.get('/pending-online-prints', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = req.user?.branchId || (req.headers['x-branch-id'] as string) || 'main_branch';
-    const franchiseId = req.user?.franchiseId || (req.headers['x-franchise-id'] as string) || 'fra_rajnandgaon';
+    const branchId = req.user?.branchId!;
+    const franchiseId = req.user?.franchiseId!;
     const ordersSnap = await adminDb.collection('orders')
       .where('branchId', '==', branchId)
       .limit(50)
@@ -1447,115 +1499,53 @@ router.post('/claim-print', verifyToken, requirePOSRole, async (req: AuthRequest
       res.status(400).json({ success: false, error: 'orderId and terminalId are required' });
       return;
     }
+    const resolvedTerminalId = terminalId || req.user?.terminalId || `pos_${req.user?.franchiseId}`;
+
     const orderRef = adminDb.collection('orders').doc(orderId);
-    const orderDoc = await orderRef.get();
-    if (!orderDoc.exists) {
-      res.status(404).json({ success: false, error: 'Order not found' });
-      return;
-    }
-    const orderData = orderDoc.data()!;
-    if (orderData.printStatus === 'PRINTED') {
-      res.status(409).json({
-        success: false,
-        alreadyPrinted: true,
-        message: 'Order has already been printed',
-        printedAt: orderData.printedAt,
-        printedByTerminal: orderData.printTerminalId
+    const result = await adminDb.runTransaction(async (transaction: any) => {
+      const orderDoc = await transaction.get(orderRef);
+      if (!orderDoc.exists) {
+        throw new Error('Order not found');
+      }
+      const data = orderDoc.data();
+      if (data.printStatus === 'PRINTED' && data.printedByTerminal && data.printedByTerminal !== resolvedTerminalId) {
+        return { success: false, alreadyPrinted: true, message: `Already printed by terminal ${data.printedByTerminal}` };
+      }
+      transaction.update(orderRef, {
+        printStatus: 'PRINTING',
+        printedByTerminal: resolvedTerminalId,
+        printClaimedAt: new Date().toISOString()
       });
-      return;
-    }
-    await orderRef.update({
-      printClaimedBy: terminalId,
-      printClaimedAt: new Date().toISOString(),
-      printStatus: 'PRINTING'
+      return { success: true, alreadyPrinted: false, message: 'Print job claimed' };
     });
-    res.json({
-      success: true,
-      message: 'Print job claimed successfully',
-      orderId,
-      terminalId,
-      order: { id: orderDoc.id, ...orderData }
-    });
+
+    res.json(result);
   } catch (error: any) {
     console.error('[POSRoutes] Error claiming print job:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// POST /api/pos/update-print-status — Update thermal print result and log audit event
-router.post('/update-print-status', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+// POST /api/pos/complete-print — Confirm successful print output
+router.post('/complete-print', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { orderId, status, terminalId, printerName, error } = req.body;
-    if (!orderId || !status) {
-      res.status(400).json({ success: false, error: 'orderId and status are required' });
-      return;
-    }
-    const updatePayload: any = {
-      printStatus: status,
-      printTerminalId: terminalId || 'POS-TERM-01',
-      printerName: printerName || 'Default Thermal Printer',
-      updatedAt: new Date().toISOString()
-    };
-    if (status === 'PRINTED') {
-      updatePayload.printedAt = new Date().toISOString();
-      updatePayload.printError = null;
-    } else {
-      updatePayload.printError = error || 'Printer offline or disconnected';
-    }
-    await adminDb.collection('orders').doc(orderId).set(updatePayload, { merge: true });
-    await adminDb.collection('audit_logs').add({
-      action: 'POS_THERMAL_PRINT_STATUS',
-      orderId,
-      status,
-      terminalId,
-      printerName,
-      error: error || null,
-      timestamp: new Date().toISOString(),
-      actor: req.user?.email || 'cashier'
-    });
-    res.json({
-      success: true,
-      message: 'Print status for order ' + orderId + ' updated to ' + status,
-      orderId,
-      status
-    });
-  } catch (error: any) {
-    console.error('[POSRoutes] Error updating print status:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// POST /api/pos/reprint-receipt — Reprint historical receipt with audit log
-router.post('/reprint-receipt', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const { orderId, reason, terminalId } = req.body;
+    const { orderId, terminalId } = req.body;
     if (!orderId) {
       res.status(400).json({ success: false, error: 'orderId is required' });
       return;
     }
-    const orderDoc = await adminDb.collection('orders').doc(orderId).get();
-    if (!orderDoc.exists) {
-      res.status(404).json({ success: false, error: 'Order not found' });
-      return;
-    }
-    const orderData = orderDoc.data()!;
-    await adminDb.collection('audit_logs').add({
-      action: 'POS_RECEIPT_REPRINT',
-      orderId,
-      reason: reason || 'Customer requested reprint',
-      reprintedBy: req.user?.email || 'cashier',
-      terminalId: terminalId || req.user?.terminalId || 'POS-TERM-01',
-      branchId: req.user?.branchId || orderData.branchId,
-      timestamp: new Date().toISOString()
+    const resolvedTerminalId = terminalId || req.user?.terminalId || `pos_${req.user?.franchiseId}`;
+
+    await adminDb.collection('orders').doc(orderId).update({
+      printStatus: 'PRINTED',
+      printedAt: new Date().toISOString(),
+      printedByTerminal: resolvedTerminalId,
+      printVerified: true
     });
-    res.json({
-      success: true,
-      message: 'Receipt reprint authorized',
-      isReprint: true,
-      order: { id: orderDoc.id, ...orderData }
-    });
+
+    res.json({ success: true, message: 'Print marked as completed' });
   } catch (error: any) {
-    console.error('[POSRoutes] Error processing receipt reprint:', error);
+    console.error('[POSRoutes] Error completing print:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -1563,8 +1553,8 @@ router.post('/reprint-receipt', verifyToken, requirePOSRole, async (req: AuthReq
 // GET /api/pos/printer-settings — Get terminal printer configuration
 router.get('/printer-settings', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const terminalId = req.user?.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01';
-    const branchId = req.user?.branchId || 'main_branch';
+    const terminalId = req.user?.terminalId || `pos_${req.user?.franchiseId}`;
+    const branchId = req.user?.branchId!;
     const docSnap = await adminDb.collection('pos_printer_settings').doc(branchId + '_' + terminalId).get();
     const settings = docSnap.exists ? docSnap.data() : {
       terminalId,
@@ -1587,8 +1577,8 @@ router.get('/printer-settings', verifyToken, requirePOSRole, async (req: AuthReq
 router.post('/printer-settings', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { printerName, connectionType, paperSize, autoPrintOnline, isPrimaryTerminal, lanIp, lanPort } = req.body;
-    const terminalId = req.user?.terminalId || (req.headers['x-terminal-id'] as string) || 'POS-TERM-01';
-    const branchId = req.user?.branchId || 'main_branch';
+    const terminalId = req.user?.terminalId || `pos_${req.user?.franchiseId}`;
+    const branchId = req.user?.branchId!;
     const settingsPayload = {
       terminalId,
       branchId,
@@ -1616,8 +1606,8 @@ router.post('/printer-settings', verifyToken, requirePOSRole, async (req: AuthRe
 // GET /api/pos/looker-studio/config — Get Looker Studio & Google Sheets metadata scoped to terminal
 router.get('/looker-studio/config', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = req.user?.branchId || (req.headers['x-branch-id'] as string) || 'main_branch';
-    const franchiseId = req.user?.franchiseId || (req.headers['x-franchise-id'] as string) || 'fra_rajnandgaon';
+    const branchId = req.user?.branchId!;
+    const franchiseId = req.user?.franchiseId!;
 
     // Retrieve Looker Studio configuration
     const docSnap = await adminDb.collection('settings').doc('looker_studio').get();
@@ -1976,7 +1966,7 @@ router.post('/stock/toggle', verifyToken, requirePOSRole, async (req: AuthReques
     }
 
     const isOwner = FranchiseScopeService.isGlobalOwner(user.email, user.role);
-    const branchId = (isOwner && req.query.branchId as string) || user.branchId || 'main_branch';
+    const branchId = (isOwner && req.query.branchId as string) || user.branchId!;
     const docKey = `${branchId}_${productId}`;
 
     const now = new Date().toISOString();
@@ -2015,11 +2005,11 @@ router.get('/branches', verifyToken, requirePOSRole, async (req: AuthRequest, re
         success: true,
         isOwner: false,
         branches: [{
-          franchiseId: user.franchiseId || 'fra_primary',
-          branchId: user.branchId || 'main_branch',
-          name: 'Olive Pizza — Rajnandgaon HQ',
-          code: 'OP-RJN-01',
-          city: 'Rajnandgaon'
+          franchiseId: user.franchiseId!,
+          branchId: user.branchId!,
+          name: (user as any).branchName || 'Olive Pizza',
+          code: `OP-${user.franchiseId?.slice(0, 4).toUpperCase()}`,
+          city: 'Chhattisgarh'
         }]
       });
       return;
@@ -2218,9 +2208,9 @@ router.post('/health/heartbeat', verifyToken, requirePOSRole, async (req: AuthRe
       clientTimestamp
     } = req.body;
 
-    const resolvedTerminalId = terminalId || user.terminalId || 'POS-TERM-01';
-    const resolvedBranchId = branchId || user.branchId || 'main_branch';
-    const resolvedFranchiseId = franchiseId || user.franchiseId || 'fra_primary';
+    const resolvedTerminalId = terminalId || user.terminalId || `pos_${user.franchiseId}`;
+    const resolvedBranchId = branchId || user.branchId!;
+    const resolvedFranchiseId = franchiseId || user.franchiseId!;
 
     const result = await POSTelemetryHealthService.recordHeartbeat({
       terminalId: resolvedTerminalId,
@@ -2264,8 +2254,8 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
       return;
     }
 
-    const branchId = user.branchId || 'main_branch';
-    const franchiseId = user.franchiseId || 'fra_primary';
+    const branchId = user.branchId!;
+    const franchiseId = user.franchiseId!;
     const processedBills: any[] = [];
     let duplicateCount = 0;
 
@@ -2310,7 +2300,7 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
         orderType: bill.orderSource || 'POS_DINE_IN',
         orderSource: bill.orderSource || 'POS_DINE_IN',
         tableNumber: bill.tableNumber || null,
-        terminalId: bill.session?.terminalId || user.terminalId || 'POS-TERM-01',
+        terminalId: bill.session?.terminalId || user.terminalId || `pos_${user.franchiseId}`,
         branchId,
         franchiseId,
         cashierName: bill.session?.cashierName || user.email?.split('@')[0],
@@ -2371,9 +2361,9 @@ router.post('/reprint-audit', verifyToken, requirePOSRole, async (req: AuthReque
       action: 'POS_RECEIPT_REPRINT',
       orderId,
       billNumber: billNumber || orderId,
-      terminalId: user.terminalId || 'POS-TERM-01',
-      branchId: user.branchId || 'main_branch',
-      franchiseId: user.franchiseId || 'fra_primary',
+      terminalId: user.terminalId || `pos_${user.franchiseId}`,
+      branchId: user.branchId!,
+      franchiseId: user.franchiseId!,
       cashierUid: user.uid,
       cashierEmail: user.email,
       reason,

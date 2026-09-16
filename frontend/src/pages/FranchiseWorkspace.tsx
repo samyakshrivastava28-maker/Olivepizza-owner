@@ -78,6 +78,7 @@ export default function FranchiseWorkspace() {
   const [riders, setRiders] = useState<any[]>([]);
   const [posTerminals, setPosTerminals] = useState<any[]>([]);
   const [posAccounts, setPosAccounts] = useState<any[]>([]);
+  const [pendingPosRequests, setPendingPosRequests] = useState<any[]>([]);
   const [pendingPasswordResets, setPendingPasswordResets] = useState<any[]>([]);
   const [liveOrders, setLiveOrders] = useState<any[]>([]);
   const [historicalOrders, setHistoricalOrders] = useState<any[]>([]);
@@ -167,6 +168,11 @@ export default function FranchiseWorkspace() {
       fetchApi('/api/auth/password-reset/pending')
         .then(async (r) => (r.ok ? r.json() : {}))
         .then((d) => setPendingPasswordResets(Array.isArray(d.requests) ? d.requests : []))
+        .catch(() => {});
+
+      fetchApi('/api/franchises/pos-requests')
+        .then(async (r) => (r.ok ? r.json() : {}))
+        .then((d) => setPendingPosRequests(Array.isArray(d.requests) ? d.requests : []))
         .catch(() => {});
 
       const posRes = await fetchApi(`/api/franchises/${fId}/pos-terminals`);
@@ -493,6 +499,45 @@ export default function FranchiseWorkspace() {
       loadFranchiseWorkspace();
     } catch (err: any) {
       toast.error(err.message || 'Revocation failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Handler: Approve POS Request
+  const handleApprovePosRequest = async (reqId: string) => {
+    setActionLoading(true);
+    try {
+      const res = await fetchApi(`/api/franchises/pos-request/${reqId}/approve`, {
+        method: 'PUT'
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to approve POS request');
+      toast.success('POS Access request approved!');
+      loadFranchiseWorkspace();
+    } catch (err: any) {
+      toast.error(err.message || 'Approval failed');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Handler: Reject POS Request
+  const handleRejectPosRequest = async (reqId: string) => {
+    const reason = window.prompt('Enter reason for rejecting this POS request (optional):') || 'Rejected by Store Owner';
+    setActionLoading(true);
+    try {
+      const res = await fetchApi(`/api/franchises/pos-request/${reqId}/reject`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to reject POS request');
+      toast.success('POS Access request rejected');
+      loadFranchiseWorkspace();
+    } catch (err: any) {
+      toast.error(err.message || 'Rejection failed');
     } finally {
       setActionLoading(false);
     }
@@ -1535,6 +1580,52 @@ export default function FranchiseWorkspace() {
               </span>
             </div>
           </div>
+
+          {/* Pending POS Access Requests from Franchise Managers */}
+          {pendingPosRequests.length > 0 && (
+            <div className="space-y-3 p-4 bg-amber-500/10 border border-amber-500/30 rounded-2xl">
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-amber-400" />
+                <h4 className="text-xs font-bold text-amber-400 uppercase tracking-wider">
+                  Pending POS Access Requests ({pendingPosRequests.length})
+                </h4>
+              </div>
+              <div className="space-y-2">
+                {pendingPosRequests.map((req) => (
+                  <div key={req.id} className="bg-slate-950 p-4 rounded-xl border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-bold text-white flex items-center gap-2">
+                        <span>Manager: {req.managerEmail || req.managerUid}</span>
+                        <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-mono">
+                          Franchise: {req.franchiseId}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Requested: {new Date(req.createdAt).toLocaleString()} {req.notes ? `• "${req.notes}"` : ''}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleApprovePosRequest(req.id)}
+                        disabled={actionLoading}
+                        className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-600 text-black font-bold rounded-lg text-xs flex items-center gap-1 cursor-pointer"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Approve Request</span>
+                      </button>
+                      <button
+                        onClick={() => handleRejectPosRequest(req.id)}
+                        disabled={actionLoading}
+                        className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 font-semibold rounded-lg text-xs cursor-pointer"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* POS Accounts List */}
           <div className="space-y-3">
