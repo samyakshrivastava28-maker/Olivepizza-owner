@@ -802,11 +802,14 @@ router.post('/context-session', verifyToken, async (req: AuthRequest, res: Respo
 
     const sessionKey = Buffer.from(JSON.stringify(tokenPayload)).toString('base64url');
 
-    let targetUrl = 'http://localhost:5176';
+    const franchiseBaseUrl = process.env.FRANCHISE_URL || (process.env.NODE_ENV === 'production' ? 'https://franchise.olivepizza.in' : 'http://localhost:5175');
+    const managerBaseUrl = process.env.MANAGER_URL || (process.env.NODE_ENV === 'production' ? 'https://manager.olivepizza.in' : 'http://localhost:5176');
+
+    let targetUrl = managerBaseUrl;
     if (targetApp === 'franchise') {
-      targetUrl = `http://localhost:5175?context=${sessionKey}&franchiseId=${encodeURIComponent(tokenPayload.targetFranchiseId)}`;
+      targetUrl = `${franchiseBaseUrl}?context=${sessionKey}&franchiseId=${encodeURIComponent(tokenPayload.targetFranchiseId)}`;
     } else {
-      targetUrl = `http://localhost:5176?context=${sessionKey}&branchId=${encodeURIComponent(tokenPayload.targetBranchId)}&branchName=${encodeURIComponent(tokenPayload.targetBranchName)}`;
+      targetUrl = `${managerBaseUrl}?context=${sessionKey}&branchId=${encodeURIComponent(tokenPayload.targetBranchId)}&branchName=${encodeURIComponent(tokenPayload.targetBranchName)}`;
     }
 
     res.json({

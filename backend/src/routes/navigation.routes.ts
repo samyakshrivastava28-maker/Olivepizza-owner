@@ -47,12 +47,22 @@ router.post('/route', verifyToken, async (req: AuthRequest, res: Response) => {
   try {
     const { origin, destination, orderId } = req.body;
 
-    if (!origin?.lat || !origin?.lng || !destination?.lat || !destination?.lng) {
-      res.status(400).json({ error: 'Origin and destination coordinates are required' });
+    const oLat = Number(origin?.lat);
+    const oLng = Number(origin?.lng);
+    const dLat = Number(destination?.lat);
+    const dLng = Number(destination?.lng);
+
+    if (
+      !Number.isFinite(oLat) || !Number.isFinite(oLng) ||
+      !Number.isFinite(dLat) || !Number.isFinite(dLng) ||
+      oLat < -90 || oLat > 90 || dLat < -90 || dLat > 90 ||
+      oLng < -180 || oLng > 180 || dLng < -180 || dLng > 180
+    ) {
+      res.status(400).json({ error: 'Valid numeric origin and destination coordinates are required' });
       return;
     }
 
-    const url = `${OSRM_BASE}/${origin.lng},${origin.lat};${destination.lng},${destination.lat}?overview=full&geometries=polyline&steps=true&annotations=false`;
+    const url = `${OSRM_BASE}/${oLng},${oLat};${dLng},${dLat}?overview=full&geometries=polyline&steps=true&annotations=false`;
     const fetchRes = await fetch(url, { signal: AbortSignal.timeout(8000) });
 
     if (!fetchRes.ok) {

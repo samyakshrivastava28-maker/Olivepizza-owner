@@ -66,12 +66,12 @@ export class FranchiseScopeService {
     ].includes(role);
 
     const organizationId = user?.organizationId || this.DEFAULT_ORG_ID;
-    const franchiseId = user?.franchiseId || this.DEFAULT_FRANCHISE_ID;
-    const branchId = user?.branchId || this.DEFAULT_BRANCH_ID;
+    const franchiseId = user?.franchiseId || (isGlobalOwner ? this.DEFAULT_FRANCHISE_ID : '');
+    const branchId = user?.branchId || (isGlobalOwner ? this.DEFAULT_BRANCH_ID : '');
     const branchIds =
       user?.branchIds && Array.isArray(user.branchIds) && user.branchIds.length > 0
         ? user.branchIds
-        : [branchId];
+        : (branchId ? [branchId] : []);
 
     const permissions = user?.permissions || [];
     const terminalId = user?.terminalId;
@@ -153,7 +153,12 @@ export class FranchiseScopeService {
     }
 
     // Branch-scoped staff CANNOT spoof another branch
-    return scope.branchId || this.DEFAULT_BRANCH_ID;
+    if (!scope.branchId) {
+      const error: any = new Error('Access denied: Caller has no assigned branch scope');
+      error.status = 403;
+      throw error;
+    }
+    return scope.branchId;
   }
 
   /**

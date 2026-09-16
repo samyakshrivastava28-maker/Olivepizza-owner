@@ -18,34 +18,19 @@ const demoKeepWarmStats = {
   lastUserAgent: 'system'
 };
 
-// Dedicated Lightweight Demo Keep-Warm Endpoint (No DB queries, no notifications, instant 200 OK)
-router.get('/health/ping', (req, res) => {
-  demoKeepWarmStats.totalPings += 1;
-  demoKeepWarmStats.lastPingTimestamp = new Date().toISOString();
-  demoKeepWarmStats.lastOrigin = (req.headers['origin'] || req.headers['host'] || 'unknown') as string;
-  demoKeepWarmStats.lastUserAgent = (req.headers['user-agent'] || 'unknown') as string;
-
+// Dedicated Lightweight Demo Keep-Warm Endpoint (Instant 200 OK)
+router.get('/health/ping', (_req, res) => {
   res.json({
     status: 'ok',
-    service: 'olive-pizza-backend',
-    demoKeepWarm: true,
-    uptime: process.uptime(),
-    timestamp: demoKeepWarmStats.lastPingTimestamp,
-    totalPings: demoKeepWarmStats.totalPings
+    timestamp: new Date().toISOString()
   });
 });
 
-// Liveness Probe: Process uptime & runtime version
-router.get(['/health', '/health/liveness'], (req, res) => {
+// Liveness Probe: Minimal status without disclosing process internals
+router.get(['/health', '/health/liveness'], (_req, res) => {
   res.json({
     status: 'ok',
-    service: 'Olive Pizza Standalone Owner Backend',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    keepWarmStats: {
-      totalPings: demoKeepWarmStats.totalPings,
-      lastPing: demoKeepWarmStats.lastPingTimestamp
-    }
+    timestamp: new Date().toISOString()
   });
 });
 

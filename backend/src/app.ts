@@ -115,6 +115,8 @@ app.use((req: express.Request, res: express.Response, next: express.NextFunction
 });
 
 // ─── STRICT PRODUCTION & CLOUDFLARE CORS CONFIGURATION ───────────────────────
+const isProduction = process.env.NODE_ENV === 'production';
+
 const allowedOrigins = [
   'https://olivepizza.in',
   'https://www.olivepizza.in',
@@ -125,6 +127,18 @@ const allowedOrigins = [
   'https://delivery.olivepizza.in',
   'https://pos.olivepizza.in',
   'https://media.olivepizza.in',
+  'https://olive-pizza.vercel.app',
+  'https://olive-pizza-backend.onrender.app',
+  'https://olive-pizza-backend.onrender.com',
+  'https://olivepizza-owner.onrender.com',
+  'https://olive-pizza-ai-frontend.vercel.app',
+  'https://olive-pizza-ai.onrender.com',
+  'capacitor://localhost',
+  'ionic://localhost',
+  ...(process.env.CLIENT_URL ? [process.env.CLIENT_URL] : [])
+];
+
+const devOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:5175',
@@ -136,38 +150,46 @@ const allowedOrigins = [
   'http://127.0.0.1:5173',
   'http://127.0.0.1:3000',
   'http://localhost',
-  'http://127.0.0.1',
-  'capacitor://localhost',
-  'https://olive-pizza.vercel.app',
-  'https://olive-pizza-backend.onrender.app',
-  'https://olive-pizza-backend.onrender.com',
-  'https://olivepizza-owner.onrender.com',
-  'https://olive-pizza-ai-frontend.vercel.app',
-  'https://olive-pizza-ai.onrender.com',
-  process.env.CLIENT_URL || 'https://olive-pizza.vercel.app'
+  'http://127.0.0.1'
 ];
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (
-      !origin || 
-      origin === 'null' ||
-      origin.startsWith('file://') ||
-      origin.startsWith('capacitor://') ||
-      origin.startsWith('ionic://') ||
-      allowedOrigins.includes(origin) ||
-      origin.endsWith('.olivepizza.in') ||
-      origin.startsWith('http://localhost') ||
-      origin.startsWith('http://127.0.0.1') ||
-      origin.startsWith('http://192.168.') ||
-      origin.startsWith('https://localhost') ||
-      process.env.NODE_ENV !== 'production'
-    ) {
-      callback(null, true);
-    } else {
-      // Reject origin safely without throwing 500 error
-      callback(null, false);
+    // 1. Direct server-to-server or native client with no origin header
+    if (!origin) {
+      return callback(null, true);
     }
+
+    // 2. Official production allowed origins
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // 3. Strict HTTPS official subdomains of olivepizza.in
+    if (/^https:\/\/([a-z0-9-]+\.)*olivepizza\.in$/.test(origin)) {
+      return callback(null, true);
+    }
+
+    // 4. Mobile app protocols
+    if (origin.startsWith('capacitor://') || origin.startsWith('ionic://')) {
+      return callback(null, true);
+    }
+
+    // 5. Development-only origins
+    if (!isProduction) {
+      if (
+        devOrigins.includes(origin) ||
+        origin.startsWith('http://localhost') ||
+        origin.startsWith('http://127.0.0.1') ||
+        origin.startsWith('http://192.168.') ||
+        origin.startsWith('https://localhost')
+      ) {
+        return callback(null, true);
+      }
+    }
+
+    // Reject all other origins safely in production
+    callback(null, false);
   },
   credentials: true
 }));

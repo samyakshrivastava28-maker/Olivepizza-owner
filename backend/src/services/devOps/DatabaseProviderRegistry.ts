@@ -1527,7 +1527,7 @@ export class DatabaseProviderRegistry {
     const targetEndpoint =
       connectionConfig.healthEndpoint || connectionConfig.baseUrl || connectionConfig.connectionUri;
     if (targetEndpoint && (targetEndpoint.startsWith('http://') || targetEndpoint.startsWith('https://'))) {
-      const ssrfCheck = SSRFValidator.validate(targetEndpoint);
+      const ssrfCheck = await SSRFValidator.validateAsync(targetEndpoint);
       if (!ssrfCheck.safe) {
         return {
           status: 'UNREACHABLE',
@@ -1798,9 +1798,6 @@ export class DatabaseProviderRegistry {
     // ── 7. Generic HTTP / REST / Database Endpoints ─────────────────────────
     if (targetEndpoint && (targetEndpoint.startsWith('http://') || targetEndpoint.startsWith('https://'))) {
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), timeout);
-
         const headers: Record<string, string> = {
           'User-Agent': 'OlivePizza-DataManager/1.0',
         };
@@ -1808,12 +1805,11 @@ export class DatabaseProviderRegistry {
           headers['Authorization'] = `Bearer ${connectionConfig.apiKey}`;
         }
 
-        const response = await fetch(targetEndpoint, {
+        const response = await SSRFValidator.safeFetch(targetEndpoint, {
           method: 'GET',
           headers,
-          signal: controller.signal,
+          timeoutMs: timeout,
         });
-        clearTimeout(timer);
 
         const latencyMs = Date.now() - start;
         const isHealthy = response.ok || response.status === 401 || response.status === 403;

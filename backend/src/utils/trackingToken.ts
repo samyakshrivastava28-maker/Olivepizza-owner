@@ -14,7 +14,17 @@
 
 import crypto from 'crypto';
 
-const SECRET = process.env.TRACKING_TOKEN_SECRET || process.env.JWT_SECRET || 'olive-tracking-secret-change-me';
+function getSecret(): string {
+  const secret = process.env.TRACKING_TOKEN_SECRET || process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('CRITICAL SECURITY ERROR: TRACKING_TOKEN_SECRET or JWT_SECRET must be set in production.');
+    }
+    return 'olive-tracking-dev-secret-only';
+  }
+  return secret;
+}
+
 const EXPIRY_HOURS = 4;
 
 /**
@@ -24,7 +34,7 @@ const EXPIRY_HOURS = 4;
 export function generateTrackingToken(orderId: string): string {
   const exp = Math.floor(Date.now() / 1000) + EXPIRY_HOURS * 3600;
   const payload = `${orderId}:${exp}`;
-  const hmac = crypto.createHmac('sha256', SECRET).update(payload).digest('hex');
+  const hmac = crypto.createHmac('sha256', getSecret()).update(payload).digest('hex');
   const raw = `${payload}:${hmac}`;
   return Buffer.from(raw).toString('base64url');
 }
@@ -44,7 +54,7 @@ export function verifyTrackingToken(token: string): string | null {
 
     if (isNaN(exp) || Date.now() / 1000 > exp) return null; // expired
 
-    const expectedHmac = crypto.createHmac('sha256', SECRET).update(`${orderId}:${expStr}`).digest('hex');
+    const expectedHmac = crypto.createHmac('sha256', getSecret()).update(`${orderId}:${expStr}`).digest('hex');
     if (!crypto.timingSafeEqual(Buffer.from(providedHmac), Buffer.from(expectedHmac))) return null;
 
     return orderId;

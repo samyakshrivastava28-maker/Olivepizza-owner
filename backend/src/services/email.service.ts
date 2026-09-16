@@ -28,7 +28,7 @@ export const transporter = nodemailer.createTransport({
   greetingTimeout: 10000,
   socketTimeout: 15000,
   tls: {
-    rejectUnauthorized: false
+    rejectUnauthorized: process.env.SMTP_TLS_REJECT_UNAUTHORIZED === 'false' ? false : (process.env.NODE_ENV === 'production')
   }
 });
 

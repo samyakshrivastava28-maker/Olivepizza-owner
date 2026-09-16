@@ -258,9 +258,11 @@ export default function FranchiseManager() {
         window.open(data.targetUrl, '_blank');
         toast.success(`Launched ${targetApp === 'franchise' ? 'Franchise Suite' : 'Restaurant Manager'} for ${branch.name}`);
       } else {
+        const franchiseBase = import.meta.env.VITE_FRANCHISE_URL || (import.meta.env.PROD ? 'https://franchise.olivepizza.in' : 'http://localhost:5175');
+        const managerBase = import.meta.env.VITE_MANAGER_URL || (import.meta.env.PROD ? 'https://manager.olivepizza.in' : 'http://localhost:5176');
         const fallbackUrl = targetApp === 'franchise'
-          ? `http://localhost:5175?branchId=${encodeURIComponent(branch.id)}`
-          : `http://localhost:5176?branchId=${encodeURIComponent(branch.id)}&branchName=${encodeURIComponent(branch.name)}`;
+          ? `${franchiseBase}?branchId=${encodeURIComponent(branch.id)}`
+          : `${managerBase}?branchId=${encodeURIComponent(branch.id)}&branchName=${encodeURIComponent(branch.name)}`;
         window.open(fallbackUrl, '_blank');
       }
     } catch (err: any) {

@@ -12,8 +12,13 @@ export class PaymentProviderFactory {
   public static getProvider(overrideName?: string): PaymentProvider {
     const config = getPaymentConfig();
 
-    // If sandbox mode is explicitly enabled or config is set to mock, return mock
+    const isProduction = process.env.NODE_ENV === 'production';
+
+    // If sandbox mode is explicitly enabled or config is set to mock, return mock ONLY in non-production
     if (config.sandboxMode && (!overrideName || overrideName === 'mock')) {
+      if (isProduction) {
+        throw new Error('CRITICAL SECURITY VIOLATION: Mock payment provider cannot be activated in production.');
+      }
       return mockSandboxProvider;
     }
 
@@ -33,7 +38,14 @@ export class PaymentProviderFactory {
       case 'cashfree':
         return cashfreeProvider;
       case 'mock':
+        if (isProduction) {
+          throw new Error('CRITICAL SECURITY VIOLATION: Mock payment provider requested in production.');
+        }
+        return mockSandboxProvider;
       default:
+        if (isProduction) {
+          throw new Error(`CRITICAL CONFIGURATION ERROR: Unrecognized payment provider "${targetName}" in production.`);
+        }
         return mockSandboxProvider;
     }
   }
@@ -62,13 +74,20 @@ export class PaymentProviderFactory {
   }
 
   private static getFailoverProvider(failedProvider: string): PaymentProvider {
+    const isProduction = process.env.NODE_ENV === 'production';
     const chain: Record<string, PaymentProvider> = {
       razorpay: phonePeProvider,
       phonepe: cashfreeProvider,
-      cashfree: mockSandboxProvider,
-      mock: mockSandboxProvider,
+      cashfree: isProduction ? razorpayProvider : mockSandboxProvider,
     };
-    return chain[failedProvider] || mockSandboxProvider;
+    const next = chain[failedProvider];
+    if (!next) {
+      if (isProduction) {
+        throw new Error('All configured payment providers are currently unavailable.');
+      }
+      return mockSandboxProvider;
+    }
+    return next;
   }
 
   public static getCircuitBreakerStatus(): Record<string, { open: boolean; failures: number }> {

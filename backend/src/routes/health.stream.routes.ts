@@ -4,6 +4,7 @@ import { adminAuth, adminDb } from '../config/firebase.js';
 import cloudinary from '../config/cloudinary.js';
 import os from 'os';
 import { NotificationLogger } from '../services/notification/NotificationLogger.js';
+import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 
 const router = Router();
 const clients = new Set<Response>();
@@ -97,14 +98,28 @@ const startPoller = () => {
 const stopPoller = () => { if(clients.size===0){if(pollerInterval){clearInterval(pollerInterval);pollerInterval=null;}if(pingInterval){clearInterval(pingInterval);pingInterval=null;}} };
 
 router.get('/status', (_req: Request, res: Response) => {
-  res.json({ success:true, status:'online', uptime:Math.round(process.uptime()), memoryMB:Math.round(process.memoryUsage().heapUsed/1024/1024), timestamp:new Date().toISOString(), version:process.env.npm_package_version||'1.0.0' });
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString()
+  });
 });
 
-router.get('/diagnostics', async (_req: Request, res: Response) => {
-  try { const m=await gatherMetrics(); res.json({success:true,...m}); } catch(e:any){res.status(500).json({success:false,error:e.message});}
+router.get('/diagnostics', verifyToken, requireRole(['owner', 'developer', 'admin', 'platform_owner']), async (_req: AuthRequest, res: Response) => {
+  try {
+    const m = await gatherMetrics();
+    res.json({ success: true, ...m });
+  } catch (e: any) {
+    res.status(500).json({ success: false, error: 'Internal diagnostics failure' });
+  }
 });
 
-router.post('/test-fcm', async (req: Request, res: Response) => {
+router.post('/test-fcm', verifyToken, requireRole(['owner', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response) => {
+  const email = (req.user?.email || '').toLowerCase();
+  const isAuthorizedMaster = email === 'olivepizzarjn@gmail.com' || email === 'webhub2811@gmail.com';
+  if (process.env.NODE_ENV === 'production' && !isAuthorizedMaster) {
+    res.status(403).json({ error: 'FCM diagnostic testing is disabled in production for non-master accounts.' });
+    return;
+  }
   try {
     const { token } = req.body;
     if (!token) return res.status(400).json({ error: 'token required' });
@@ -113,11 +128,17 @@ router.post('/test-fcm', async (req: Request, res: Response) => {
     const response = await adminMessaging.sendEachForMulticast(message);
     res.json(response);
   } catch (error: any) {
-    res.status(500).json({ error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'FCM test execution failed' });
   }
 });
 
-router.post('/notification-test', async (_req: Request, res: Response) => {
+router.post('/notification-test', verifyToken, requireRole(['owner', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response) => {
+  const email = (req.user?.email || '').toLowerCase();
+  const isAuthorizedMaster = email === 'olivepizzarjn@gmail.com' || email === 'webhub2811@gmail.com';
+  if (process.env.NODE_ENV === 'production' && !isAuthorizedMaster) {
+    res.status(403).json({ error: 'Notification diagnostic testing is disabled in production for non-master accounts.' });
+    return;
+  }
   try {
     const results: any = {
       firebaseAdmin: 'PASS',
@@ -156,22 +177,27 @@ router.post('/notification-test', async (_req: Request, res: Response) => {
       }
     } catch (e: any) {
       results.backend = 'FAIL';
-      results.details.backend = e.message;
+      results.details.backend = 'Database check failed';
     }
 
     res.json({ success: true, results });
   } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ success: false, error: 'Notification test failed' });
   }
 });
 
-router.get('/stream', (req: Request, res: Response) => {
-  res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});
+router.get('/stream', verifyToken, requireRole(['owner', 'developer', 'admin', 'platform_owner']), (req: AuthRequest, res: Response) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
   res.write('event: connected\ndata: {"status":"connected"}\n\n');
-  if(latestMetrics) res.write(`data: ${JSON.stringify(latestMetrics)}\n\n`);
+  if (latestMetrics) res.write(`data: ${JSON.stringify(latestMetrics)}\n\n`);
   clients.add(res);
   startPoller();
-  req.on('close',()=>{clients.delete(res);stopPoller();});
+  req.on('close', () => { clients.delete(res); stopPoller(); });
 });
 
 export default router;

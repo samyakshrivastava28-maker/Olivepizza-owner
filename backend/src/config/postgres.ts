@@ -25,9 +25,11 @@ export const pgPool = new Pool({
   max: maxConnections,
   idleTimeoutMillis: idleTimeoutMillis,
   connectionTimeoutMillis: connectionTimeoutMillis,
-  ssl: {
-    rejectUnauthorized: false
-  },
+  ssl: process.env.PG_SSL_REJECT_UNAUTHORIZED === 'true'
+    ? { rejectUnauthorized: true, ca: process.env.PG_SSL_CA }
+    : process.env.PG_SSL_REJECT_UNAUTHORIZED === 'false' || dbUrl?.includes('supabase.co') || dbUrl?.includes('pooler.supabase.com')
+      ? { rejectUnauthorized: false }
+      : { rejectUnauthorized: process.env.NODE_ENV === 'production' },
   statement_timeout: 15000, // 15 seconds per statement limit
 });
 

@@ -33,5 +33,35 @@ export function validateEnvironmentVariables() {
     process.exit(1);
   }
 
+  // Production Security Hardening Checks
+  if (process.env.NODE_ENV === 'production') {
+    const INSECURE_DEFAULTS = [
+      'fallback-secret-do-not-use-in-prod',
+      'olive-tracking-secret-change-me',
+      'olive-ai-gateway-secret-change-in-prod',
+      'olive_pizza_2fa_master_key_32_bytes!'
+    ];
+
+    const secretVars = [
+      { name: 'TRACKING_TOKEN_SECRET', val: process.env.TRACKING_TOKEN_SECRET },
+      { name: 'JWT_SECRET', val: process.env.JWT_SECRET },
+      { name: 'AI_GATEWAY_SECRET', val: process.env.AI_GATEWAY_SECRET },
+      { name: 'TOTP_ENCRYPTION_KEY', val: process.env.TOTP_ENCRYPTION_KEY }
+    ];
+
+    for (const { name, val } of secretVars) {
+      if (val && INSECURE_DEFAULTS.includes(val.trim())) {
+        console.error(`\n❌ CRITICAL PRODUCTION SECURITY ERROR: ${name} is set to an insecure default placeholder.`);
+        console.error('Please configure a unique cryptographically secure secret in your production environment.');
+        process.exit(1);
+      }
+    }
+
+    if (!process.env.JWT_SECRET && !process.env.TRACKING_TOKEN_SECRET) {
+      console.error('\n❌ CRITICAL PRODUCTION SECURITY ERROR: Neither JWT_SECRET nor TRACKING_TOKEN_SECRET is defined.');
+      process.exit(1);
+    }
+  }
+
   console.log('✅ Environment validation passed.');
 }
