@@ -2210,7 +2210,7 @@ router.get('/:id/restaurants/:restaurantSlug', async (req: AuthRequest, res: Res
         managers: branchManagers.map(({ pinHash, ...safe }) => safe),
         posTerminals: branchTerminals.map(({ activationCode, ...safe }) => safe),
         liveOrdersCount: liveOrders.length,
-        operationalAppUrl: process.env.MANAGER_URL || (process.env.NODE_ENV === 'production' ? 'https://manager.olivepizza.in' : 'http://localhost:5176')
+        operationalAppUrl: process.env.MANAGER_URL || 'https://manager.olivepizza.in'
       }
     });
   } catch (error: any) {

@@ -70,7 +70,7 @@ class EmailService {
       <p>Your account has been successfully created and verified! We're thrilled to have you.</p>
       <p>Start exploring our premium pizzas today.</p>
       <div style="text-align: center; margin-top: 20px;">
-        <a href="https://olive-pizza.vercel.app/menu" style="background-color: ${this.brandColor}; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Order Now</a>
+        <a href="https://olivepizza.in/menu" style="background-color: ${this.brandColor}; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Order Now</a>
       </div>
     `);
     await this.sendMail(to, 'Welcome to Olive Pizza!', html);
@@ -148,7 +148,7 @@ class EmailService {
       <p>Your order is on its way!</p>
       ${deliveryPartnerName ? `<p>Your delivery partner, <strong>${deliveryPartnerName}</strong>, is heading to your location.</p>` : ''}
       <div style="text-align: center; margin-top: 20px;">
-        <a href="https://olive-pizza.vercel.app/dashboard" style="background-color: ${this.brandColor}; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Track Live on Map</a>
+        <a href="https://olivepizza.in/customer/dashboard" style="background-color: ${this.brandColor}; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold;">Track Live on Map</a>
       </div>
     `);
     await this.sendMail(to, `Order Out For Delivery #${orderId}`, html);

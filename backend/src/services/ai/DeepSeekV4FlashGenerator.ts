@@ -160,7 +160,7 @@ ${options.selectedProducts?.length ? `Featured Products: ${options.selectedProdu
       Treat yourself to handcrafted gourmet pizzas baked hot and fresh! Use this special offer today and enjoy fast delivery straight to your doorstep.
     </p>
     <div style="margin-top:25px;">
-      <a href="https://olive-pizza.vercel.app/menu" style="background-color:#f97316; color:#ffffff; padding:14px 28px; text-decoration:none; border-radius:12px; font-weight:bold; font-size:16px; display:inline-block; box-shadow: 0 4px 12px rgba(249,115,22,0.4);">
+      <a href="https://olivepizza.in/menu" style="background-color:#f97316; color:#ffffff; padding:14px 28px; text-decoration:none; border-radius:12px; font-weight:bold; font-size:16px; display:inline-block; box-shadow: 0 4px 12px rgba(249,115,22,0.4);">
         ORDER NOW ON OLIVE PIZZA 🍕
       </a>
     </div>
@@ -207,7 +207,7 @@ ${options.selectedProducts?.length ? `Featured Products: ${options.selectedProdu
       return {
         success: true,
         subject: `🍕 Special Offer: ${options.prompt.slice(0, 40)}`,
-        bodyHtml: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; background:#0f172a; color:#fff; padding:20px; border-radius:16px; text-align:center;"><h2 style="color:#f97316;">${options.prompt}</h2><p>Order hot & fresh pizza from Olive Pizza!</p><a href="https://olive-pizza.vercel.app/menu" style="background:#f97316; color:#fff; padding:12px 24px; text-decoration:none; border-radius:10px; font-weight:bold; display:inline-block;">Order Now</a></div>`,
+        bodyHtml: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; background:#0f172a; color:#fff; padding:20px; border-radius:16px; text-align:center;"><h2 style="color:#f97316;">${options.prompt}</h2><p>Order hot & fresh pizza from Olive Pizza!</p><a href="https://olivepizza.in/menu" style="background:#f97316; color:#fff; padding:12px 24px; text-decoration:none; border-radius:10px; font-weight:bold; display:inline-block;">Order Now</a></div>`,
         model: 'DeepSeek V4 Flash (Fallback)',
       };
     }
@@ -337,7 +337,7 @@ User Request: ${options.message}`;
           success: true,
           chatReply: `I've crafted a full email template for your campaign! Check your main HTML editor.`,
           subject: `🍕 Exclusive Deal from Olive Pizza!`,
-          html: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; background:#0f172a; color:#fff; padding:24px; border-radius:16px; text-align:center;"><h2 style="color:#f97316;">${options.message}</h2><p>Order hot & fresh gourmet pizzas from Olive Pizza!</p><a href="https://olive-pizza.vercel.app/menu" style="background:#f97316; color:#fff; padding:12px 24px; text-decoration:none; border-radius:10px; font-weight:bold; display:inline-block; margin-top:15px;">Order Now 🍕</a></div>`,
+          html: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; background:#0f172a; color:#fff; padding:24px; border-radius:16px; text-align:center;"><h2 style="color:#f97316;">${options.message}</h2><p>Order hot & fresh gourmet pizzas from Olive Pizza!</p><a href="https://olivepizza.in/menu" style="background:#f97316; color:#fff; padding:12px 24px; text-decoration:none; border-radius:10px; font-weight:bold; display:inline-block; margin-top:15px;">Order Now 🍕</a></div>`,
           model: 'DeepSeek V4 Flash (Fallback)',
         };
       }

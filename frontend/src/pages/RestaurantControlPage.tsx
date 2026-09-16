@@ -241,7 +241,7 @@ export default function RestaurantControlPage() {
         {/* Action: Open Separate Operational App */}
         <div className="flex items-center gap-2">
           <a
-            href={import.meta.env.VITE_MANAGER_APP_URL || (import.meta.env.PROD ? 'https://manager.olivepizza.in' : 'http://localhost:5176')}
+            href={import.meta.env.VITE_MANAGER_APP_URL || 'https://manager.olivepizza.in'}
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-2 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-amber-400 hover:text-amber-300 border border-slate-700 rounded-xl text-xs font-bold transition shadow-sm"
