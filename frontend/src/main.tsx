@@ -1,3 +1,4 @@
+import SafeErrorBoundary from './components/SafeErrorBoundary';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter, HashRouter } from 'react-router';
@@ -18,7 +19,7 @@ const Router = isHashRouterNeeded ? HashRouter : BrowserRouter;
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <Router>
-      <App />
+      <SafeErrorBoundary><App /></SafeErrorBoundary>
     </Router>
   </React.StrictMode>
 );

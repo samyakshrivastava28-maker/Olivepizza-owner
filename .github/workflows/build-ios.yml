@@ -136,6 +136,8 @@ jobs:
               echo "Packaging and signing app bundle: $APP_BUNDLE"
               # Ensure sound assets are packaged in app bundle
               cp -f ios/App/App/*.wav ios/App/App/*.mp3 "$APP_BUNDLE/" 2>/dev/null || true
+              # Ensure GoogleService-Info.plist is packaged in app bundle (critical for Firebase iOS)
+              cp -f ios/App/App/GoogleService-Info.plist "$APP_BUNDLE/" 2>/dev/null || true
               # 1. Sign embedded frameworks and dynamic libraries inside-out (critical: dyld aborts if frameworks lack code signature)
               if [ -d "$APP_BUNDLE/Frameworks" ]; then
                 echo "Ad-hoc signing embedded frameworks..."
@@ -149,7 +151,7 @@ jobs:
               fi
               # 3. Sign the main application bundle
               echo "Ad-hoc signing main bundle: $(basename "$APP_BUNDLE")"
-              codesign --force --sign - --timestamp=none "$APP_BUNDLE" || true
+              codesign --force --sign - --entitlements ios/App/App/App.entitlements --timestamp=none "$APP_BUNDLE" || true
               cd /tmp
               zip -r "${{ github.workspace }}/release-ios/${IPA_NAME}" Payload
               cd ${{ github.workspace }}
