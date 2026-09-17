@@ -66,15 +66,30 @@ export class FirestoreListener {
     }
   }
 
+  private static isInitialOrdersLoad = true;
+
   private static listenToOrders() {
+    this.isInitialOrdersLoad = true;
     db.collection('orders').onSnapshot(
       async (snapshot: any) => {
+        // Initial snapshot baseline hydration: prevents false notifications on server startup/redeploy
+        if (this.isInitialOrdersLoad) {
+          this.isInitialOrdersLoad = false;
+          console.log(`[FirestoreListener] Initial orders snapshot received (${snapshot.size} orders). Establishing baseline cache without replaying alerts.`);
+          for (const doc of snapshot.docs) {
+            const data = doc.data() || {};
+            this.orderStatusCache.set(doc.id, data.status);
+            this.processedOrderIds.add(doc.id);
+          }
+          return;
+        }
+
         for (const change of snapshot.docChanges()) {
           const orderData = { id: change.doc.id, ...change.doc.data() } as any;
 
           // ── NEW ORDER ────────────────────────────────────────────────────────
           if (change.type === 'added') {
-            let createdAt: Date = new Date();
+            let createdAt: Date = new Date(0);
             if (orderData.createdAt) {
               if (typeof orderData.createdAt?.toDate === 'function') {
                 createdAt = orderData.createdAt.toDate();
@@ -85,9 +100,17 @@ export class FirestoreListener {
               } else if (orderData.createdAt?._seconds) {
                 createdAt = new Date(orderData.createdAt._seconds * 1000);
               }
+            } else if (orderData.created_at) {
+              if (typeof orderData.created_at?.toDate === 'function') {
+                createdAt = orderData.created_at.toDate();
+              } else if (typeof orderData.created_at === 'string' || typeof orderData.created_at === 'number') {
+                createdAt = new Date(orderData.created_at);
+              } else if (orderData.created_at?._seconds) {
+                createdAt = new Date(orderData.created_at._seconds * 1000);
+              }
             }
             if (isNaN(createdAt.getTime())) {
-              createdAt = new Date();
+              createdAt = new Date(0);
             }
 
             // ALWAYS set status cache for state tracking, even for historical orders
