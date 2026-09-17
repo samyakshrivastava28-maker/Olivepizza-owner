@@ -85,7 +85,7 @@ jobs:
             2>&1 | xcpretty || true
 
       - name: Export Signed IPA (if signing secrets exist)
-        if: env.APPLE_CERTIFICATE_BASE64 != ''
+        if: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' }}
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
@@ -128,6 +128,8 @@ jobs:
             mkdir -p /tmp/Payload
             cp -r "$ARCHIVE_PATH/Products/Applications/"*.app /tmp/Payload/ || true
             if [ -d "/tmp/Payload" ] && [ "$(ls -A /tmp/Payload)" ]; then
+              echo "Applying ad-hoc signature to satisfy Mach-O binary requirements..."
+              codesign --force --deep --sign - /tmp/Payload/*.app || true
               cd /tmp
               zip -r "${{ github.workspace }}/release-ios/${IPA_NAME}" Payload
               cd ${{ github.workspace }}
