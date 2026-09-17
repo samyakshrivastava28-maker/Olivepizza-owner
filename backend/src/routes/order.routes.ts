@@ -1058,10 +1058,12 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
             version: 1,
           });
           await notificationEngine.sendBulk(branchStaffUids, restaurantPayload, {
+            eventId: `order_created_restaurant_${newOrderId}`,
             category: 'alarm_actionable',
             priority: 'critical',
             orderId: newOrderId,
-            targetApp: 'restaurant'
+            targetApp: 'restaurant',
+            tag: `order_restaurant_${newOrderId}`
           });
         }
       } catch (notifErr: any) {
@@ -1077,9 +1079,11 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
           version: 1
         });
         await notificationEngine.send(userId, customerPlacedPayload, {
+          eventId: `order_created_customer_${newOrderId}`,
           category: 'pinned_live',
           orderId: newOrderId,
-          targetApp: 'customer'
+          targetApp: 'customer',
+          tag: `order_${newOrderId}`
         });
       } catch (custErr: any) {
         console.warn('[Orders] Customer initial order placed push error:', custErr.message);

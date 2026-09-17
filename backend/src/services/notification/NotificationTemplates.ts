@@ -367,7 +367,12 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
             ? 'SECURITY_ALERT_CATEGORY'
             : 'ORDER_STATUS_CATEGORY';
 
-  const apnsSound = soundFile === 'default' ? 'default' : `${soundFile}.wav`;
+  const apnsSound =
+    soundFile === 'default'
+      ? 'default'
+      : ['new_order', 'order_delivered', 'delivery_chime'].includes(soundFile)
+        ? `${soundFile}.wav`
+        : `${soundFile}.mp3`;
   const interruptionLevel =
     opts.priority === 'critical' ? 'critical' : opts.priority === 'high' ? 'time-sensitive' : 'active';
 

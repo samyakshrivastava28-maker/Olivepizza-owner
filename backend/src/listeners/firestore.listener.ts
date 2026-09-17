@@ -155,9 +155,11 @@ export class FirestoreListener {
                     orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
                   });
                   await notificationEngine.sendBulk(branchStaffRecipients, restaurantPayload, {
+                    eventId: `order_created_restaurant_${orderData.id}`,
                     orderId: orderData.id,
                     category: 'alarm_actionable',
                     tag: `order_restaurant_${orderData.id}`,
+                    targetApp: 'restaurant'
                   });
                 }
 
@@ -170,9 +172,11 @@ export class FirestoreListener {
                     totalAmount,
                   });
                   await notificationEngine.send(customerUid, customerPayload, {
+                    eventId: `order_created_customer_${orderData.id}`,
                     orderId: orderData.id,
                     category: 'pinned_live',
                     tag: `order_${orderData.id}`,
+                    targetApp: 'customer'
                   });
                 }
               } catch (notifErr: any) {

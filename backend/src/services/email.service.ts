@@ -33,7 +33,7 @@ const createSmtpTransporter = (port: number) => {
     greetingTimeout: 10000,
     socketTimeout: 15000,
     tls: {
-      rejectUnauthorized: false
+      rejectUnauthorized: true
     }
   });
 };

@@ -18,21 +18,23 @@ export const PRODUCTION_BACKEND_URL = "https://olivepizza-owner.onrender.com";
 const DEV_BACKEND_URL = "http://localhost:5000";
 
 export function getApiBaseUrl(): string {
-  if (import.meta.env.VITE_API_BASE_URL) {
-    return import.meta.env.VITE_API_BASE_URL;
-  }
-  
   if (
-    import.meta.env.PROD ||
     Capacitor.isNativePlatform() ||
     (typeof window !== 'undefined' && (
       window.location.protocol === 'file:' ||
       window.location.protocol === 'capacitor:' ||
       window.location.protocol === 'ionic:' ||
-      navigator.userAgent.includes('Electron') ||
-      (window.location.hostname === 'localhost' && window.location.port === '')
+      navigator.userAgent.includes('Electron')
     ))
   ) {
+    return PRODUCTION_BACKEND_URL;
+  }
+
+  if (import.meta.env.VITE_API_BASE_URL) {
+    return import.meta.env.VITE_API_BASE_URL;
+  }
+  
+  if (import.meta.env.PROD) {
     return PRODUCTION_BACKEND_URL;
   }
   
