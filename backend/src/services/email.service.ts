@@ -9,31 +9,41 @@ if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) 
   console.error("CRITICAL ERROR: SMTP credentials missing in environment variables. Emails will fail.");
 }
 
-// Clean and sanitize SMTP credentials
-const smtpHost = process.env.SMTP_HOST || 'smtp.gmail.com';
-const smtpPort = parseInt(process.env.SMTP_PORT || '587', 10);
-const smtpUser = process.env.SMTP_USER?.trim() || '';
-const smtpPass = process.env.SMTP_PASS ? process.env.SMTP_PASS.trim().replace(/\s+/g, '') : '';
+// Clean and sanitize SMTP credentials (strip accidental quotes/whitespace)
+const cleanStr = (val?: string) => val ? val.trim().replace(/^["']|["']$/g, '') : '';
+const cleanSecret = (val?: string) => val ? val.trim().replace(/^["']|["']$/g, '').replace(/\s+/g, '') : '';
 
-// Reusable transporter object using standard SMTP transport with strict timeouts
-export const transporter = nodemailer.createTransport({
-  host: smtpHost,
-  port: smtpPort,
-  secure: smtpPort === 465,
-  auth: {
-    user: smtpUser,
-    pass: smtpPass,
-  },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 15000,
-  tls: {
-    rejectUnauthorized: process.env.SMTP_TLS_REJECT_UNAUTHORIZED === 'false' ? false : (process.env.NODE_ENV === 'production')
-  }
-});
+const smtpHost = cleanStr(process.env.SMTP_HOST) || 'smtp.gmail.com';
+const envPort = parseInt(cleanStr(process.env.SMTP_PORT) || '', 10);
+// Prefer Port 465 (SSL) for reliable cloud deployment (avoids port 587 firewall blocks), fallback to 587
+const smtpPort = !isNaN(envPort) && envPort > 0 ? envPort : 465;
+const smtpUser = cleanStr(process.env.SMTP_USER) || 'olivepizzarjn@gmail.com';
+const smtpPass = cleanSecret(process.env.SMTP_PASS);
+
+const createSmtpTransporter = (port: number) => {
+  return nodemailer.createTransport({
+    host: smtpHost,
+    port: port,
+    secure: port === 465,
+    auth: {
+      user: smtpUser,
+      pass: smtpPass,
+    },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
+    tls: {
+      rejectUnauthorized: false
+    }
+  });
+};
+
+// Primary reusable transporter object
+export const transporter = createSmtpTransporter(smtpPort);
 
 /**
  * Direct Send Immediate Helper — bypasses DB queue for urgent transactional delivery
+ * Features automatic dual-port fallback (465 SSL <-> 587 STARTTLS) to survive cloud egress firewall rules.
  */
 export const sendEmailDirect = async (
   recipient: string,
@@ -41,13 +51,32 @@ export const sendEmailDirect = async (
   htmlContent: string,
   attachments?: any[]
 ) => {
-  return await transporter.sendMail({
-    from: process.env.SMTP_FROM || '"Olive Pizza" <noreply@olivepizza.app>',
-    to: recipient,
-    subject: subject,
-    html: htmlContent,
-    attachments: attachments,
-  });
+  const fromAddress = cleanStr(process.env.SMTP_FROM) || '"Olive Pizza" <noreply@olivepizza.app>';
+  try {
+    return await transporter.sendMail({
+      from: fromAddress,
+      to: recipient,
+      subject: subject,
+      html: htmlContent,
+      attachments: attachments,
+    });
+  } catch (primaryErr: any) {
+    console.warn(`[EmailDirect] Primary SMTP send failed on port ${smtpPort} (${primaryErr.message}). Attempting fallback transport...`);
+    const fallbackPort = smtpPort === 465 ? 587 : 465;
+    try {
+      const fallbackTransporter = createSmtpTransporter(fallbackPort);
+      return await fallbackTransporter.sendMail({
+        from: fromAddress,
+        to: recipient,
+        subject: subject,
+        html: htmlContent,
+        attachments: attachments,
+      });
+    } catch (fallbackErr: any) {
+      console.error(`[EmailDirect] Fallback SMTP send failed on port ${fallbackPort}:`, fallbackErr.message);
+      throw fallbackErr;
+    }
+  }
 };
 
 // Verify SMTP Connection on Startup (non-blocking)
