@@ -85,13 +85,16 @@ jobs:
             2>&1 | xcpretty || true
 
       - name: Export Signed IPA (if signing secrets exist)
-        if: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' }}
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          if [ -z "$APPLE_CERTIFICATE_BASE64" ] || [ -z "$APPLE_PROVISIONING_PROFILE_BASE64" ]; then
+            echo "Signing secrets not configured — will package with Mach-O ad-hoc signature in next step."
+            exit 0
+          fi
           echo "Signing configured — exporting IPA..."
           echo "$APPLE_CERTIFICATE_BASE64" | base64 -d > /tmp/certificate.p12
           echo "$APPLE_PROVISIONING_PROFILE_BASE64" | base64 -d > /tmp/profile.mobileprovision
