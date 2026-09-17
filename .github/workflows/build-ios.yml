@@ -132,7 +132,22 @@ jobs:
             cp -r "$ARCHIVE_PATH/Products/Applications/"*.app /tmp/Payload/ || true
             if [ -d "/tmp/Payload" ] && [ "$(ls -A /tmp/Payload)" ]; then
               echo "Applying ad-hoc signature to satisfy Mach-O binary requirements..."
-              codesign --force --deep --sign - /tmp/Payload/*.app || true
+              APP_BUNDLE=$(ls -d /tmp/Payload/*.app | head -n 1)
+              echo "Packaging and signing app bundle: $APP_BUNDLE"
+              # 1. Sign embedded frameworks and dynamic libraries inside-out (critical: dyld aborts if frameworks lack code signature)
+              if [ -d "$APP_BUNDLE/Frameworks" ]; then
+                echo "Ad-hoc signing embedded frameworks..."
+                find "$APP_BUNDLE/Frameworks" -depth -type d -name "*.framework" -exec codesign --force --sign - --timestamp=none {} + || true
+                find "$APP_BUNDLE/Frameworks" -type f -name "*.dylib" -exec codesign --force --sign - --timestamp=none {} + || true
+              fi
+              # 2. Sign app extensions inside PlugIns (if any)
+              if [ -d "$APP_BUNDLE/PlugIns" ]; then
+                echo "Ad-hoc signing app extensions..."
+                find "$APP_BUNDLE/PlugIns" -depth -type d -name "*.appex" -exec codesign --force --sign - --timestamp=none {} + || true
+              fi
+              # 3. Sign the main application bundle
+              echo "Ad-hoc signing main bundle: $(basename "$APP_BUNDLE")"
+              codesign --force --sign - --timestamp=none "$APP_BUNDLE" || true
               cd /tmp
               zip -r "${{ github.workspace }}/release-ios/${IPA_NAME}" Payload
               cd ${{ github.workspace }}
