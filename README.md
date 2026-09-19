@@ -1,74 +1,152 @@
-# 🍕 Olive Pizza Owner — Standalone Management Platform
+# 🍕 Olive Pizza Owner & Canonical Central Backend
 
-A standalone, production-focused restaurant management web application and Android app built for **Olive Pizza**.
+[![Node.js](https://img.shields.io/badge/Node.js-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Express](https://img.shields.io/badge/Express-4.21-000000?logo=express&logoColor=white)](https://expressjs.com/)
+[![React](https://img.shields.io/badge/React-19.0-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![Firebase Admin](https://img.shields.io/badge/Firebase_Admin-13.10-FFCA28?logo=firebase&logoColor=black)](https://firebase.google.com/)
+[![WebSocket](https://img.shields.io/badge/WebSocket-Ring_Buffer-010101?logo=socket.io&logoColor=white)](https://github.com/websockets/ws)
+[![License](https://img.shields.io/badge/License-Proprietary-red.svg)]()
 
----
-
-## 🌟 Overview
-
-- **Purpose**: Unified control center for orders, menu, delivery fleet, financial reports, SDUI layout management, and operational diagnostics.
-- **Architecture**: Lightweight React 19 + TypeScript client connecting directly to the central Olive Pizza Backend, Firestore, Firebase Auth, FCM, and Cloudinary.
-- **Platforms**:
-  1. **Owner Web App**: Responsive desktop and tablet dashboard with dense operational tables and charts.
-  2. **Owner Android App**: Native Capacitor container with full-screen emergency order alerts and background push notifications.
+> This repository houses the **Canonical Central Backend** (Port 5000) serving the entire Olive Pizza ecosystem, along with the **Owner Platform Console** (Port 5174) for global platform administration.
 
 ---
 
-## 🚀 Quick Start
+## 🏗️ Architecture & Component Overview
+
+```
+olive-pizza-owner/
+├── backend/                  # Canonical Central Backend (Port 5000)
+│   ├── src/
+│   │   ├── routes/           # REST API routes (orders, auth, franchises, sdui, etc.)
+│   │   ├── services/         # State machines, notifications, WebSockets, R2, Sheets
+│   │   │   ├── notification/ # NotificationRouter & NotificationTemplates (Full Info)
+│   │   │   ├── websocket/    # WebSocketServer with 200-event Monotonic Ring Buffer
+│   │   │   ├── scoping/      # FranchiseScopeService (Multi-tenant RBAC)
+│   │   │   └── sdui/         # Server-Driven UI engine with Google Stitch
+│   │   └── tests/            # Automated test suites
+│   └── server.ts             # Main backend entry point
+└── frontend/                 # Owner Web & Mobile Console (Port 5174)
+    ├── src/
+    │   ├── pages/            # Franchises, Products, Analytics, SDUI Manager
+    │   └── components/       # Provisioning wizard, Stitch UI designer, Audio alarms
+    └── vite.config.ts        # Vite configuration
+```
+
+---
+
+## ⚙️ 1. Canonical Central Backend (`backend/` — Port 5000)
+
+The single authoritative business engine for all six client apps (Customer, Owner, Franchise, Restaurant Manager, Delivery, POS).
+
+### Key Systems & Responsibilities:
+1. **Multi-Tenancy & Scoping (`FranchiseScopeService.ts`)**:
+   - Resolves effective user scope (`GLOBAL_OWNER`, `FRANCHISE_OWNER`, `BRANCH_MANAGER`, `CASHIER`, `RIDER`).
+   - Regular staff are strictly bound to their assigned branch.
+   - Global Owners (`olivepizzarjn@gmail.com`, `webhub2811@gmail.com`) maintain platform-wide access.
+2. **Order State Machine (`OrderStateMachine.ts`)**:
+   - 16 certified lifecycle transitions (`pending` ➔ `accepted` ➔ `preparing` ➔ `ready` ➔ `out_for_delivery` ➔ `delivered`).
+   - Concurrency locking with `order_locks` and immutable audit logs in `order_audit_logs`.
+3. **Critical Full-Information Alert Dispatcher (`NotificationTemplates.ts`)**:
+   - Compiles un-truncated order line items with sizes, crusts, add-ons, and pricing.
+   - Complete financial breakdown (Subtotal, Packaging, Delivery, Taxes, Grand Total).
+   - High-visibility payment collection badge (`⚠️ CASH TO COLLECT: ₹XXX` vs `✅ ONLINE PAYMENT: PAID IN FULL`).
+   - High-urgency FCM channels (`olive_order_alarm_v3`, `olive_delivery_alarm_v3`) with action buttons (`ACCEPT`, `REJECT`, `VIEW`, `OPEN_LOCATION`).
+   - Serializes full order payload into `data.fullOrderJson`.
+4. **WebSocket Server with Monotonic Ring Buffer (`WebSocketServer.ts`)**:
+   - Bidirectional real-time event streaming on `/ws`.
+   - In-memory 200-event rolling ring buffer per branch (`${franchiseId}:${branchId}`).
+   - Monotonic sequence numbers with reconnection sync (`sync_request` / `sync_response`) for zero-loss Wi-Fi reconnects.
+5. **Dual Persistence & Background Workers**:
+   - Sub-100ms Firestore commits for all POS bills and orders.
+   - Non-blocking sync to Google Sheets monthly franchise workbooks with offline retry.
+   - Automated `DataRetentionJob` enforcing 5-minute raw GPS telemetry retention.
+
+---
+
+## 🖥️ 2. Owner Platform Console (`frontend/` — Port 5174)
+
+The executive command center for platform directors and administrators.
+
+### Key Features:
+- **7-Step Multi-Tenancy Provisioning Wizard (`/franchises`)**:
+  - Atomic setup of franchises, owner accounts, branches, branch managers, GPS boundaries, and POS terminal hardware tokens.
+- **Context-Switching Launchers**:
+  - 1-click single-sign-on delegation to Franchise Suite (Port 5175) or Restaurant KDS (Port 5176) using secure temporary context session tokens (`POST /api/auth/context-session`).
+- **SDUI Visual Designer (`/home-manager`)**:
+  - Visual layout editor for the Customer app homepage.
+  - Integration with **Google Stitch** visual design engine and **DeepSeek V4 Flash** prompt enhancement.
+  - Full preview-before-publish safety, version rollback, and Firestore deployment.
+- **Product Catalog & AI Studio (`/products`)**:
+  - AI prompt enhancement and image generation models (Qwen Image, FLUX.1-dev, SD 3.5 Large).
+- **Continuous Emergency Audio Alarm**:
+  - High-priority looping audio alarm alerting operators of orders awaiting confirmation.
+
+---
+
+## ⚡ Quick Start & Development
 
 ### 1. Prerequisites
 - Node.js `v20+` or `v22+`
-- Main Olive Pizza Backend running on `http://localhost:3000` (or configured production backend)
+- Firebase Service Account Key
+- PostgreSQL database instance
 
-### 2. Installation
+### 2. Running the Canonical Backend
 ```bash
-# Clone or enter the project directory
-cd olive-pizza-owner
+cd backend
 
 # Install dependencies
 npm install
-```
 
-### 3. Environment Variables
-Copy `.env.example` to `.env` and verify your settings:
-```bash
-cp .env.example .env
-```
+# Run TypeScript build
+npm run build
 
-### 4. Running Locally
+# Start backend in development mode with hot reload
+npm run dev
+# Or start production server
+npm start
+```
+*Backend runs on `http://localhost:5000` (WebSocket on `ws://localhost:5000/ws`).*
+
+### 3. Running the Owner Frontend
 ```bash
-# Starts development server on http://localhost:5174
+cd frontend
+
+# Install dependencies
+npm install
+
+# Start Vite dev server on port 5174
 npm run dev
 ```
+*Frontend runs on `http://localhost:5174`.*
 
-### 5. Building for Production
+---
+
+## 🧪 Automated Testing
+
+Run the automated backend test suites:
 ```bash
-npm run build
-```
+cd backend
 
-### 6. Android App (Capacitor)
-```bash
-# Sync web build to Android project
-npx cap sync android
+# Test Critical Order Alert templates and payload non-truncation
+npx tsx src/tests/test_critical_order_alert_templates.ts
 
-# Open Android Studio
-npx cap open android
+# Test WebSocket monotonic sequence numbering, branch isolation, and ring buffer sync
+npx tsx src/tests/test_websocket_ring_buffer.ts
 ```
 
 ---
 
 ## 🛡️ Security & Strict Access Rules
 
-- **Allowed Owner Accounts**:
+- **Authorized Internal Accounts**:
   - `olivepizzarjn@gmail.com`
   - `webhub2811@gmail.com`
-- Any unapproved account attempting to sign in is blocked at the authentication gate with:
-  *"Owner access is not available for this account."*
-- Every protected backend request automatically attaches `Authorization: Bearer <Firebase_ID_Token>`.
+- All sensitive API keys, Firebase Admin credentials, Cloudflare R2 secrets, and database passwords reside strictly on the server.
+- Zero client secrets exposed to frontend applications.
 
 ---
 
-## 📂 Feature Parity & API Specs
+## 📄 License
 
-- See [`OWNER_FEATURE_PARITY.md`](./OWNER_FEATURE_PARITY.md) for full feature mappings.
-- See [`OWNER_API_CONTRACT.md`](./OWNER_API_CONTRACT.md) for endpoint contracts.
+Proprietary Software — All rights reserved by **Olive Pizza**, Rajnandgaon, Chhattisgarh, India.

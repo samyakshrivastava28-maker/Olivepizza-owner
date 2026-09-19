@@ -1044,18 +1044,36 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
       try {
         const branchStaffUids = await notificationEngine.resolveBranchStaff(resolvedBranchId, resolvedFranchiseId);
         if (branchStaffUids.length > 0) {
+          const isCod = (req.body.paymentMethod || 'COD').toUpperCase() === 'COD';
           const restaurantPayload = RestaurantTemplates.newOrder(newOrderId, {
-            customerName: userData.name || 'Customer',
+            customerName: userData.name || (req.user as any)?.name || 'Customer',
             orderNumber,
+            permanentBillNo: permanentBillNo || undefined,
+            orderType: deliveryType,
             totalAmount: finalOrderTotal,
-            items: validatedItems.map(i => i.name + ' x' + i.quantity),
+            items: validatedItems,
             paymentMethod: req.body.paymentMethod || 'COD',
+            paymentStatus: isCod ? 'PENDING' : 'PAID',
+            cashToCollect: isCod ? finalOrderTotal : 0,
             deliveryAddress: userAddress || 'Pickup',
+            deliveryInstructions: req.body.deliveryInstructions || req.body.instructions || '',
+            customerNotes: req.body.customerNotes || req.body.notes || '',
+            lat: effectiveLocation?.lat,
+            lng: effectiveLocation?.lng,
             phone: userPhone,
             branchId: resolvedBranchId,
             franchiseId: resolvedFranchiseId,
             orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
             version: 1,
+            financials: {
+              subtotal: serverCalculatedTotal,
+              discount: discountAmount,
+              deliveryFee,
+              taxes,
+              packagingCharge: req.body.packagingCharge || 0,
+              couponCode: appliedCouponCode || undefined,
+              total: finalOrderTotal
+            }
           });
           await notificationEngine.sendBulk(branchStaffUids, restaurantPayload, {
             eventId: `order_created_restaurant_${newOrderId}`,
@@ -1315,6 +1333,21 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
       return res.status(400).json({ success: false, error: prepResult.error, requestId });
     }
 
+    // Record immutable audit trail
+    adminDb.collection('order_audit_logs').add({
+      orderId: id,
+      action: 'ORDER_ACCEPTED',
+      actorUid: uid,
+      actorRole: effectiveRole,
+      actorName: name,
+      branchId: orderBranchId,
+      franchiseId: orderData.franchiseId || 'default',
+      timestamp: new Date().toISOString(),
+      previousStatus: currentStatus,
+      newStatus: 'preparing',
+      details: { requestId }
+    }).catch(err => console.warn('[Audit] Failed to log order acceptance:', err.message));
+
     res.json({
       success: true,
       message: `Order #${orderData.orderNumber || id} accepted and baking started`,
@@ -1389,14 +1422,31 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
       });
     }
 
+    const cancellationReason = req.body.reason || 'Restaurant is at full capacity';
     const result = await OrderStateMachine.transition(id, 'cancelled', { uid, role: effectiveRole, name, branchId: orderBranchId }, {
-      cancellationReason: req.body.reason || 'Restaurant is at full capacity',
+      cancellationReason,
       cancellationSource: 'restaurant_manager'
     });
 
     if (!result.success) {
       return res.status(400).json({ success: false, error: result.error, requestId });
     }
+
+    // Record immutable audit trail
+    adminDb.collection('order_audit_logs').add({
+      orderId: id,
+      action: 'ORDER_REJECTED',
+      actorUid: uid,
+      actorRole: effectiveRole,
+      actorName: name,
+      branchId: orderBranchId,
+      franchiseId: orderData.franchiseId || 'default',
+      timestamp: new Date().toISOString(),
+      previousStatus: currentStatus,
+      newStatus: 'cancelled',
+      reason: cancellationReason,
+      details: { requestId }
+    }).catch(err => console.warn('[Audit] Failed to log order rejection:', err.message));
 
     res.json({
       success: true,
@@ -1409,6 +1459,84 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
   } catch (error: any) {
     console.error('[Orders] Reject action failed:', error);
     res.status(500).json({ success: false, error: error.message || 'Failed to reject order', requestId });
+  }
+});
+
+// Restaurant Manager / Staff / POS Acknowledge Order Action (Mutes alarm and records acknowledgement)
+router.post('/:id/acknowledge', verifyToken, async (req: AuthRequest, res: Response) => {
+  const requestId = `req_ack_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  try {
+    const { id } = req.params;
+    const userRole = (req.user?.role || '').toLowerCase();
+    const emailLower = (req.user?.email || '').toLowerCase();
+    const uid = req.user?.uid;
+    const userBranchId = req.user?.branchId;
+    const name = (req.user as any)?.name || req.user?.email || 'Staff';
+    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
+
+    let effectiveRole = userRole;
+    if (userRole === 'owner' || userRole === 'admin' || isMasterAccount) {
+      effectiveRole = 'restaurant_manager';
+    } else if (userRole === 'manager' || userRole === 'kitchen_manager' || userRole === 'chef') {
+      effectiveRole = 'restaurant_manager';
+    }
+
+    const isAuthorizedStaff = ['restaurant_manager', 'kitchen_staff', 'cashier', 'pos', 'delivery_partner'].includes(effectiveRole);
+    if (!isAuthorizedStaff || !uid) {
+      return res.status(403).json({ success: false, error: 'Unauthorized: Operational authorization required to acknowledge order', requestId });
+    }
+
+    const orderRef = adminDb.collection('orders').doc(id);
+    const orderDoc = await orderRef.get();
+    if (!orderDoc.exists) {
+      return res.status(404).json({ success: false, error: 'Order not found', requestId });
+    }
+
+    const orderData = orderDoc.data()!;
+    const orderBranchId = orderData.branchId || 'main_branch';
+
+    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
+        requestId
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    await orderRef.update({
+      isAcknowledged: true,
+      acknowledgedAt: nowIso,
+      acknowledgedBy: { uid, name, role: effectiveRole },
+      alarmSilenced: true,
+      updatedAt: nowIso
+    });
+
+    // Record immutable audit trail
+    adminDb.collection('order_audit_logs').add({
+      orderId: id,
+      action: 'ORDER_ACKNOWLEDGED',
+      actorUid: uid,
+      actorRole: effectiveRole,
+      actorName: name,
+      branchId: orderBranchId,
+      franchiseId: orderData.franchiseId || 'default',
+      timestamp: nowIso,
+      status: orderData.status,
+      details: { requestId }
+    }).catch(err => console.warn('[Audit] Failed to log order acknowledgement:', err.message));
+
+    res.json({
+      success: true,
+      message: `Order #${orderData.orderNumber || id} acknowledged successfully`,
+      orderId: id,
+      isAcknowledged: true,
+      acknowledgedAt: nowIso,
+      requestId
+    });
+  } catch (error: any) {
+    console.error('[Orders] Acknowledge action failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to acknowledge order', requestId });
   }
 });
 

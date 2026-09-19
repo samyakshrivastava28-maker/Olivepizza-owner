@@ -310,6 +310,13 @@ function buildPayload(title: string, body: string, opts: BuildOptions): Notifica
   if (opts.actions) safeData.actions = JSON.stringify(opts.actions);
   if (opts.vibrate) safeData.vibrate = JSON.stringify(opts.vibrate);
 
+  // Copy any additional custom string attributes (fullOrderJson, cashToCollect, orderType, etc.)
+  for (const [k, v] of Object.entries(opts)) {
+    if (v !== undefined && v !== null && typeof v === 'string' && safeData[k] === undefined) {
+      safeData[k] = v;
+    }
+  }
+
   const basePayload: any = {
     data: safeData,
     android: {
@@ -495,15 +502,18 @@ export function buildLiveActivityPayload(
 // =============================================================================
 export class RestaurantTemplates {
   /**
-   * New Order for Restaurant Management — with REAL actionable buttons: [ ACCEPT ] [ REJECT ]
-   * Features: customer name, masked phone, product image thumbnail, item customizations,
-   * financial breakdown (subtotal, offers, taxes, total), payment method/status.
+   * New Order for Restaurant Management & Staff — FULL INFORMATION CRITICAL ORDER ALERT.
+   * Delivers zero-truncation item lists, exact menu names, variant/size, crust, add-ons with prices,
+   * complete financial breakdown, payment method/status with COD cash to collect, delivery address,
+   * delivery instructions, customer notes, map coordinates, and actionable controls.
    */
   static newOrder(
     orderId: string,
     payload: {
       customerName: string;
       orderNumber: string;
+      permanentBillNo?: number | string;
+      orderType?: string;
       totalAmount: number;
       items: Array<{
         name: string;
@@ -511,11 +521,23 @@ export class RestaurantTemplates {
         size?: string;
         crust?: string;
         customizations?: string[];
+        addons?: Array<{ name: string; price?: number } | string>;
+        unitPrice?: number;
+        price?: number;
+        subtotal?: number;
+        instructions?: string;
         image?: string;
       }> | string[];
       paymentMethod: string;
       paymentStatus?: string;
+      amountPaid?: number;
+      amountRemaining?: number;
+      cashToCollect?: number;
       deliveryAddress?: string;
+      deliveryInstructions?: string;
+      customerNotes?: string;
+      lat?: number;
+      lng?: number;
       phone?: string;
       orderTime?: string;
       branchId?: string;
@@ -524,52 +546,120 @@ export class RestaurantTemplates {
       productImageThumbnail?: string;
       financials?: {
         subtotal?: number;
+        additionsTotal?: number;
         discount?: number;
         deliveryFee?: number;
+        packagingCharge?: number;
+        taxes?: number;
         gst?: number;
+        cgst?: number;
+        sgst?: number;
+        couponCode?: string;
         total?: number;
       };
+      rawOrder?: any;
     }
   ): NotificationPayload {
-    // Format item strings and extract first image
+    // 1. Format complete item lines (NO 3-item truncation — full item list)
     let itemStrings: string[] = [];
     let firstImage = payload.productImageThumbnail || '';
 
     if (Array.isArray(payload.items)) {
       itemStrings = payload.items.map(item => {
-        if (typeof item === 'string') return item;
+        if (typeof item === 'string') return `• ${item}`;
         if (!firstImage && item.image) firstImage = item.image;
-        const customPart = item.customizations && item.customizations.length > 0 ? ` (+${item.customizations.join(', ')})` : '';
+        const sizePart = item.size ? ` (${item.size})` : '';
         const crustPart = item.crust ? ` [${item.crust}]` : '';
-        const sizePart = item.size ? ` ${item.size}` : '';
-        return `${item.quantity}× ${item.name}${sizePart}${crustPart}${customPart}`;
+        const rawAddons = (item as any).addons || (item as any).addOns;
+        const addonsList = Array.isArray(rawAddons)
+          ? rawAddons.map((a: any) => typeof a === 'object' ? `${a.name}${a.price ? ` (+₹${a.price})` : ''}` : a).filter(Boolean)
+          : (item.customizations || []);
+        const customPart = addonsList.length > 0 ? ` +${addonsList.join(', ')}` : '';
+        const price = item.subtotal || ((item.unitPrice || item.price || 0) * (item.quantity || 1));
+        const pricePart = price ? ` — ₹${price}` : '';
+        const instPart = item.instructions ? ` (Note: ${item.instructions})` : '';
+        return `• ${item.quantity}× ${item.name}${sizePart}${crustPart}${customPart}${pricePart}${instPart}`;
       });
     }
 
-    // Mask phone number (e.g., 9179944445 -> ••••••••45)
-    let maskedPhone = payload.phone || '';
-    if (maskedPhone && maskedPhone.length >= 4) {
-      maskedPhone = '••••••••' + maskedPhone.slice(-2);
-    }
+    const isPickup = (payload.orderType || '').toLowerCase().includes('pickup') || (payload.orderType || '').toLowerCase().includes('takeaway');
+    const orderTypeLabel = isPickup ? 'Pickup / Takeaway' : 'Home Delivery';
+
+    const isCod = (payload.paymentMethod || '').toUpperCase() === 'COD' || (payload.paymentMethod || '').toUpperCase().includes('CASH');
+    const paymentStatus = (payload.paymentStatus || (isCod ? 'PENDING' : 'PAID')).toUpperCase();
+    const cashToCollect = payload.cashToCollect !== undefined ? payload.cashToCollect : (isCod ? payload.totalAmount : 0);
 
     const title = `🍕 NEW ORDER #${payload.orderNumber} • ₹${payload.totalAmount}`;
-    const itemsPreview = itemStrings.slice(0, 3).join('\n• ');
-    const itemsMore = itemStrings.length > 3 ? `\n... and ${itemStrings.length - 3} more items` : '';
+
+    // Financial breakdown summary line
+    const fin = payload.financials;
+    const finParts: string[] = [];
+    if (fin) {
+      if (fin.subtotal) finParts.push(`Subtotal: ₹${fin.subtotal}`);
+      if (fin.discount) finParts.push(`Discount: -₹${fin.discount}${fin.couponCode ? ` (${fin.couponCode})` : ''}`);
+      if (fin.deliveryFee) finParts.push(`Delivery: ₹${fin.deliveryFee}`);
+      if (fin.packagingCharge) finParts.push(`Packaging: ₹${fin.packagingCharge}`);
+      if (fin.taxes || fin.gst) finParts.push(`Taxes: ₹${fin.taxes || fin.gst}`);
+    }
+
+    const customerLine = `👤 Customer: ${payload.customerName}${payload.phone ? ` (${payload.phone})` : ''}`;
+    const paymentLine = isCod
+      ? `💵 Payment: CASH ON DELIVERY (${paymentStatus}) • CASH TO COLLECT: ₹${cashToCollect}`
+      : `💳 Payment: ${(payload.paymentMethod || 'ONLINE').toUpperCase()} (${paymentStatus}) • Amount: ₹${payload.totalAmount}`;
 
     const bodyLines = [
-      `Customer: ${payload.customerName}${maskedPhone ? ` (${maskedPhone})` : ''}`,
-      `Items:\n• ${itemsPreview}${itemsMore}`,
-      `Payment: ${payload.paymentMethod?.toUpperCase()} (${payload.paymentStatus || 'PENDING'})`,
-      payload.deliveryAddress ? `📍 ${payload.deliveryAddress}` : ''
+      `📦 Order Type: ${orderTypeLabel}${payload.permanentBillNo ? ` (Bill #${payload.permanentBillNo})` : ''}`,
+      customerLine,
+      `Items (${itemStrings.length}):\n${itemStrings.join('\n')}`,
+      finParts.length > 0 ? finParts.join(' | ') : '',
+      `Total: ₹${payload.totalAmount}`,
+      paymentLine,
+      payload.deliveryAddress ? `📍 Address:\n${payload.deliveryAddress}` : '',
+      payload.deliveryInstructions ? `📝 Instructions: "${payload.deliveryInstructions}"` : '',
+      payload.customerNotes ? `💬 Notes: "${payload.customerNotes}"` : '',
     ].filter(Boolean);
 
-    const body = bodyLines.join('\n');
+    const body = bodyLines.join('\n\n');
+
+    // Build complete serialized order entity for instant in-app modal rendering without network roundtrips
+    const fullOrderData = {
+      orderId,
+      orderNumber: payload.orderNumber,
+      permanentBillNo: payload.permanentBillNo,
+      orderType: payload.orderType || 'delivery',
+      orderTypeLabel,
+      orderTime: payload.orderTime || new Date().toISOString(),
+      customerName: payload.customerName,
+      phone: payload.phone,
+      customer: {
+        name: payload.customerName,
+        phone: payload.phone,
+        address: payload.deliveryAddress,
+        instructions: payload.deliveryInstructions || payload.customerNotes,
+        lat: payload.lat,
+        lng: payload.lng
+      },
+      totalAmount: payload.totalAmount,
+      paymentMethod: payload.paymentMethod,
+      paymentStatus,
+      cashToCollect,
+      items: payload.items,
+      financials: payload.financials,
+      deliveryAddress: payload.deliveryAddress,
+      deliveryInstructions: payload.deliveryInstructions,
+      customerNotes: payload.customerNotes,
+      lat: payload.lat,
+      lng: payload.lng,
+      branchId: payload.branchId || 'main_branch',
+      franchiseId: payload.franchiseId || 'fra_rajnandgaon',
+      status: 'pending'
+    };
 
     return buildPayload(title, body, {
       tag: `order_restaurant_${orderId}`,
       channelId: ANDROID_CHANNELS.ORDER_NEW,
       orderId,
-      url: `/restaurant/live-orders`,
+      url: `/restaurant/live-orders?orderId=${encodeURIComponent(orderId)}`,
       sound: 'new_order',
       category: 'alarm_actionable' as any,
       priority: 'critical',
@@ -589,14 +679,29 @@ export class RestaurantTemplates {
       vibrate: [300, 200, 300, 200, 300],
       actions: [
         { action: 'ACCEPT', title: 'ACCEPT ORDER' },
-        { action: 'REJECT', title: 'REJECT' },
-        { action: 'VIEW', title: 'VIEW ORDER' },
+        { action: 'REJECT', title: 'REJECT ORDER' },
+        { action: 'VIEW', title: 'VIEW FULL ORDER' },
+        { action: 'OPEN_LOCATION', title: 'OPEN LOCATION' },
       ],
       currentStatus: 'pending',
       serverTimestamp: new Date().toISOString(),
       actionUrlAccept: `/api/orders/${orderId}/accept`,
       actionUrlReject: `/api/orders/${orderId}/reject`,
-      branchId: payload.branchId || 'main_branch'
+      actionUrlAcknowledge: `/api/orders/${orderId}/acknowledge`,
+      branchId: payload.branchId || 'main_branch',
+      image: firstImage || undefined,
+      fullOrderJson: JSON.stringify(fullOrderData),
+      customerPhone: payload.phone || '',
+      customerName: payload.customerName,
+      deliveryAddress: payload.deliveryAddress || '',
+      deliveryInstructions: payload.deliveryInstructions || '',
+      orderType: payload.orderType || 'delivery',
+      permanentBillNo: payload.permanentBillNo ? String(payload.permanentBillNo) : '',
+      paymentMethod: payload.paymentMethod || 'COD',
+      paymentStatus,
+      cashToCollect: String(cashToCollect),
+      lat: payload.lat ? String(payload.lat) : '',
+      lng: payload.lng ? String(payload.lng) : ''
     });
   }
 
@@ -788,7 +893,7 @@ export class OwnerTemplates {
 // =============================================================================
 export class DeliveryTemplates {
 
-  /** New delivery assignment — CRITICAL, each order has its own notification */
+  /** New delivery assignment — CRITICAL, full rider information with actionable navigation */
   static newAssignment(
     orderId: string,
     payload: {
@@ -796,10 +901,16 @@ export class DeliveryTemplates {
       customerName: string;
       customerPhone: string;
       deliveryAddress: string;
+      deliveryInstructions?: string;
       distance: string;
       eta: string;
       totalAmount: number;
       paymentMethod: string;
+      paymentStatus?: string;
+      cashToCollect?: number;
+      items?: any[];
+      lat?: number;
+      lng?: number;
       version?: number;
       notificationId?: string;
       eventId?: string;
@@ -807,19 +918,30 @@ export class DeliveryTemplates {
       eventTimestamp?: string;
     }
   ): NotificationPayload {
-    const title = `📦 New Delivery • ${payload.distance}`;
+    const isCod = (payload.paymentMethod || '').toUpperCase() === 'COD' || (payload.paymentMethod || '').toUpperCase().includes('CASH');
+    const paymentStatus = (payload.paymentStatus || (isCod ? 'PENDING' : 'PAID')).toUpperCase();
+    const cashToCollect = payload.cashToCollect !== undefined ? payload.cashToCollect : (isCod ? payload.totalAmount : 0);
+
+    const title = `🚴 NEW DELIVERY #${payload.orderNumber} • ₹${payload.totalAmount}`;
+    const itemsFormatted = Array.isArray(payload.items)
+      ? payload.items.map(it => typeof it === 'string' ? `• ${it}` : `• ${it.quantity || 1}× ${it.name}`).join('\n')
+      : '';
+
     const body = [
-      `#${payload.orderNumber} — ${payload.customerName}`,
-      `₹${payload.totalAmount} • ${payload.paymentMethod}`,
-      `📍 ${payload.deliveryAddress}`,
-      `⏱ ETA: ${payload.eta}`,
-    ].join('\n');
+      `Customer: ${payload.customerName} (${payload.customerPhone})`,
+      itemsFormatted ? `Items:\n${itemsFormatted}` : '',
+      `Total: ₹${payload.totalAmount}`,
+      isCod ? `💵 Collect Cash: ₹${cashToCollect}` : `💳 Payment: ${(payload.paymentMethod || 'ONLINE').toUpperCase()} (${paymentStatus})`,
+      `📍 Delivery Address:\n${payload.deliveryAddress}`,
+      payload.deliveryInstructions ? `📝 Instructions: "${payload.deliveryInstructions}"` : '',
+      `⏱ Distance & ETA: ${payload.distance} • ${payload.eta}`,
+    ].filter(Boolean).join('\n\n');
 
     return buildPayload(title, body, {
       tag: `order_delivery_${orderId}`,
       channelId: ANDROID_CHANNELS.DELIVERY_ASSIGNMENT,
       orderId,
-      url: `/delivery/dashboard`,
+      url: `/delivery/live-orders?orderId=${encodeURIComponent(orderId)}`,
       sound: 'delivery_assigned',
       category: 'alarm_actionable' as any,
       priority: 'critical',
@@ -831,8 +953,10 @@ export class DeliveryTemplates {
       notificationId: `delivery_assign_${orderId}`,
       vibrate: [200, 100, 200, 100, 400],
       actions: [
-        { action: 'ACCEPT_DELIVERY', title: '✅ Accept' },
-        { action: 'DECLINE_DELIVERY', title: '❌ Decline' },
+        { action: 'ACCEPT_DELIVERY', title: 'ACCEPT DELIVERY' },
+        { action: 'OPEN_LOCATION', title: 'OPEN LOCATION' },
+        { action: 'CALL_CUSTOMER', title: 'CALL CUSTOMER' },
+        { action: 'VIEW_ORDER', title: 'VIEW ORDER' },
       ],
       actionUrlAccept: `/api/delivery/rider/orders/${orderId}/accept`,
       actionUrlReject: `/api/delivery/rider/orders/${orderId}/decline`,
@@ -841,6 +965,14 @@ export class DeliveryTemplates {
       currentStatus: 'partner_assigned',
       eventTimestamp: payload.eventTimestamp,
       serverTimestamp: new Date().toISOString(),
+      customerPhone: payload.customerPhone,
+      customerName: payload.customerName,
+      deliveryAddress: payload.deliveryAddress,
+      deliveryInstructions: payload.deliveryInstructions || '',
+      cashToCollect: String(cashToCollect),
+      paymentMethod: payload.paymentMethod,
+      lat: payload.lat ? String(payload.lat) : '',
+      lng: payload.lng ? String(payload.lng) : '',
     });
   }
 

@@ -27,10 +27,18 @@ export interface OrderRoutingContext {
   orderId: string;
   orderNumber: string;
   dailyOrderNumber?: number | string | null;
+  permanentBillNo?: number | string | null;
+  orderType?: string;
   totalAmount: number;
   items?: any[];
   paymentMethod?: string;
+  paymentStatus?: string;
+  cashToCollect?: number;
   deliveryAddress?: any;
+  deliveryInstructions?: string;
+  customerNotes?: string;
+  lat?: number;
+  lng?: number;
   contactPhone?: string;
   customerName?: string;
   userId?: string;
@@ -40,6 +48,9 @@ export interface OrderRoutingContext {
   branchName?: string;
   status?: string;
   orderTime?: string;
+  financials?: any;
+  productImageThumbnail?: string;
+  rawOrderData?: any;
 }
 
 export interface RecipientEvaluation {
@@ -233,17 +244,28 @@ export class NotificationRouter {
       const restaurantPayload = RestaurantTemplates.newOrder(order.orderId, {
         customerName: order.customerName || 'Customer',
         orderNumber,
+        permanentBillNo: order.permanentBillNo || undefined,
+        orderType: order.orderType || 'delivery',
         totalAmount: order.totalAmount,
-        items: Array.isArray(order.items)
-          ? order.items.map((i: any) => typeof i === 'string' ? i : `${i.quantity || 1}x ${i.name || 'Item'}`)
-          : [],
+        items: Array.isArray(order.items) ? order.items : [],
         paymentMethod: order.paymentMethod || 'COD',
-        deliveryAddress: order.deliveryAddress?.addressLine || order.deliveryAddress || 'Pickup',
+        paymentStatus: order.paymentStatus || 'PENDING',
+        cashToCollect: order.cashToCollect,
+        deliveryAddress: typeof order.deliveryAddress === 'object'
+          ? (order.deliveryAddress?.addressLine || order.deliveryAddress?.address || order.deliveryAddress?.fullAddress || 'Pickup')
+          : (order.deliveryAddress || 'Pickup'),
+        deliveryInstructions: order.deliveryInstructions,
+        customerNotes: order.customerNotes,
+        lat: order.lat,
+        lng: order.lng,
         phone: order.contactPhone,
         branchId: cleanBranchId,
         franchiseId: cleanFranchiseId,
         orderTime: order.orderTime || new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-        version: 1
+        version: 1,
+        financials: order.financials,
+        productImageThumbnail: order.productImageThumbnail,
+        rawOrder: order.rawOrderData
       });
 
       const res = await notificationEngine.sendBulk(finalUids, restaurantPayload, {
@@ -271,11 +293,19 @@ export class NotificationRouter {
         orderNumber,
         customerName: order.customerName || 'Customer',
         customerPhone: order.contactPhone || 'N/A',
-        deliveryAddress: order.deliveryAddress?.addressLine || order.deliveryAddress || 'Delivery Address',
+        deliveryAddress: typeof order.deliveryAddress === 'object'
+          ? (order.deliveryAddress?.addressLine || order.deliveryAddress?.address || order.deliveryAddress?.fullAddress || 'Delivery Address')
+          : (order.deliveryAddress || 'Delivery Address'),
+        deliveryInstructions: order.deliveryInstructions,
         distance: 'Nearby',
         eta: '30 mins',
         totalAmount: order.totalAmount,
-        paymentMethod: order.paymentMethod || 'COD'
+        paymentMethod: order.paymentMethod || 'COD',
+        paymentStatus: order.paymentStatus || 'PENDING',
+        cashToCollect: order.cashToCollect,
+        items: Array.isArray(order.items) ? order.items : [],
+        lat: order.lat,
+        lng: order.lng
       });
 
       const res = await notificationEngine.send(order.deliveryPartnerId, partnerPayload, {

@@ -39,8 +39,20 @@ export interface ConnectedClient {
   ws: WebSocket;
   uid: string;
   role?: string;
+  branchId?: string;
+  franchiseId?: string;
+  terminalId?: string;
   connectedAt: number;
+  lastSeenSeq?: number;
   subscribedOrders: Set<string>;
+}
+
+export interface BranchRingBufferEvent {
+  seq: number;
+  eventId: string;
+  type: string;
+  timestamp: string;
+  data: any;
 }
 
 export interface DriverLocationData {
@@ -63,6 +75,57 @@ class OliveWebSocketServer {
   private orderSubscribers = new Map<string, Set<ConnectedClient>>();
   private driverLocations = new Map<string, DriverLocationData>();
   private totalConnections = 0;
+  // Monotonic sequence numbering & ring buffer per branch (franchise:branch -> buffer)
+  private branchRingBuffers = new Map<string, { currentSeq: number; events: BranchRingBufferEvent[] }>();
+
+  /**
+   * Helper key for branch ring buffer map
+   */
+  private getBranchKey(franchiseId?: string, branchId?: string): string {
+    return `${franchiseId || 'default'}:${branchId || 'main_branch'}`;
+  }
+
+  /**
+   * Records an event into the branch ring buffer with monotonic sequence number.
+   * Buffer retains the last 200 events for reconnection sync.
+   */
+  public recordBranchEvent(franchiseId: string, branchId: string, type: string, eventId: string, data: any): BranchRingBufferEvent {
+    const key = this.getBranchKey(franchiseId, branchId);
+    let buf = this.branchRingBuffers.get(key);
+    if (!buf) {
+      buf = { currentSeq: 0, events: [] };
+      this.branchRingBuffers.set(key, buf);
+    }
+
+    buf.currentSeq += 1;
+    const event: BranchRingBufferEvent = {
+      seq: buf.currentSeq,
+      eventId: eventId || `${type}_${Date.now()}_${buf.currentSeq}`,
+      type,
+      timestamp: new Date().toISOString(),
+      data
+    };
+
+    buf.events.push(event);
+    if (buf.events.length > 200) {
+      buf.events = buf.events.slice(-200); // Keep last 200 events
+    }
+
+    return event;
+  }
+
+  /**
+   * Retrieve missed events for a client reconnecting with a known lastSequence.
+   */
+  public getMissedEvents(franchiseId: string, branchId: string, lastSequence: number): { currentSeq: number; missedEvents: BranchRingBufferEvent[] } {
+    const key = this.getBranchKey(franchiseId, branchId);
+    const buf = this.branchRingBuffers.get(key);
+    if (!buf) {
+      return { currentSeq: 0, missedEvents: [] };
+    }
+    const missed = buf.events.filter(e => e.seq > lastSequence);
+    return { currentSeq: buf.currentSeq, missedEvents: missed };
+  }
 
   /**
    * Attach to an existing Node.js HTTP server.
@@ -75,6 +138,9 @@ class OliveWebSocketServer {
     this.wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
       const url = new URL(req.url || '/', `ws://${req.headers.host || 'localhost'}`);
       const token = url.searchParams.get('token');
+      const branchIdParam = url.searchParams.get('branchId') || undefined;
+      const franchiseIdParam = url.searchParams.get('franchiseId') || undefined;
+      const terminalIdParam = url.searchParams.get('terminalId') || undefined;
       let uid = 'anonymous';
       let role = 'customer';
 
@@ -98,7 +164,10 @@ class OliveWebSocketServer {
       const client: ConnectedClient = { 
         ws, 
         uid, 
-        role, 
+        role,
+        branchId: branchIdParam,
+        franchiseId: franchiseIdParam,
+        terminalId: terminalIdParam,
         connectedAt: Date.now(),
         subscribedOrders: new Set<string>()
       };
@@ -108,14 +177,16 @@ class OliveWebSocketServer {
       if (!this.clients.has(uid)) this.clients.set(uid, new Set());
       this.clients.get(uid)!.add(client);
 
-      console.log(`[WebSocketServer] Client connected uid=${uid} role=${role} total=${this.totalConnections}`);
+      console.log(`[WebSocketServer] Client connected uid=${uid} role=${role} branch=${branchIdParam || 'none'} total=${this.totalConnections}`);
 
       // Send connection acknowledgment
       this.safeSend(ws, { 
         type: 'connected', 
         data: { 
           uid, 
-          role, 
+          role,
+          branchId: client.branchId,
+          franchiseId: client.franchiseId,
           timestamp: new Date().toISOString(),
           activeDriversCount: this.driverLocations.size
         } 
@@ -147,19 +218,62 @@ class OliveWebSocketServer {
 
               client.uid = authUid;
               client.role = authRole;
+              if (msg.branchId) client.branchId = msg.branchId;
+              if (msg.franchiseId) client.franchiseId = msg.franchiseId;
+              if (msg.terminalId) client.terminalId = msg.terminalId;
 
               if (!this.clients.has(authUid)) this.clients.set(authUid, new Set());
               this.clients.get(authUid)!.add(client);
 
-              console.log(`[WebSocketServer] Client authenticated via message: uid=${authUid} role=${authRole}`);
+              console.log(`[WebSocketServer] Client authenticated via message: uid=${authUid} role=${authRole} branch=${client.branchId || 'none'}`);
               this.safeSend(ws, {
                 type: 'auth_success',
-                data: { uid: authUid, role: authRole, timestamp: new Date().toISOString() }
+                data: { uid: authUid, role: authRole, branchId: client.branchId, franchiseId: client.franchiseId, timestamp: new Date().toISOString() }
               });
             } catch (err: any) {
               console.warn('[WebSocketServer] Message auth failed:', err.message);
               this.safeSend(ws, { type: 'auth_error', data: { message: 'Invalid token' } });
             }
+            return;
+          }
+
+          // 2b. Branch Registration (allows kitchen/POS terminals to associate with their branch & franchise)
+          if (msg.type === 'register_branch') {
+            if (msg.branchId) client.branchId = msg.branchId;
+            if (msg.franchiseId) client.franchiseId = msg.franchiseId;
+            if (msg.terminalId) client.terminalId = msg.terminalId;
+
+            this.safeSend(ws, {
+              type: 'register_branch_success',
+              data: {
+                branchId: client.branchId,
+                franchiseId: client.franchiseId,
+                terminalId: client.terminalId,
+                timestamp: new Date().toISOString()
+              }
+            });
+            return;
+          }
+
+          // 2c. Monotonic Sequence Synchronization on Reconnect (Resilience against slow / dropped Wi-Fi)
+          if (msg.type === 'sync_request') {
+            const branchId = msg.branchId || client.branchId || 'main_branch';
+            const franchiseId = msg.franchiseId || client.franchiseId || 'default';
+            const lastSeq = typeof msg.lastSequence === 'number' ? msg.lastSequence : 0;
+            const { currentSeq, missedEvents } = this.getMissedEvents(franchiseId, branchId, lastSeq);
+            client.lastSeenSeq = currentSeq;
+
+            this.safeSend(ws, {
+              type: 'sync_response',
+              data: {
+                branchId,
+                franchiseId,
+                currentSeq,
+                missedEvents,
+                count: missedEvents.length,
+                timestamp: new Date().toISOString()
+              }
+            });
             return;
           }
 
@@ -286,21 +400,88 @@ class OliveWebSocketServer {
     });
 
     appEventBus.on('order.created', (event: OrderCreatedEvent) => {
-      // Broadcast new order strictly to restaurant management & staff
-      console.log('[NOTIFICATION_ROUTED]', { event: 'order.created', orderId: event.orderId, targetRoles: ['restaurant', 'manager', 'restaurant_manager'] });
-      const orderPayload = {
-        type: 'order.created',
-        data: {
-          orderId: event.orderId,
-          orderNumber: event.orderNumber,
-          customerName: event.customerName,
-          totalAmount: event.totalAmount,
-          timestamp: event.timestamp,
-        },
+      const raw = event.rawOrderData || {};
+      const branchId = raw.branchId || raw.branch_id || 'main_branch';
+      const franchiseId = raw.franchiseId || raw.franchise_id || 'default';
+
+      console.log('[NOTIFICATION_ROUTED]', {
+        event: 'order.created',
+        orderId: event.orderId,
+        franchiseId,
+        branchId,
+        targetRoles: ['restaurant', 'manager', 'restaurant_manager', 'pos']
+      });
+
+      const items = Array.isArray(raw.items) && raw.items.length > 0 ? raw.items : (event.items || []);
+      const formattedItems = items.map((it: any) => ({
+        name: it.name || it.title || 'Item',
+        quantity: Number(it.quantity || 1),
+        size: it.size || it.selectedSize || undefined,
+        crust: it.crust || it.selectedCrust || undefined,
+        addOns: Array.isArray(it.addOns || it.addons) ? (it.addOns || it.addons).map((a: any) => typeof a === 'string' ? a : a.name) : [],
+        price: Number(it.price || it.unitPrice || 0),
+        totalPrice: Number(it.totalItemPrice || it.totalPrice || ((it.price || 0) * (it.quantity || 1)))
+      }));
+
+      const pricing = {
+        subtotal: Number(raw.subtotal || raw.subTotal || 0),
+        packagingFee: Number(raw.packagingFee || raw.packaging_fee || 0),
+        deliveryFee: Number(raw.deliveryFee || raw.delivery_fee || 0),
+        tax: Number(raw.tax || raw.taxAmount || raw.tax_amount || 0),
+        discount: Number(raw.discount || raw.discountAmount || raw.discount_amount || 0),
+        total: Number(raw.finalTotal || raw.totalAmount || raw.total_amount || event.totalAmount || 0)
       };
-      this.broadcastToRole('restaurant', orderPayload);
-      this.broadcastToRole('manager', orderPayload);
-      this.broadcastToRole('restaurant_manager', orderPayload);
+
+      const isPaid = (raw.paymentStatus || raw.payment_status || '').toUpperCase() === 'PAID' ||
+                     (raw.paymentMethod || '').toUpperCase() === 'PAID' ||
+                     ((raw.paymentMethod || '').toUpperCase() !== 'COD' && (raw.paymentStatus || '').toUpperCase() === 'SUCCESS');
+      const cashToCollect = isPaid ? 0 : pricing.total;
+
+      const customer = {
+        name: event.customerName || raw.customerName || 'Customer',
+        phone: event.contactPhone || raw.customerPhone || raw.contactPhone || '',
+        address: typeof raw.deliveryAddress === 'string' ? raw.deliveryAddress : (raw.deliveryAddress?.addressLine || event.deliveryAddress || 'Pickup'),
+        instructions: raw.deliveryInstructions || raw.customerNotes || raw.notes || raw.instructions || '',
+        lat: raw.deliveryAddress?.coordinates?.lat || raw.lat || undefined,
+        lng: raw.deliveryAddress?.coordinates?.lng || raw.lng || undefined
+      };
+
+      const fullOrderPayload = {
+        orderId: event.orderId,
+        orderNumber: event.orderNumber,
+        franchiseId,
+        branchId,
+        orderType: raw.orderType || raw.order_type || 'delivery',
+        customer,
+        items: formattedItems,
+        pricing,
+        payment: {
+          method: event.paymentMethod || raw.paymentMethod || 'COD',
+          status: isPaid ? 'PAID' : 'PENDING',
+          cashToCollect
+        },
+        timing: event.orderTiming || raw.orderTiming || 'ASAP',
+        timestamp: event.timestamp,
+        actions: {
+          acceptUrl: `/api/orders/${event.orderId}/accept`,
+          rejectUrl: `/api/orders/${event.orderId}/reject`,
+          acknowledgeUrl: `/api/orders/${event.orderId}/acknowledge`,
+          openLocationUrl: customer.lat && customer.lng ? `https://www.google.com/maps/search/?api=1&query=${customer.lat},${customer.lng}` : undefined
+        }
+      };
+
+      // 1. Sequenced, ring-buffered broadcast to targeted branch & supervisors
+      this.broadcastToBranch(franchiseId, branchId, {
+        type: 'order.created',
+        eventId: `order_${event.orderId}`,
+        data: fullOrderPayload
+      });
+
+      // 2. Legacy backwards-compatible role broadcasts
+      this.broadcastToRole('restaurant', { type: 'order.created', data: fullOrderPayload });
+      this.broadcastToRole('manager', { type: 'order.created', data: fullOrderPayload });
+      this.broadcastToRole('restaurant_manager', { type: 'order.created', data: fullOrderPayload });
+      this.broadcastToRole('pos', { type: 'order.created', data: fullOrderPayload });
     });
 
     console.log('[WebSocketServer] Attached to HTTP server on path /ws');
@@ -388,6 +569,47 @@ class OliveWebSocketServer {
         }
       }
     }
+  }
+
+  /**
+   * Broadcast to all users in a specific branch & franchise, plus global supervisors.
+   * Employs the branch ring buffer to guarantee monotonic sequence numbering.
+   */
+  broadcastToBranch(franchiseId: string, branchId: string, message: { type: string; data: any; eventId?: string }): BranchRingBufferEvent {
+    const ringEvent = this.recordBranchEvent(franchiseId, branchId, message.type, message.eventId || '', message.data);
+    const envelope = {
+      type: message.type,
+      seq: ringEvent.seq,
+      eventId: ringEvent.eventId,
+      timestamp: ringEvent.timestamp,
+      branchId,
+      franchiseId,
+      data: message.data
+    };
+    const payload = JSON.stringify(envelope);
+
+    for (const userClients of this.clients.values()) {
+      for (const client of userClients) {
+        if (client.ws.readyState !== WebSocket.OPEN) continue;
+
+        // Direct branch match
+        const isBranchMatch = (!client.branchId || client.branchId === branchId) &&
+                             (!client.franchiseId || client.franchiseId === franchiseId);
+
+        // Supervisors (Owner / Admin / Developer) get all branches
+        const isSupervisor = client.role === 'owner' || client.role === 'admin' || client.role === 'developer';
+
+        // Franchise manager gets their franchise
+        const isFranchiseManager = client.role === 'franchise_manager' && (!client.franchiseId || client.franchiseId === franchiseId);
+
+        if (isBranchMatch || isSupervisor || isFranchiseManager) {
+          client.lastSeenSeq = ringEvent.seq;
+          client.ws.send(payload);
+        }
+      }
+    }
+
+    return ringEvent;
   }
 
   /**
