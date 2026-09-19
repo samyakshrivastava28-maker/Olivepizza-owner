@@ -19,6 +19,7 @@ import {
   LayoutTemplate,
   Store,
   Users,
+  ShieldCheck,
   X,
   Menu,
 } from 'lucide-react';
@@ -77,6 +78,7 @@ export const OwnerLayout: React.FC = () => {
     { label: 'Email Marketing', path: '/email', icon: Mail, show: isMasterOwner },
     { label: 'Media Library', path: '/media', icon: FolderOpen, show: isMasterOwner },
     { label: 'Product & Menu', path: '/products', icon: Pizza, show: hasRestaurantAccess || isMasterOwner },
+    { label: 'Privacy & Governance', path: '/privacy-governance', icon: ShieldCheck, show: isMasterOwner },
   ];
 
   const navItems = allNavItems.filter((item) => item.show);

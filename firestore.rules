@@ -196,6 +196,50 @@ service cloud.firestore {
     match /home_layout_versions/{versionId} {
       allow read, write: if hasFullAccess();
     }
+
+    // --- DPDP PRIVACY & GOVERNANCE COLLECTIONS ---
+
+    match /privacy_policy_versions/{versionId} {
+      allow read: if true;
+      allow write: if hasFullAccess();
+    }
+
+    match /privacy_retention_policies/{policyId} {
+      allow read: if true;
+      allow write: if hasFullAccess();
+    }
+
+    match /privacy_processors/{processorId} {
+      allow read: if true;
+      allow write: if hasFullAccess();
+    }
+
+    match /user_consents/{userId} {
+      allow read: if isOwner(userId) || hasFullAccess();
+      allow write: if hasFullAccess();
+    }
+
+    match /consent_audit_logs/{logId} {
+      allow read, write: if hasFullAccess();
+    }
+
+    match /privacy_grievances/{ticketId} {
+      allow read: if hasFullAccess() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow write: if hasFullAccess();
+    }
+
+    match /deletion_requests/{docId} {
+      allow read: if hasFullAccess() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow write: if hasFullAccess();
+    }
+
+    match /security_incidents/{incidentId} {
+      allow read, write: if hasFullAccess();
+    }
+
+    match /privacy_audit_logs/{logId} {
+      allow read, write: if hasFullAccess();
+    }
     
     match /{document=**} {
       allow read, write: if hasFullAccess();

@@ -752,6 +752,20 @@ export class NotificationQueueService {
 
   private async shouldSuppressByDND(userId: string, category: string, priority: string): Promise<boolean> {
     if (priority === 'high') return false;
+
+    // DPDP Consent Check for Marketing / Promotional communications
+    if (category === 'marketing' || category === 'announcement' || category === 'promotional') {
+      try {
+        const { PrivacyService } = await import('../privacy/PrivacyService.js');
+        const consents = await PrivacyService.getUserConsents(userId);
+        if (!consents.MARKETING_PROMOTIONS) {
+          return true; // Suppressed by withdrawn/un-granted marketing consent
+        }
+      } catch {
+        // Fallback to local DB check
+      }
+    }
+
     try {
       const client = await pgPool.connect();
       try {

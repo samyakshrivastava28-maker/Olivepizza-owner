@@ -42,6 +42,7 @@ const RestaurantManagers = lazyWithRetry(() => import('./pages/RestaurantManager
 const FranchiseManager = lazyWithRetry(() => import('./pages/FranchiseManager'));
 const FranchiseWorkspace = lazyWithRetry(() => import('./pages/FranchiseWorkspace'));
 const RestaurantControlPage = lazyWithRetry(() => import('./pages/RestaurantControlPage'));
+const PrivacyGovernance = lazyWithRetry(() => import('./pages/PrivacyGovernance'));
 
 import { useAuthStore, isAuthorizedOwnerEmail } from './lib/store';
 import { AppRestrictedScreen } from './components/common/AppRestrictedScreen';
@@ -283,6 +284,17 @@ export default function App() {
                   <Route path="/franchise-manager" element={<Navigate to="/franchises" replace />} />
                   <Route path="/managers" element={<Navigate to="/restaurant-managers" replace />} />
                   <Route path="/settings" element={<Navigate to="/restaurant" replace />} />
+
+                  {/* 11. Privacy & Data Governance Console */}
+                  <Route
+                    path="/privacy-governance"
+                    element={
+                      <RouteErrorBoundary>
+                        <PrivacyGovernance />
+                      </RouteErrorBoundary>
+                    }
+                  />
+                  <Route path="/privacy" element={<Navigate to="/privacy-governance" replace />} />
                 </Route>
               </Route>
 

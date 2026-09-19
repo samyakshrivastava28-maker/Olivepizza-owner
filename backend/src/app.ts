@@ -369,6 +369,10 @@ app.use('/api/data-manager', dataManagerRoutes);
 app.use('/devops', devopsRoutes);
 app.use('/api/devops', devopsRoutes);
 
+import privacyRoutes from './routes/privacy.routes.js';
+app.use('/privacy', privacyRoutes);
+app.use('/api/privacy', privacyRoutes);
+
 import paymentRoutes from './routes/payment.routes.js';
 import { PaymentReconciliationService } from './services/payment/PaymentReconciliationService.js';
 
