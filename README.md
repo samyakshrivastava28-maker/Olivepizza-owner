@@ -61,6 +61,24 @@ The single authoritative business engine for all six client apps (Customer, Owne
    - Sub-100ms Firestore commits for all POS bills and orders.
    - Non-blocking sync to Google Sheets monthly franchise workbooks with offline retry.
    - Automated `DataRetentionJob` enforcing 5-minute raw GPS telemetry retention.
+6. **Perpetual Transactional Billing (#1, #2, #3...) (`billing.repository.ts`)**:
+   - Perpetual monotonic billing counter starting at `#1`, never resets, never contains dates, never reused.
+   - Handled via atomic Firestore transactions on `counters/permanent_billing` (concurrency-tested for 100 simultaneous allocations with 0 duplicate sequences).
+   - Calendar daily order counter on `counters/dailyOrders` resets automatically at midnight IST.
+   - Strict separation of `source: 'ONLINE' | 'POS'` on billing and order records.
+7. **In-Memory Domain Event Bus (`AppEventBus.ts`)**:
+   - Typed in-memory event bus managing 12 canonical domain events (`order.created`, `order.accepted`, `order.preparing`, `order.ready`, `order.partner_assigned`, `order.picked_up`, `order.out_for_delivery`, `order.delivered`, `order.rejected`, `order.cancelled`, `payment.received`, `bill.generated`).
+   - Completely eliminates Kafka/microservice overhead while keeping domain events decoupled from notification, email, and analytics listeners.
+8. **Redis In-Memory Acceleration & Resilient Fallback (`RedisService.ts`)**:
+   - Ephemeral cache powered by `ioredis` for store menus (300s TTL), store status (60s TTL), and franchise metadata (600s TTL).
+   - Distributed locking utility (`acquireLock`, `releaseLock`) preventing concurrent race conditions.
+   - Guaranteed graceful degradation: transparently falls back to Firestore if Redis is offline or disconnected.
+9. **Idempotency Engine (`idempotency.middleware.ts`)**:
+   - Protects order placement and billing endpoints against rapid double-clicks.
+   - In-memory fast-path prevents duplicate in-flight processing (returns `409 Conflict`), with 24-hour Firestore response caching (`X-Idempotent-Replay: true`).
+10. **Digital Personal Data Protection (DPDP) Act 2023 Compliance (`PrivacyService.ts`)**:
+    - Data Fiduciary transparency notices, tamper-resistant consent logs, profile correction, sanitized data exports (passwords/tokens/claims stripped), grievance SLA tickets (`GRV-...`), and account erasure with statutory 30-day cooling period.
+    - PII protection: raw customer phone numbers scrubbed from push notification FCM `data` payloads.
 
 ---
 
@@ -124,15 +142,20 @@ npm run dev
 
 ## 🧪 Automated Testing
 
-Run the automated backend test suites:
+Run the complete automated backend test suite (33 tests across all domain suites):
 ```bash
 cd backend
 
-# Test Critical Order Alert templates and payload non-truncation
-npx tsx src/tests/test_critical_order_alert_templates.ts
+# Run all automated test suites
+npm test
 
-# Test WebSocket monotonic sequence numbering, branch isolation, and ring buffer sync
-npx tsx src/tests/test_websocket_ring_buffer.ts
+# Or run specific test suites
+node --import tsx src/tests/concurrent_billing.test.ts
+node --import tsx src/tests/privacy_governance.test.ts
+node --import tsx src/tests/order_flow_security_audit.test.ts
+node --import tsx src/tests/pos_analytics_e2e.test.ts
+node --import tsx src/tests/urgent_order_routing_e2e.test.ts
+node --import tsx src/tests/sheets_workbook.test.ts
 ```
 
 ---

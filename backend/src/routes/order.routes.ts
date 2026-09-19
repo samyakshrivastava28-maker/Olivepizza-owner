@@ -4,6 +4,7 @@ import { FranchiseScopeService } from '../services/franchise/FranchiseScopeServi
 import { Router, Request, Response } from 'express';
 import { query } from '../lib/db.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
+import { idempotency } from '../middleware/idempotency.middleware.js';
 import { adminDb } from '../config/firebase.js';
 import { OwnerTemplates, CustomerTemplates, RestaurantTemplates } from '../services/notification/NotificationTemplates.js';
 
@@ -383,25 +384,12 @@ router.get('/:id', verifyToken, async (req: AuthRequest, res: Response): Promise
     }
 
     const data = docSnap.data()!;
-    const role = (user.role || 'customer').toLowerCase();
-    const isStaff = ['restaurant_manager', 'manager', 'owner', 'developer', 'admin', 'platform_owner', 'kitchen_staff', 'cashier', 'franchise_manager', 'franchise_owner'].includes(role) ||
-      user.email === 'olivepizzarjn@gmail.com' ||
-      user.email === 'webhub2811@gmail.com';
-
-    // If customer, verify ownership
-    if (!isStaff && role !== 'delivery_partner' && role !== 'delivery') {
-      if (data.userId !== user.uid) {
-        res.status(403).json({ error: 'Forbidden: You do not have permission to view this order' });
-        return;
-      }
-    }
-
-    // If delivery partner, verify assignment
-    if ((role === 'delivery_partner' || role === 'delivery') && !isStaff) {
-      if (data.deliveryPartnerId !== user.uid) {
-        res.status(403).json({ error: 'Forbidden: You are not the assigned delivery partner for this order' });
-        return;
-      }
+    const scope = FranchiseScopeService.resolveScope(user);
+    try {
+      FranchiseScopeService.assertOrderAccess(scope, data, user.uid);
+    } catch (scopeErr: any) {
+      res.status(scopeErr.status || 403).json({ error: scopeErr.message || 'Forbidden: Access denied' });
+      return;
     }
 
     const projected = OrderProjectionService.projectByRole({ id: docSnap.id, ...data }, user);
@@ -461,7 +449,7 @@ router.post('/validate-checkout', async (req: Request, res: Response): Promise<v
 });
 
 // Create a new order securely
-router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user?.uid;
   const isDebug = req.headers['x-debug-mode'] === 'true';
   const startTime = Date.now();
@@ -548,9 +536,10 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
     let resolvedBranchName = 'Olive Pizza — Rajnandgaon HQ';
 
     if (isStaffMember) {
-      resolvedBranchId = req.user?.branchId || req.body.branchId || (req.headers['x-branch-id'] as string) || 'main_branch';
-      resolvedFranchiseId = req.user?.franchiseId || req.body.franchiseId || 'fra_rajnandgaon';
-      resolvedOrgId = req.user?.organizationId || 'org_olive_pizza';
+      const scope = FranchiseScopeService.resolveScope(req.user);
+      resolvedBranchId = FranchiseScopeService.getEffectiveBranchId(scope, req.body.branchId || (req.headers['x-branch-id'] as string));
+      resolvedFranchiseId = scope.franchiseId || req.user?.franchiseId || 'fra_rajnandgaon';
+      resolvedOrgId = scope.organizationId || 'org_olive_pizza';
     } else {
       // Customer: Enforcement Point 4 (Authoritative radius verification & single-franchise lock immediately before persisting)
       const explicitBranch = (req.body.branchId || req.headers['x-branch-id'] || req.body.session?.branchId || '').trim();
@@ -957,6 +946,7 @@ router.post('/', verifyToken, async (req: AuthRequest, res: Response): Promise<v
         paymentMethod: req.body.paymentMethod || 'COD',
         paymentId: req.body.paymentId || ('pay_' + newOrderId.slice(0, 8)),
         // Phase 3 canonical order fields
+        source: resolvedOrderSource.startsWith('POS') ? 'POS' : 'ONLINE',
         orderSource: resolvedOrderSource,
         orderTiming,
         scheduledFor: scheduledFor || null,

@@ -395,6 +395,72 @@ export class FirestoreListener {
               timestamp: new Date().toISOString(),
               rawOrderData: orderData,
             });
+
+            // 5. Emit granular canonical domain events across the 12 domain states
+            const baseDomainEvent = {
+              orderId: orderData.id,
+              orderNumber,
+              permanentBillNo: orderData.permanentBillNo ? Number(orderData.permanentBillNo) : undefined,
+              userId: orderData.userId || orderData.firebaseUid || '',
+              customerName: orderData.customerName || orderData.customer_name || 'Customer',
+              franchiseId: orderData.franchiseId || 'fra_primary',
+              branchId: orderData.branchId || 'main_branch',
+              totalAmount,
+              timestamp: new Date().toISOString(),
+              rawOrderData: orderData,
+            };
+
+            switch (currentStatus) {
+              case 'accepted':
+                appEventBus.emitTyped('order.accepted', baseDomainEvent);
+                break;
+              case 'preparing':
+                appEventBus.emitTyped('order.preparing', baseDomainEvent);
+                break;
+              case 'ready':
+                appEventBus.emitTyped('order.ready', { ...baseDomainEvent, orderType: (orderData.deliveryType || 'delivery') as any });
+                break;
+              case 'partner_assigned':
+                appEventBus.emitTyped('order.partner_assigned', {
+                  ...baseDomainEvent,
+                  deliveryPartnerId: orderData.deliveryPartnerId || '',
+                  deliveryPartnerName: orderData.deliveryPartnerName || 'Assigned Partner'
+                });
+                break;
+              case 'picked_up':
+                appEventBus.emitTyped('order.picked_up', {
+                  ...baseDomainEvent,
+                  deliveryPartnerId: orderData.deliveryPartnerId || ''
+                });
+                break;
+              case 'out_for_delivery':
+                appEventBus.emitTyped('order.out_for_delivery', {
+                  ...baseDomainEvent,
+                  deliveryPartnerId: orderData.deliveryPartnerId || ''
+                });
+                break;
+              case 'delivered':
+              case 'completed':
+                appEventBus.emitTyped('order.delivered', {
+                  ...baseDomainEvent,
+                  deliveredAt: new Date().toISOString()
+                });
+                break;
+              case 'rejected':
+                appEventBus.emitTyped('order.rejected', {
+                  ...baseDomainEvent,
+                  reason: orderData.rejectionReason || 'Order rejected',
+                  rejectedBy: orderData.rejectedBy || 'Restaurant Staff'
+                });
+                break;
+              case 'cancelled':
+                appEventBus.emitTyped('order.cancelled', {
+                  ...baseDomainEvent,
+                  reason: orderData.cancellationReason || 'Order cancelled',
+                  cancelledBy: orderData.cancelledBy || 'User'
+                });
+                break;
+            }
           }
         }
       },

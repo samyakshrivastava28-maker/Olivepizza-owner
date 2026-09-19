@@ -691,7 +691,6 @@ export class RestaurantTemplates {
       branchId: payload.branchId || 'main_branch',
       image: firstImage || undefined,
       fullOrderJson: JSON.stringify(fullOrderData),
-      customerPhone: payload.phone || '',
       customerName: payload.customerName,
       deliveryAddress: payload.deliveryAddress || '',
       deliveryInstructions: payload.deliveryInstructions || '',

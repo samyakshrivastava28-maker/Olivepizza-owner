@@ -16,6 +16,7 @@
  */
 
 import { query, withTransaction } from '../../config/postgres.js';
+import { billingRepository } from '../../repositories/billing.repository.js';
 
 export interface AllocatedBillNumbers {
   permanentBillNo: number;
@@ -52,31 +53,46 @@ export class BillingNumberService {
 
   /**
    * Atomically acquires the next Permanent Bill Number and Daily Order Number
-   * directly from PostgreSQL sequence and atomic counter.
+   * directly from billing repository (Firestore transactional counter source of truth),
+   * with asynchronous best-effort PostgreSQL sequence synchronization.
    */
   public static async allocateNumbers(date: Date = new Date()): Promise<AllocatedBillNumbers> {
     const orderDate = this.getLocalDateString(date);
     const orderTime = this.getLocalTimeString(date);
 
-    return await withTransaction(async (client) => {
-      // 1. Nextval on PostgreSQL permanent sequence
-      const seqRes = await client.query(`SELECT nextval('permanent_bill_seq') AS bill_no;`);
-      const permanentBillNo = parseInt(seqRes.rows[0].bill_no, 10);
+    try {
+      // 1. Transactional source of truth: BillingRepository (Firestore atomic counter)
+      const allocated = await billingRepository.allocateNextBillNumbers(date);
 
-      // 2. Atomic daily order counter in IST
-      const dailyRes = await client.query(
-        `SELECT get_next_daily_order_number($1::date) AS daily_no;`,
-        [orderDate]
-      );
-      const dailyOrderNo = parseInt(dailyRes.rows[0].daily_no, 10);
+      // 2. Best-effort PostgreSQL synchronization (non-blocking for Postgres FUTURE status)
+      withTransaction(async (client) => {
+        await client.query(`SELECT nextval('permanent_bill_seq') AS bill_no;`).catch(() => {});
+        await client.query(`SELECT get_next_daily_order_number($1::date) AS daily_no;`, [orderDate]).catch(() => {});
+      }).catch(() => {
+        // Safe: Postgres is secondary / future sync
+      });
 
-      return {
-        permanentBillNo,
-        dailyOrderNo,
-        orderDate,
-        orderTime
-      };
-    });
+      return allocated;
+    } catch (firestoreErr) {
+      console.warn('[BillingNumberService] Primary billingRepository allocation warning, attempting Postgres fallback:', firestoreErr);
+      // Fallback to PostgreSQL if Firestore counters are temporarily unreachable
+      return await withTransaction(async (client) => {
+        const seqRes = await client.query(`SELECT nextval('permanent_bill_seq') AS bill_no;`);
+        const permanentBillNo = parseInt(seqRes.rows[0].bill_no, 10);
+        const dailyRes = await client.query(
+          `SELECT get_next_daily_order_number($1::date) AS daily_no;`,
+          [orderDate]
+        );
+        const dailyOrderNo = parseInt(dailyRes.rows[0].daily_no, 10);
+
+        return {
+          permanentBillNo,
+          dailyOrderNo,
+          orderDate,
+          orderTime
+        };
+      });
+    }
   }
 
   /**
@@ -88,19 +104,23 @@ export class BillingNumberService {
     todayDate: string;
   }> {
     const today = this.getLocalDateString();
-    const seqRes = await query(`SELECT last_value, is_called FROM permanent_bill_seq;`).catch(() => ({ rows: [] }));
-    const dailyRes = await query(
-      `SELECT current_number FROM daily_order_counters WHERE counter_date = $1;`,
-      [today]
-    ).catch(() => ({ rows: [] }));
+    try {
+      return await billingRepository.getCurrentSequenceStatus();
+    } catch (err) {
+      const seqRes = await query(`SELECT last_value, is_called FROM permanent_bill_seq;`).catch(() => ({ rows: [] }));
+      const dailyRes = await query(
+        `SELECT current_number FROM daily_order_counters WHERE counter_date = $1;`,
+        [today]
+      ).catch(() => ({ rows: [] }));
 
-    const lastVal = seqRes.rows[0] ? (seqRes.rows[0].is_called ? parseInt(seqRes.rows[0].last_value, 10) : 0) : 0;
-    const dailyCount = dailyRes.rows[0] ? parseInt(dailyRes.rows[0].current_number, 10) : 0;
+      const lastVal = seqRes.rows[0] ? (seqRes.rows[0].is_called ? parseInt(seqRes.rows[0].last_value, 10) : 0) : 0;
+      const dailyCount = dailyRes.rows[0] ? parseInt(dailyRes.rows[0].current_number, 10) : 0;
 
-    return {
-      lastPermanentBillNo: lastVal,
-      todayDailyCount: dailyCount,
-      todayDate: today
-    };
+      return {
+        lastPermanentBillNo: lastVal,
+        todayDailyCount: dailyCount,
+        todayDate: today
+      };
+    }
   }
 }

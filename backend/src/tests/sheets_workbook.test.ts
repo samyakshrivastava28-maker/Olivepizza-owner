@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it } from 'node:test';
+import assert from 'node:assert';
 import { GoogleSheetsReportService } from '../services/reports/GoogleSheetsReportService.js';
 
 describe('Google Sheets Professional Monthly Workbook Tests', () => {
@@ -20,14 +21,14 @@ describe('Google Sheets Professional Monthly Workbook Tests', () => {
       'Raw Billing Data'
     ];
 
-    expect(GoogleSheetsReportService.WORKBOOK_TABS).toEqual(expectedTabs);
-    expect(GoogleSheetsReportService.WORKBOOK_TABS.length).toBe(13);
+    assert.deepStrictEqual(GoogleSheetsReportService.WORKBOOK_TABS, expectedTabs);
+    assert.strictEqual(GoogleSheetsReportService.WORKBOOK_TABS.length, 13);
   });
 
   it('TEST 2: Month sheet title generates in standardized <Year>-<Month> format', () => {
     const testDate = new Date('2026-08-25T12:00:00.000Z');
     const title = GoogleSheetsReportService.getMonthSheetTitle(testDate);
-    expect(title).toBe('2026-August');
+    assert.strictEqual(title, '2026-August');
   });
 
   it('TEST 3: GST Tax calculation correctly applies 5% GST (2.5% CGST + 2.5% SGST)', () => {
@@ -39,11 +40,11 @@ describe('Google Sheets Professional Monthly Workbook Tests', () => {
     const totalTax = Number((cgst + sgst).toFixed(2)); // 45.00
     const finalAmount = taxableAmount + totalTax; // 945.00
 
-    expect(taxableAmount).toBe(900);
-    expect(cgst).toBe(22.5);
-    expect(sgst).toBe(22.5);
-    expect(totalTax).toBe(45);
-    expect(finalAmount).toBe(945);
+    assert.strictEqual(taxableAmount, 900);
+    assert.strictEqual(cgst, 22.5);
+    assert.strictEqual(sgst, 22.5);
+    assert.strictEqual(totalTax, 45);
+    assert.strictEqual(finalAmount, 945);
   });
 
   it('TEST 4: Idempotent order matching by unique orderId', () => {
@@ -55,7 +56,7 @@ describe('Google Sheets Professional Monthly Workbook Tests', () => {
     const incomingOrderId = 'ord_bbb222';
     const matchIndex = existingRows.findIndex(r => r[1] === incomingOrderId);
 
-    expect(matchIndex).toBe(1); // Found at index 1 -> updates row in place
+    assert.strictEqual(matchIndex, 1); // Found at index 1 -> updates row in place
   });
 
   it('TEST 5: Channel matrix categorization maps correctly', () => {
@@ -66,6 +67,6 @@ describe('Google Sheets Professional Monthly Workbook Tests', () => {
       { orderSource: 'POS', fulfillmentType: 'DELIVERY', expected: 'POS Delivery' },
     ];
 
-    expect(channels.length).toBe(4);
+    assert.strictEqual(channels.length, 4);
   });
 });

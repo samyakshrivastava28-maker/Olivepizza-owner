@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
 import { verifyToken, AuthRequest, requireRole } from '../middleware/auth.middleware.js';
+import { idempotency } from '../middleware/idempotency.middleware.js';
 import { POSService } from '../services/pos/POSService.js';
 import { ESCPOSFormatter, ReceiptData } from '../services/pos/ESCPOSFormatter.js';
 import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogleSheetsService.js';
@@ -12,6 +13,7 @@ import { OwnerTemplates, CustomerTemplates } from '../services/notification/Noti
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
 import { CanonicalOrderService } from '../services/pos/CanonicalOrderService.js';
 import { BillingNumberService } from '../services/pos/BillingNumberService.js';
+import { billingRepository } from '../repositories/billing.repository.js';
 import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngine.js';
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 import { query } from '../config/postgres.js';
@@ -325,7 +327,7 @@ router.post('/calculate', verifyToken, requirePOSRole, async (req: AuthRequest, 
 // ============================================================================
 // 4. POS ORDER CREATION & BILL FINALIZATION
 // ============================================================================
-router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
     const {
@@ -461,6 +463,7 @@ router.post('/orders', verifyToken, requirePOSRole, async (req: AuthRequest, res
         paidAt: new Date().toISOString()
       },
       orderType: resolvedOrderType.toLowerCase(),
+      source: 'POS',
       orderSource,
       tableNumber: resolvedOrderType === 'DINE_IN' ? (tableNumber || 'T-1') : null,
       deliveryAddress: resolvedOrderType === 'DELIVERY' ? { addressLine: deliveryAddress || 'Counter Delivery' } : null,
@@ -2279,10 +2282,23 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
       });
 
       const orderId = bill.orderId || ('ord_pos_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
+
+      let permBillNo = bill.permanentBillNo;
+      if (!permBillNo) {
+        try {
+          const alloc = await BillingNumberService.allocateNumbers(new Date(bill.createdAt || Date.now()));
+          permBillNo = alloc.permanentBillNo;
+        } catch (e) {
+          console.warn('[SyncOffline] Bill number allocation fallback:', e);
+        }
+      }
+
       const orderData = {
         id: orderId,
         orderId,
         idempotencyKey,
+        permanentBillNo: permBillNo || null,
+        billNumber: permBillNo ? `#${permBillNo}` : (bill.billNumber || `#${orderId.slice(-6).toUpperCase()}`),
         orderNumber: bill.billNumber || `#${orderId.slice(-6).toUpperCase()}`,
         orderDateLocal: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(bill.createdAt || Date.now())),
         userId: user.uid,
@@ -2297,6 +2313,7 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
         paymentMethod: bill.payment?.method || 'CASH',
         paymentStatus: 'PAID',
         status: 'completed',
+        source: 'POS',
         orderType: bill.orderSource || 'POS_DINE_IN',
         orderSource: bill.orderSource || 'POS_DINE_IN',
         tableNumber: bill.tableNumber || null,
@@ -2313,6 +2330,22 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
       };
 
       await adminDb.collection('orders').doc(orderId).set(orderData, { merge: true });
+
+      if (permBillNo) {
+        billingRepository.saveBill({
+          permanentBillNumber: permBillNo,
+          billFormattedNumber: `#${permBillNo}`,
+          orderId,
+          source: 'POS',
+          franchiseId,
+          branchId,
+          terminalId: bill.session?.terminalId || user.terminalId || `pos_${user.franchiseId}`,
+          totalAmount: calc.finalTotal,
+          paymentMethod: bill.payment?.method || 'CASH',
+          paymentStatus: 'PAID',
+          createdAt: bill.createdAt || new Date().toISOString()
+        }).catch(err => console.warn('[SyncOffline] Billing repo save warning:', err));
+      }
 
       // Async Google Sheets reporting queue (non-blocking)
       SheetsSyncWorker.queueOrder(orderId, {

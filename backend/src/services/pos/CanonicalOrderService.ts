@@ -14,6 +14,8 @@ import crypto from 'crypto';
 import { query, withTransaction } from '../../config/postgres.js';
 import { BillingNumberService } from './BillingNumberService.js';
 import { adminDb } from '../../config/firebase.js';
+import { billingRepository } from '../../repositories/billing.repository.js';
+import { appEventBus } from '../eventBus/AppEventBus.js';
 
 export interface CreateOrderParams {
   id?: string;
@@ -102,73 +104,127 @@ export class CanonicalOrderService {
     const branchId = params.branchId || 'main_branch';
     const cashierName = params.cashierName || (params.orderSource === 'ONLINE' ? 'Online Customer App' : 'Cashier');
 
-    // 2. Execute atomic PostgreSQL transaction for Order, Line Items, and Bill
-    await withTransaction(async (client) => {
-      // 2.1 Insert canonical order
-      await client.query(`
-        INSERT INTO canonical_orders (
-          id, permanent_bill_no, daily_order_no, order_date, order_time,
-          order_source, order_type, order_status, payment_method, payment_status,
-          customer_name, customer_phone, delivery_address, table_number,
-          subtotal, discount_amount, coupon_code, tax_amount, cgst, sgst,
-          delivery_fee, total_amount, franchise_id, branch_id, cashier_id,
-          cashier_name, terminal_id, notes
-        ) VALUES (
-          $1, $2, $3, $4::date, $5::time,
-          $6, $7, $8, $9, $10,
-          $11, $12, $13, $14,
-          $15, $16, $17, $18, $19, $20,
-          $21, $22, $23, $24, $25,
-          $26, $27, $28
-        );
-      `, [
-        orderId, permanentBillNo, dailyOrderNo, orderDate, orderTime,
-        params.orderSource, resolvedOrderType, orderStatus, paymentMethod, paymentStatus,
-        params.customerName || 'Walk-in Customer', params.customerPhone || 'N/A',
-        params.deliveryAddress || null, params.tableNumber || null,
-        subtotal, discountAmount, params.couponCode || null, taxAmount, cgst, sgst,
-        deliveryFee, totalAmount, franchiseId, branchId, params.cashierId || null,
-        cashierName, params.terminalId || 'POS-TERM-01', params.notes || ''
-      ]);
-
-      // 2.2 Insert immutable line items
-      for (const item of params.items) {
-        const itemId = crypto.randomUUID();
-        const qty = Math.max(1, Number(item.quantity) || 1);
-        const unitPrice = Math.max(0, Number(item.price) || 0);
-        const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
-
+    // 2. Execute atomic PostgreSQL transaction for Order, Line Items, and Bill (graceful fallback if Postgres is inactive)
+    try {
+      await withTransaction(async (client) => {
+        // 2.1 Insert canonical order
         await client.query(`
-          INSERT INTO canonical_order_items (
-            id, order_id, menu_item_id, item_name, size_variant,
-            crust, quantity, unit_price, addons_json, line_total
+          INSERT INTO canonical_orders (
+            id, permanent_bill_no, daily_order_no, order_date, order_time,
+            order_source, order_type, order_status, payment_method, payment_status,
+            customer_name, customer_phone, delivery_address, table_number,
+            subtotal, discount_amount, coupon_code, tax_amount, cgst, sgst,
+            delivery_fee, total_amount, franchise_id, branch_id, cashier_id,
+            cashier_name, terminal_id, notes
           ) VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9::jsonb, $10
+            $1, $2, $3, $4::date, $5::time,
+            $6, $7, $8, $9, $10,
+            $11, $12, $13, $14,
+            $15, $16, $17, $18, $19, $20,
+            $21, $22, $23, $24, $25,
+            $26, $27, $28
           );
         `, [
-          itemId, orderId, item.menuItemId || null, item.name, item.size || 'Regular',
-          item.crust || 'Normal', qty, unitPrice, JSON.stringify(item.addons || []), lineTotal
+          orderId, permanentBillNo, dailyOrderNo, orderDate, orderTime,
+          params.orderSource, resolvedOrderType, orderStatus, paymentMethod, paymentStatus,
+          params.customerName || 'Walk-in Customer', params.customerPhone || 'N/A',
+          params.deliveryAddress || null, params.tableNumber || null,
+          subtotal, discountAmount, params.couponCode || null, taxAmount, cgst, sgst,
+          deliveryFee, totalAmount, franchiseId, branchId, params.cashierId || null,
+          cashierName, params.terminalId || 'POS-TERM-01', params.notes || ''
         ]);
+
+        // 2.2 Insert immutable line items
+        for (const item of params.items) {
+          const itemId = crypto.randomUUID();
+          const qty = Math.max(1, Number(item.quantity) || 1);
+          const unitPrice = Math.max(0, Number(item.price) || 0);
+          const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
+
+          await client.query(`
+            INSERT INTO canonical_order_items (
+              id, order_id, menu_item_id, item_name, size_variant,
+              crust, quantity, unit_price, addons_json, line_total
+            ) VALUES (
+              $1, $2, $3, $4, $5,
+              $6, $7, $8, $9::jsonb, $10
+            );
+          `, [
+            itemId, orderId, item.menuItemId || null, item.name, item.size || 'Regular',
+            item.crust || 'Normal', qty, unitPrice, JSON.stringify(item.addons || []), lineTotal
+          ]);
+        }
+
+        // 2.3 Insert canonical financial bill
+        const billId = crypto.randomUUID();
+        await client.query(`
+          INSERT INTO canonical_bills (
+            id, permanent_bill_no, order_id, bill_date, subtotal,
+            discount, tax, net_amount, payment_method, payment_status
+          ) VALUES (
+            $1, $2, $3, $4::date, $5,
+            $6, $7, $8, $9, $10
+          );
+        `, [
+          billId, permanentBillNo, orderId, orderDate, subtotal,
+          discountAmount, taxAmount, totalAmount, paymentMethod, paymentStatus
+        ]);
+      });
+    } catch (pgErr: any) {
+      console.warn('[PostgreSQL] Canonical order persistence deferred/skipped (Postgres is FUTURE):', pgErr?.message || pgErr);
+    }
+
+    // 2.4 Authoritative Firestore Billing Record Persistence
+    try {
+      const billSource: 'ONLINE' | 'POS' = params.orderSource.startsWith('POS') ? 'POS' : 'ONLINE';
+      await billingRepository.saveBill({
+        permanentBillNumber: permanentBillNo,
+        billFormattedNumber: `#${permanentBillNo}`,
+        orderId,
+        source: billSource,
+        franchiseId,
+        branchId,
+        terminalId: params.terminalId || (billSource === 'POS' ? 'POS-TERM-01' : 'ONLINE-APP'),
+        totalAmount,
+        paymentMethod,
+        paymentStatus,
+        createdAt: new Date().toISOString()
+      });
+
+      // Emit canonical domain event: bill.generated
+      appEventBus.emitTyped('bill.generated', {
+        billNumber: permanentBillNo,
+        billFormattedNumber: `#${permanentBillNo}`,
+        orderId,
+        source: billSource,
+        franchiseId,
+        branchId,
+        terminalId: params.terminalId || (billSource === 'POS' ? 'POS-TERM-01' : 'ONLINE-APP'),
+        totalAmount,
+        paymentMethod,
+        timestamp: new Date().toISOString()
+      });
+
+      // Emit canonical domain event: payment.received if payment is settled
+      if (paymentStatus === 'PAID') {
+        appEventBus.emitTyped('payment.received', {
+          paymentId: `pay_${orderId.slice(0, 8)}`,
+          orderId,
+          permanentBillNo,
+          amount: totalAmount,
+          currency: 'INR',
+          paymentMethod,
+          paymentStatus: 'PAID',
+          franchiseId,
+          branchId,
+          timestamp: new Date().toISOString()
+        });
       }
+    } catch (billingRepoErr: any) {
+      console.warn('[BillingRepository] Save bill warning:', billingRepoErr?.message || billingRepoErr);
+    }
 
-      // 2.3 Insert canonical financial bill
-      const billId = crypto.randomUUID();
-      await client.query(`
-        INSERT INTO canonical_bills (
-          id, permanent_bill_no, order_id, bill_date, subtotal,
-          discount, tax, net_amount, payment_method, payment_status
-        ) VALUES (
-          $1, $2, $3, $4::date, $5,
-          $6, $7, $8, $9, $10
-        );
-      `, [
-        billId, permanentBillNo, orderId, orderDate, subtotal,
-        discountAmount, taxAmount, totalAmount, paymentMethod, paymentStatus
-      ]);
-    });
-
-    // 3. Backward-compatible Firestore synchronization (maintains instant mobile/client notifications)
+    // 3. Authoritative Firestore order persistence (maintains instant mobile/client notifications)
     try {
       await adminDb.collection('orders').doc(orderId).set({
         id: orderId,

@@ -46,9 +46,11 @@ async function runDeliveryActionTests() {
     });
 
     const actions = JSON.parse(payload.data.actions || '[]');
-    assert.strictEqual(actions.length, 2, 'Expected 2 action buttons');
+    assert.strictEqual(actions.length, 4, 'Expected 4 action buttons');
     assert.strictEqual(actions[0].action, 'ACCEPT_DELIVERY');
-    assert.strictEqual(actions[1].action, 'DECLINE_DELIVERY');
+    assert.strictEqual(actions[1].action, 'OPEN_LOCATION');
+    assert.strictEqual(actions[2].action, 'CALL_CUSTOMER');
+    assert.strictEqual(actions[3].action, 'VIEW_ORDER');
     assert.strictEqual(payload.apns?.payload?.aps?.category, 'DELIVERY_ASSIGNMENT_CATEGORY');
   });
 

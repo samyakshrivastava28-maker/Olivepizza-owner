@@ -14,11 +14,14 @@ import crypto from 'crypto';
 
 const router = Router();
 
-// Middleware: Require Owner or Admin role
+// Middleware: Require Owner or Admin role (supporting canonical roles and authorized master accounts)
 const requireOwnerOrAdmin = (req: AuthRequest, res: Response, next: any) => {
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
-  const role = req.user.role;
-  if (role !== 'owner' && role !== 'admin') {
+  const role = (req.user.role || '').toLowerCase();
+  const isAuthorized = ['owner', 'admin', 'platform_owner', 'developer'].includes(role) ||
+    req.user.email === 'olivepizzarjn@gmail.com' ||
+    req.user.email === 'webhub2811@gmail.com';
+  if (!isAuthorized) {
     return res.status(403).json({ error: 'Forbidden. Owner or Admin access required.' });
   }
   next();
