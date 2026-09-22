@@ -53,11 +53,11 @@ async function runTests() {
   console.log('\n--- 4. Truecaller Web & DeepLink Tests ---');
   const tcProvider = new TruecallerProvider();
   assert(tcProvider.isConfigured(), 'Truecaller is properly configured');
-  assert(tcProvider.getClientId() === 'AVweKogL-t1uXDh9DzeAjW_1vQvpMAkoJwt6O4_hm_wsy4tHVFwetNgp4Fdxd0dVjdCgQ_EpD86ZOYKj0QNaCbC3Sy4DAhzDgGv5khcg1yJIi5bX7OX-CS5kOZBeha6f-GQPyQHuJkEu7qSVqQhUVEKJJA', 'Truecaller Client ID matches production key');
+  assert(tcProvider.getClientId() === 'um2vaxqdcr3nroydqvyg_hahzikmqrla8w_yxiptsry', 'Truecaller Client ID matches production key');
 
   const tcSession = tcProvider.createWebSession('+919876543210', 'test_user_01');
   assert(tcSession.status === 'PENDING' && tcSession.deepLink?.includes('truecallersdk://'), 'Truecaller Web session creates valid deepLink');
-  assert(tcSession.deepLink?.includes('partnerKey=AVweKogL'), 'Truecaller deepLink contains production partnerKey');
+  assert(tcSession.deepLink?.includes('partnerKey=um2vaxqdcr'), 'Truecaller deepLink contains production partnerKey');
 
   const fetchedSession = await tcProvider.getWebSession(tcSession.requestId);
   assert(fetchedSession?.requestId === tcSession.requestId, 'Truecaller session is queryable by requestId');

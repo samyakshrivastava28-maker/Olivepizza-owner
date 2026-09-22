@@ -28,7 +28,7 @@ export class TruecallerProvider implements PhoneVerificationProvider {
   private lastKeyFetch: number = 0;
   private readonly KEY_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
   private webSessions: Map<string, TruecallerWebSession> = new Map();
-  private readonly CLIENT_ID = process.env.TRUECALLER_CLIENT_ID || 'AVweKogL-t1uXDh9DzeAjW_1vQvpMAkoJwt6O4_hm_wsy4tHVFwetNgp4Fdxd0dVjdCgQ_EpD86ZOYKj0QNaCbC3Sy4DAhzDgGv5khcg1yJIi5bX7OX-CS5kOZBeha6f-GQPyQHuJkEu7qSVqQhUVEKJJA';
+  private readonly CLIENT_ID = process.env.TRUECALLER_CLIENT_ID || 'um2vaxqdcr3nroydqvyg_hahzikmqrla8w_yxiptsry';
 
   constructor() {
     // Periodic session cleanup
