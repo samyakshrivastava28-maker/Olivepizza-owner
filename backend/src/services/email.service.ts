@@ -38,12 +38,81 @@ const createSmtpTransporter = (port: number) => {
   });
 };
 
+import axios from 'axios';
+
 // Primary reusable transporter object
 export const transporter = createSmtpTransporter(smtpPort);
 
 /**
- * Direct Send Immediate Helper — bypasses DB queue for urgent transactional delivery
- * Features automatic dual-port fallback (465 SSL <-> 587 STARTTLS) to survive cloud egress firewall rules.
+ * Dispatch email via HTTP REST API (HTTPS port 443)
+ * Completely bypasses cloud provider SMTP port blocks (Render/AWS/GCP).
+ */
+async function sendViaHttpApi(
+  fromAddress: string,
+  recipient: string,
+  subject: string,
+  htmlContent: string
+): Promise<any> {
+  // 1. Resend API
+  if (process.env.RESEND_API_KEY) {
+    const res = await axios.post('https://api.resend.com/emails', {
+      from: fromAddress.includes('<') ? fromAddress : `Olive Pizza <${fromAddress}>`,
+      to: [recipient],
+      subject,
+      html: htmlContent
+    }, {
+      headers: {
+        'Authorization': `Bearer ${process.env.RESEND_API_KEY.trim()}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 10000
+    });
+    return res.data;
+  }
+
+  // 2. Brevo (Sendinblue) API
+  if (process.env.BREVO_API_KEY) {
+    const fromEmail = smtpUser || 'noreply@olivepizza.in';
+    const res = await axios.post('https://api.brevo.com/v3/smtp/email', {
+      sender: { name: 'Olive Pizza', email: fromEmail },
+      to: [{ email: recipient }],
+      subject,
+      htmlContent
+    }, {
+      headers: {
+        'api-key': process.env.BREVO_API_KEY.trim(),
+        'Content-Type': 'application/json'
+      },
+      timeout: 10000
+    });
+    return res.data;
+  }
+
+  // 3. SendGrid API
+  if (process.env.SENDGRID_API_KEY) {
+    const fromEmail = smtpUser || 'noreply@olivepizza.in';
+    const res = await axios.post('https://api.sendgrid.com/v3/mail/send', {
+      personalizations: [{ to: [{ email: recipient }] }],
+      from: { email: fromEmail, name: 'Olive Pizza' },
+      subject,
+      content: [{ type: 'text/html', value: htmlContent }]
+    }, {
+      headers: {
+        'Authorization': `Bearer ${process.env.SENDGRID_API_KEY.trim()}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 10000
+    });
+    return res.data;
+  }
+
+  return null;
+}
+
+/**
+ * Direct Send Immediate Helper — bypasses DB queue for urgent transactional delivery.
+ * 1. Tries HTTP REST API (HTTPS port 443) if RESEND_API_KEY, BREVO_API_KEY, or SENDGRID_API_KEY is configured.
+ * 2. Falls back to direct SMTP with automatic dual-port fallback (465 SSL <-> 587 STARTTLS).
  */
 export const sendEmailDirect = async (
   recipient: string,
@@ -52,6 +121,18 @@ export const sendEmailDirect = async (
   attachments?: any[]
 ) => {
   const fromAddress = cleanStr(process.env.SMTP_FROM) || '"Olive Pizza" <noreply@olivepizza.app>';
+
+  // Check HTTP provider first
+  const hasHttpProvider = Boolean(process.env.RESEND_API_KEY || process.env.BREVO_API_KEY || process.env.SENDGRID_API_KEY);
+  if (hasHttpProvider) {
+    try {
+      return await sendViaHttpApi(fromAddress, recipient, subject, htmlContent);
+    } catch (httpErr: any) {
+      console.warn('[EmailDirect] HTTP API send failed:', httpErr.response?.data || httpErr.message, 'Falling back to SMTP...');
+    }
+  }
+
+  // SMTP delivery
   try {
     return await transporter.sendMail({
       from: fromAddress,

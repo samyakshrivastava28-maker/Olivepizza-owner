@@ -8,7 +8,6 @@ import './src/services/DataLifecycleService.ts';
 import './src/services/notification/NotificationQueueService.ts';
 import './src/jobs/MonthlyReportJob.ts';
 import { kb } from './src/services/KnowledgeBaseService.ts';
-import { pineconeService } from './src/services/ai/PineconeService.ts';
 import { storageAnalyzer } from './src/services/storageAnalyzer.service.ts';
 import { validateEnvironmentVariables } from './src/config/validator.ts';
 import { initScheduler } from './src/scripts/scheduler.ts';
@@ -122,7 +121,6 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
       console.warn('[KnowledgeSync] Initialization warning:', err.message);
     }
 
-    pineconeService.getStatus().catch((err: any) => console.warn('[Pinecone] Non-fatal init error:', err.message));
     FirestoreListener.init();
   })();
 });

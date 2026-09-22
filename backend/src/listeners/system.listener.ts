@@ -14,7 +14,7 @@ export class SystemListener {
       details: `Node.js process initialized on ${os.hostname()}. Listening for events.`
     });
 
-    console.log('💻 System Monitor initialized for Slack.');
+    console.log('💻 System Monitor initialized.');
   }
 
   private static monitorMemory() {

@@ -152,14 +152,15 @@ router.post('/send-otp', authLimiter, async (req: Request, res: Response) => {
 
 router.post('/verify-otp', authLimiter, async (req: Request, res: Response) => {
   try {
-    const { phoneNumber, otp, pinId, userId } = req.body;
-    const uid = userId || (req as any).user?.uid;
+    const { phoneNumber, otp, pinId } = req.body;
+    // Derive UID strictly from authenticated session to prevent unauthenticated account takeover
+    const uid = (req as any).user?.uid;
 
     if (!phoneNumber || !otp) {
       return res.status(400).json({ success: false, error: 'Phone number and OTP code are required.' });
     }
 
-    const result = await phoneVerificationService.verifyOtp(phoneNumber, otp, uid, pinId);
+    const result = await phoneVerificationService.verifyOtp(phoneNumber, otp, uid || 'anonymous', pinId);
     
     if (!result.success) {
       return res.status(400).json(result);
@@ -171,7 +172,7 @@ router.post('/verify-otp', authLimiter, async (req: Request, res: Response) => {
         await userRef.set({
           phone: result.phone,
           phoneVerified: true,
-          verificationMethod: result.provider || 'infobip',
+          verificationMethod: result.provider || 'firebase',
           verifiedAt: result.verifiedAt || Date.now(),
           phoneSetupCompleted: true
         }, { merge: true });
@@ -190,6 +191,62 @@ router.post('/verify-otp', authLimiter, async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('[PhoneVerification] verify-otp error:', error);
     return res.status(500).json({ success: false, error: error.message || 'Internal server error while verifying OTP.' });
+  }
+});
+
+// Direct Firebase Phone Auth ID Token Synchronization
+router.post('/firebase-sync', authLimiter, async (req: Request, res: Response) => {
+  try {
+    const { idToken, name } = req.body;
+    if (!idToken) {
+      return res.status(400).json({ success: false, error: 'Firebase ID Token is required.' });
+    }
+
+    const decoded = await adminAuth.verifyIdToken(idToken);
+    const uid = decoded.uid;
+    const phone = decoded.phone_number;
+
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'Token does not contain a verified phone number.' });
+    }
+
+    const now = Date.now();
+    const userRef = adminDb.collection('users').doc(uid);
+    const userSnap = await userRef.get();
+    const existing = userSnap.data() || {};
+
+    await userRef.set({
+      uid,
+      phone,
+      phoneVerified: true,
+      verificationMethod: 'firebase',
+      verifiedAt: now,
+      phoneSetupCompleted: true,
+      name: existing.name || name || 'Customer',
+      email: existing.email || decoded.email || null,
+      role: existing.role || 'customer',
+      updatedAt: now
+    }, { merge: true });
+
+    await adminDb.collection('customer_identities').doc(phone).set({
+      primaryUid: uid,
+      verifiedAt: now
+    }, { merge: true });
+
+    return res.json({
+      success: true,
+      user: {
+        uid,
+        phone,
+        name: existing.name || name || 'Customer',
+        email: existing.email || decoded.email || null,
+        phoneVerified: true,
+        phoneSetupCompleted: true
+      }
+    });
+  } catch (error: any) {
+    console.error('[PhoneVerification] firebase-sync error:', error);
+    return res.status(401).json({ success: false, error: 'Failed to verify Firebase authentication token.' });
   }
 });
 
@@ -362,8 +419,8 @@ router.get('/status', async (_req: Request, res: Response) => {
   const health = await phoneVerificationService.getHealthStatus();
   res.json({
     success: true,
-    service: 'Infobip 2FA OTP & Truecaller Verification Service',
-    infobip: health.infobip,
+    service: 'Firebase Auth & Truecaller Verification Service',
+    firebase: health.firebase,
     truecaller: health.truecaller
   });
 });

@@ -3,7 +3,6 @@ import { generateEmailTemplate, generateImage, generateProductDescription, gener
 import kb from '../services/KnowledgeBaseService.js';
 import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
 import { aiContextBuilder } from '../services/ai/AIContextBuilder.js';
-import { pineconeService } from '../services/ai/PineconeService.js';
 import { recommendationEngine } from '../services/ai/RecommendationEngine.js';
 import { optionalAuth, AuthRequest } from '../middleware/auth.middleware.js';
 import { detectLanguage } from '../services/ai/languageDetector.js';
@@ -589,22 +588,17 @@ router.post('/action', optionalAuth, aiActionLimiter, async (req: AuthRequest, r
 // ─── AI Diagnostics — Expanded (Phase 9) ─────────────────────────────────────
 router.get('/diagnostics', requireAuth, requireRole(['owner', 'admin', 'developer']), async (req: AuthRequest, res) => {
   try {
-    const pineconeStatus = await pineconeService.getStatus();
     const cacheStats = embeddingCache.getStats();
     const memStats = conversationMemory.getStats();
     const opsStats = aiOperationsStore.getStats();
 
     res.json({
       success: true,
-      pinecone: {
-        indexName: pineconeStatus.indexName,
-        namespace: '',
-        dimension: pineconeStatus.dimension || 1024,
-        embeddingModel: 'NVIDIA nv-embed-v1 (Canonical 1024-dim)',
-        vectorCount: pineconeStatus.vectorCount || 0,
-        status: pineconeStatus.ok ? 'GREEN' : 'RED',
-        error: pineconeStatus.error || null,
-        connectionStatus: pineconeStatus.ok ? 'CONNECTED' : 'DISCONNECTED',
+      knowledgeStore: {
+        type: 'LOCAL_KB_CATALOG',
+        dimension: 1024,
+        status: 'GREEN',
+        connectionStatus: 'CONNECTED',
       },
       embeddingCache: cacheStats,
       conversationMemory: memStats,

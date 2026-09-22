@@ -63,5 +63,12 @@ export function validateEnvironmentVariables() {
     }
   }
 
+  // Supabase Telemetry Configuration Check
+  const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+  const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !supabaseKey) {
+    console.warn('⚠️ [Supabase Notice] SUPABASE_URL or SUPABASE_ANON_KEY not set. Realtime GPS rider navigation telemetry will be disabled.');
+  }
+
   console.log('✅ Environment validation passed.');
 }

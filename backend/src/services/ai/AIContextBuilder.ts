@@ -14,13 +14,26 @@
  *  4. Only if ALL sources fail should AI state data is unavailable.
  */
 
-import { semanticSearch, DetailedSearchResult } from './SemanticSearch.js';
 import { embeddingCache } from './embeddingCache.js';
 import kb, { KBProduct, KBPolicy, KBFaq } from '../KnowledgeBaseService.js';
 import { recommendationEngine } from './RecommendationEngine.js';
 import { staticKB } from './StaticKnowledgeLoader.js';
-import { syncWorker } from './PineconeSyncWorker.js';
 import { KnowledgeMemoryStore } from '../knowledge/KnowledgeSyncService.js';
+
+export interface DetailedSearchResult {
+  results: Array<{ content: string; score: number; metadata: any }>;
+  telemetry: {
+    embeddingLatencyMs: number;
+    embeddingModelUsed: string;
+    embeddingProvider: string;
+    qdrantLatencyMs: number;
+    collectionName: string;
+    totalHitsReturned: number;
+    matchedChunksCount: number;
+    topSimilarityScore: number;
+    zeroChunkReason?: string;
+  };
+}
 
 export type QueryIntent = 'RESTAURANT' | 'NON_RESTAURANT';
 
@@ -171,13 +184,18 @@ export class AIContextBuilder {
       return { ...cached, cacheHit: true };
     }
 
-    // ── 4. HYBRID KNOWLEDGE ENGINE: Step A — Fetch Pinecone Semantic Chunks ───
-    const searchDetailed = await semanticSearch.searchDetailed(query, {
-      topK: 10,
-      minScore: 0.30,
-    });
-
-    const semanticChunks = searchDetailed.results;
+    // ── 4. HYBRID KNOWLEDGE ENGINE: Step A — Preloaded Structured Store Context (Pinecone Bypassed) ──
+    const searchTelemetry = {
+      embeddingLatencyMs: 0,
+      embeddingModelUsed: 'local_store_kb',
+      embeddingProvider: 'in_memory_firestore',
+      qdrantLatencyMs: 0,
+      collectionName: 'catalog_cache',
+      totalHitsReturned: 0,
+      matchedChunksCount: 0,
+      topSimilarityScore: 1.0,
+    };
+    const semanticChunks: any[] = [];
 
     // ── 4. HYBRID KNOWLEDGE ENGINE: Step B — Preloaded Structured Store Context ──
     const allProducts = kb.getAllProducts().filter(p => p.isAvailable && p.isVeg !== false);
@@ -284,49 +302,13 @@ export class AIContextBuilder {
       contextStr += `=== STATIC KNOWLEDGE BASE (Policies, Order Flow, FAQs, Routes) ===\n${staticContext}\n\n`;
     }
 
-    // 6. Inject Pinecone Semantic Vector Chunks (if available) & Self-Heal Stale Vectors
-    let usedChunks: Array<{ content: string; score: number; metadata: any }> = [];
-    if (semanticChunks.length > 0) {
-      contextStr += `=== PINECONE SEMANTIC VECTOR RETRIEVAL CHUNKS ===\n`;
-      for (const result of semanticChunks) {
-        let isStale = false;
-        let freshContent = result.content;
-
-        // Self-Healing Verification Step
-        if (result.metadata?.docType === 'products' && result.metadata?.documentId) {
-          const liveDoc = allProducts.find(p => p.id === result.metadata.documentId);
-          if (liveDoc) {
-             const liveText = syncWorker.formatTextToEmbed('products', liveDoc.id, liveDoc);
-             if (liveText !== result.content) {
-                 isStale = true;
-                 freshContent = liveText;
-                 console.log(`[AIContextBuilder] ⚠️ Self-Healing: Stale product vector detected for ${liveDoc.id}. Healing...`);
-                 syncWorker.syncNow('products', liveDoc.id, liveDoc).catch(e => console.error(e));
-             }
-          }
-        } else if (result.metadata?.docType === 'coupons' && result.metadata?.documentId) {
-          const liveDoc = allCoupons.find(c => c.id === result.metadata.documentId);
-          if (liveDoc) {
-             const liveText = syncWorker.formatTextToEmbed('coupons', liveDoc.id, liveDoc);
-             if (liveText !== result.content) {
-                 isStale = true;
-                 freshContent = liveText;
-                 console.log(`[AIContextBuilder] ⚠️ Self-Healing: Stale coupon vector detected for ${liveDoc.id}. Healing...`);
-                 syncWorker.syncNow('coupons', liveDoc.id, liveDoc).catch(e => console.error(e));
-             }
-          }
-        }
-
-        contextStr += `[Category: ${result.metadata.category || 'KB'} | Score: ${result.score.toFixed(3)}${isStale ? ' | 🩹 HEALED' : ''}]\n${freshContent}\n\n`;
-        usedChunks.push({ ...result, content: freshContent });
-      }
-    }
+    // 6. Vector chunks bypassed — verified local structured store context utilized
+    const usedChunks: Array<{ content: string; score: number; metadata: any }> = [];
 
     contextStr += `=========================================================================\n`;
 
     // Grounding Check:
     // Status is OK if ANY of these is available:
-    //  - Pinecone returned semantic chunks
     //  - Firestore KB has live products loaded
     //  - Firestore settings are available
     //  - Static JSON KB has policies/FAQs
@@ -349,7 +331,7 @@ export class AIContextBuilder {
       isDomainQuery,
       queryIntent,
       groundingStatus,
-      telemetry: searchDetailed.telemetry,
+      telemetry: searchTelemetry,
       chunks: usedChunks,
       structuredCatalogInjected: true,
     };

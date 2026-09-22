@@ -34,7 +34,6 @@ const getEnvStatus = () => {
     DATABASE_URL: process.env.DATABASE_URL ? 'configured' : 'missing',
     SMTP: (process.env.SMTP_HOST || process.env.EMAIL_HOST) ? 'configured' : 'missing',
     CLOUDINARY: (process.env.CLOUDINARY_URL || (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY)) ? 'configured' : 'missing',
-    SLACK_BOT_TOKEN: process.env.SLACK_BOT_TOKEN ? 'configured' : 'missing',
   };
   const missing = Object.entries(vars).filter(([,v]) => v === 'missing').map(([k]) => k);
   return { vars, missing, allConfigured: missing.length === 0 };

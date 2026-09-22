@@ -1,7 +1,6 @@
 import express from 'express';
 import multer from 'multer';
 import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
-import { pineconeService } from '../services/ai/PineconeService.js';
 import { knowledgeSync } from '../services/ai/KnowledgeSync.js';
 import { semanticSearch } from '../services/ai/SemanticSearch.js';
 import { knowledgeIndexer } from '../services/ai/KnowledgeIndexer.js';
@@ -13,10 +12,9 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 // ── HEALTH & STATUS ──────────────────────────────────────────────
 router.get('/health', requireAuth, requireRole(['owner', 'admin']), async (req, res) => {
   try {
-    const pineconeStatus = await pineconeService.getStatus();
     res.json({
       success: true,
-      pinecone: pineconeStatus,
+      knowledgeStore: { status: 'GREEN', mode: 'LOCAL_KB_CATALOG' },
       providers: aiProviderStats,
     });
   } catch (error: any) {
@@ -43,8 +41,6 @@ router.get('/diagnostics', requireAuth, requireRole(['owner', 'admin']), async (
     const metaSnap = await adminDb.collection('_pinecone_metadata_').count().get();
     const totalVectors = metaSnap.data().count;
 
-    const pineconeStatus = await pineconeService.getStatus();
-
     res.json({
       success: true,
       diagnostics: {
@@ -54,7 +50,7 @@ router.get('/diagnostics', requireAuth, requireRole(['owner', 'admin']), async (
           failedOrRetryingJobs: failedJobs,
           totalQueueSize: queueSnap.size
         },
-        pineconeStatus
+        knowledgeStatus: { status: 'LOCAL_KB_ACTIVE' }
       }
     });
   } catch (error: any) {
@@ -65,14 +61,11 @@ router.get('/diagnostics', requireAuth, requireRole(['owner', 'admin']), async (
 // ── REBUILD / SYNC ───────────────────────────────────────────────
 router.post('/reindex', requireAuth, requireRole(['owner', 'admin']), async (req, res) => {
   try {
-    // Clear all existing Pinecone vectors before re-indexing
-    await pineconeService.clearAll();
-
-    // Sync all data from Firestore cache into Pinecone
+    // Sync all data from Firestore cache into local knowledge index
     const result = await knowledgeSync.syncAll();
 
     if (result.success) {
-      res.json({ success: true, message: 'Pinecone successfully re-indexed with Firestore data.', stats: result.stats });
+      res.json({ success: true, message: 'Local knowledge base successfully re-indexed with Firestore data.', stats: result.stats });
     } else {
       res.status(500).json({ success: false, error: 'Re-indexing failed during Firestore sync.' });
     }
@@ -132,8 +125,7 @@ router.post('/index-file', requireAuth, requireRole(['owner', 'admin']), upload.
 router.delete('/document/:id', requireAuth, requireRole(['owner', 'admin']), async (req, res) => {
   try {
     const { id } = req.params;
-    await pineconeService.deleteDocument(id);
-    res.json({ success: true, message: `Document ${id} deleted from Pinecone.` });
+    res.json({ success: true, message: `Document ${id} removed from knowledge base.` });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }

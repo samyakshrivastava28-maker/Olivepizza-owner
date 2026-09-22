@@ -76,9 +76,10 @@ test('DPDP Privacy & Data Governance Suite', async (t) => {
 
   await t.test('Test 6: Processor Registry & Retention Configuration', async () => {
     const processors = await PrivacyService.getProcessors();
-    assert.ok(processors.length >= 4, 'Must have at least Firebase, Supabase, Fast2SMS, Razorpay');
+    assert.ok(processors.length >= 4, 'Must have at least Firebase, Supabase, Truecaller, Razorpay');
     assert.ok(processors.some(p => p.id === 'proc_firebase'));
     assert.ok(processors.some(p => p.id === 'proc_supabase'));
+    assert.ok(processors.some(p => p.id === 'proc_truecaller'));
 
     const retention = await PrivacyService.getRetentionPolicies();
     assert.ok(retention.some(r => r.category === 'ORDER_RECORDS_FINANCIAL'));

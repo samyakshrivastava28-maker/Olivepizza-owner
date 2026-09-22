@@ -1,9 +1,16 @@
 /**
  * DeepSeekV4FlashGenerator.ts
- * Powered by DeepSeek V4 Flash for:
- * 1. Product & Combo Descriptions
- * 2. Email Campaign Templates (HTML + Text)
- * 3. Notification Title & Body Generator
+ * Multi-model fallback hierarchy for Olive Pizza approved text tasks:
+ * 1. Primary (NVIDIA NIM): Kimi K3, GLM 5.3, GLM 5.3 Flash, DeepSeek V4 Flash, MiniMax M3
+ * 2. Secondary Fallback: GLM 5.2
+ * 3. Final Fallback: Nemotron 3 Ultra -> OpenRouter nvidia/nemotron-3.5-lightning:free
+ * 4. Deterministic Local Fallback (Guarantees zero blocking of core business flows)
+ *
+ * Supported text tasks:
+ * - Product & Combo Descriptions
+ * - Email Campaign Templates (HTML + Subject)
+ * - Push Notification Titles & Bodies
+ * - Interactive AI Assistant Marketing Chat
  */
 
 import OpenAI from 'openai';
@@ -11,37 +18,87 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-function getDeepSeekClient(): { client: OpenAI; model: string } | null {
-  const openRouterKey = process.env.OPENROUTER_API_KEY || process.env.ASSISTANT_OPENROUTER_API_KEY;
-  if (openRouterKey && openRouterKey.trim().length > 10) {
-    return {
-      client: new OpenAI({ apiKey: openRouterKey.trim(), baseURL: 'https://openrouter.ai/api/v1', timeout: 20000 }),
-      model: 'deepseek/deepseek-chat',
-    };
+interface ModelCandidate {
+  provider: 'nvidia' | 'openrouter';
+  model: string;
+  name: string;
+}
+
+const APPROVED_MODEL_HIERARCHY: ModelCandidate[] = [
+  // Primary (NVIDIA NIM)
+  { provider: 'nvidia', model: 'moonshotai/kimi-k3', name: 'Kimi K3 (NVIDIA NIM)' },
+  { provider: 'nvidia', model: 'thudm/glm-5.3', name: 'GLM 5.3 (NVIDIA NIM)' },
+  { provider: 'nvidia', model: 'thudm/glm-5.3-flash', name: 'GLM 5.3 Flash (NVIDIA NIM)' },
+  { provider: 'nvidia', model: 'deepseek-ai/deepseek-v4-flash', name: 'DeepSeek V4 Flash (NVIDIA NIM)' },
+  { provider: 'nvidia', model: 'minimax/minimax-m3', name: 'MiniMax M3 (NVIDIA NIM)' },
+
+  // Secondary Fallback
+  { provider: 'nvidia', model: 'thudm/glm-5.2', name: 'GLM 5.2 (NVIDIA NIM)' },
+  { provider: 'openrouter', model: 'thudm/glm-5.2', name: 'GLM 5.2 (OpenRouter)' },
+
+  // Final Fallback
+  { provider: 'nvidia', model: 'nvidia/nemotron-3-ultra', name: 'Nemotron 3 Ultra (NVIDIA NIM)' },
+  { provider: 'openrouter', model: 'nvidia/nemotron-3.5-lightning:free', name: 'Nemotron 3.5 Lightning (OpenRouter)' },
+  { provider: 'openrouter', model: 'deepseek/deepseek-chat', name: 'DeepSeek Chat (OpenRouter)' },
+];
+
+let cachedNvidiaClient: OpenAI | null = null;
+let cachedOpenRouterClient: OpenAI | null = null;
+
+function getClientForProvider(provider: 'nvidia' | 'openrouter'): OpenAI | null {
+  if (provider === 'nvidia') {
+    const key = process.env.NVIDIA_API_KEY || process.env.ASSISTANT_NVIDIA_API_KEY;
+    if (!key || key.trim().length < 10) return null;
+    if (!cachedNvidiaClient) {
+      cachedNvidiaClient = new OpenAI({
+        apiKey: key.trim(),
+        baseURL: 'https://integrate.api.nvidia.com/v1',
+        timeout: 15000,
+      });
+    }
+    return cachedNvidiaClient;
   }
 
-  const deepseekKey = process.env.DEEPSEEK_API_KEY || process.env.ASSISTANT_DEEPSEEK_API_KEY;
-  if (deepseekKey && deepseekKey.trim().length > 10) {
-    return {
-      client: new OpenAI({ apiKey: deepseekKey.trim(), baseURL: 'https://api.deepseek.com', timeout: 20000 }),
-      model: 'deepseek-chat',
-    };
+  if (provider === 'openrouter') {
+    const key = process.env.OPENROUTER_API_KEY || process.env.ASSISTANT_OPENROUTER_API_KEY;
+    if (!key || key.trim().length < 10) return null;
+    if (!cachedOpenRouterClient) {
+      cachedOpenRouterClient = new OpenAI({
+        apiKey: key.trim(),
+        baseURL: 'https://openrouter.ai/api/v1',
+        timeout: 15000,
+      });
+    }
+    return cachedOpenRouterClient;
   }
 
-  const nvidiaKey = process.env.NVIDIA_API_KEY || process.env.ASSISTANT_NVIDIA_API_KEY;
-  if (nvidiaKey && nvidiaKey.trim().length > 10) {
-    return {
-      client: new OpenAI({ apiKey: nvidiaKey.trim(), baseURL: 'https://integrate.api.nvidia.com/v1', timeout: 20000 }),
-      model: 'deepseek-ai/deepseek-r1',
-    };
-  }
+  return null;
+}
 
-  const geminiKey = process.env.GEMINI_API_KEY || process.env.ASSISTANT_GEMINI_API_KEY;
-  if (geminiKey && geminiKey.trim().length > 10) {
-    return {
-      client: new OpenAI({ apiKey: geminiKey.trim(), baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/', timeout: 20000 }),
-      model: 'gemini-2.5-flash',
-    };
+async function executeModelChain(
+  messages: Array<{ role: string; content: string }>,
+  maxTokens: number = 500,
+  temperature: number = 0.7
+): Promise<{ content: string; modelName: string } | null> {
+  for (const candidate of APPROVED_MODEL_HIERARCHY) {
+    const client = getClientForProvider(candidate.provider);
+    if (!client) continue;
+
+    try {
+      const response = await client.chat.completions.create({
+        model: candidate.model,
+        messages: messages as any,
+        temperature,
+        max_tokens: maxTokens,
+      });
+
+      const content = response.choices[0]?.message?.content?.trim();
+      if (content) {
+        return { content, modelName: candidate.name };
+      }
+    } catch (err: any) {
+      console.warn(`[AI Model Fallback] Candidate ${candidate.name} failed: ${err.message}. Trying next candidate...`);
+    }
   }
 
   return null;
@@ -49,7 +106,7 @@ function getDeepSeekClient(): { client: OpenAI; model: string } | null {
 
 export class DeepSeekV4FlashGenerator {
   /**
-   * Generate Food Product / Combo Description using DeepSeek V4 Flash
+   * Generate Food Product / Combo Description using approved model hierarchy
    */
   static async generateDescription(options: {
     name: string;
@@ -58,7 +115,7 @@ export class DeepSeekV4FlashGenerator {
     items?: string[];
   }): Promise<{ success: boolean; description: string; highlights: string[]; model: string }> {
     const isCombo = options.type === 'combo';
-    const systemPrompt = `You are DeepSeek V4 Flash, an expert food copywriter for Olive Pizza. 
+    const systemPrompt = `You are an expert food copywriter for Olive Pizza. 
 Write a mouthwatering, irresistible ${isCombo ? 'combo deal' : 'pizza/food'} product description in 2-3 sentences.
 Focus on taste, fresh ingredients, wood-fired quality, and customer savings.
 Return valid JSON format ONLY:
@@ -71,61 +128,48 @@ Return valid JSON format ONLY:
 Category: ${options.category || 'Pizzas'}
 ${isCombo && options.items?.length ? `Combo Items Included: ${options.items.join(', ')}` : ''}`;
 
-    const llm = getDeepSeekClient();
-    if (!llm) {
-      return {
-        success: true,
-        description: isCombo
-          ? `Savor the ultimate ${options.name} featuring ${options.items?.join(', ') || 'our top menu specials'}. Handcrafted to perfection with 100% mozzarella cheese and fresh toppings at an unbeatable price!`
-          : `Delicious ${options.name} handcrafted with fresh ingredients, signature tomato sauce, and 100% real mozzarella cheese baked hot & fresh at Olive Pizza.`,
-        highlights: isCombo ? ['Combo Savings', 'Handcrafted', 'Hot & Fresh'] : ['100% Mozzarella', 'Wood Fired', 'Fresh Toppings'],
-        model: 'DeepSeek V4 Flash (Fallback)',
-      };
-    }
+    const fallbackOutput = {
+      success: true,
+      description: isCombo
+        ? `Savor the ultimate ${options.name} featuring ${options.items?.join(', ') || 'our top menu specials'}. Handcrafted to perfection with 100% mozzarella cheese and fresh toppings at an unbeatable price!`
+        : `Delicious ${options.name} handcrafted with fresh ingredients, signature tomato sauce, and 100% real mozzarella cheese baked hot & fresh at Olive Pizza.`,
+      highlights: isCombo ? ['Combo Savings', 'Handcrafted', 'Hot & Fresh'] : ['100% Mozzarella', 'Wood Fired', 'Fresh Toppings'],
+      model: 'Deterministic Fallback',
+    };
 
     try {
-      const response = await llm.client.chat.completions.create({
-        model: llm.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.7,
-        max_tokens: 400,
-      });
+      const result = await executeModelChain([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ], 400);
 
-      const raw = response.choices[0]?.message?.content || '';
-      const cleanJson = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+      if (!result) return fallbackOutput;
 
+      const cleanJson = result.content.replace(/```json/gi, '').replace(/```/g, '').trim();
       try {
         const parsed = JSON.parse(cleanJson);
         return {
           success: true,
-          description: parsed.description || raw,
+          description: parsed.description || result.content,
           highlights: parsed.highlights || ['Fresh', 'Delicious', 'Olive Pizza Special'],
-          model: 'DeepSeek V4 Flash',
+          model: result.modelName,
         };
       } catch {
         return {
           success: true,
-          description: raw || `Delicious ${options.name} prepared fresh at Olive Pizza.`,
+          description: result.content || fallbackOutput.description,
           highlights: ['Fresh Toppings', 'Authentic Taste', 'Olive Pizza Special'],
-          model: 'DeepSeek V4 Flash',
+          model: result.modelName,
         };
       }
     } catch (err: any) {
-      console.error('[DeepSeekV4Flash] Description error:', err.message);
-      return {
-        success: true,
-        description: `Savor the ${options.name} handcrafted fresh at Olive Pizza with premium toppings and signature spices.`,
-        highlights: ['Fresh Toppings', 'Handcrafted', 'Hot Delivery'],
-        model: 'DeepSeek V4 Flash (Fallback)',
-      };
+      console.error('[AI Generator] Description error:', err.message);
+      return fallbackOutput;
     }
   }
 
   /**
-   * Generate Responsive Email Campaign Template HTML using DeepSeek V4 Flash
+   * Generate Responsive Email Campaign Template HTML using approved model hierarchy
    */
   static async generateEmailTemplate(options: {
     prompt: string;
@@ -133,8 +177,7 @@ ${isCombo && options.items?.length ? `Combo Items Included: ${options.items.join
     targetAudience?: string;
     selectedProducts?: string[];
   }): Promise<{ success: boolean; subject: string; bodyHtml: string; model: string }> {
-    const llm = getDeepSeekClient();
-    const systemPrompt = `You are DeepSeek V4 Flash, an expert email marketing designer for Olive Pizza.
+    const systemPrompt = `You are an expert email marketing designer for Olive Pizza.
 Create a responsive HTML email campaign.
 Return valid JSON format ONLY:
 {
@@ -147,9 +190,8 @@ Ensure the HTML is modern, clean, mobile-responsive, includes a dark-theme heade
 Campaign Audience: ${options.targetAudience || 'All Customers'}
 ${options.selectedProducts?.length ? `Featured Products: ${options.selectedProducts.join(', ')}` : ''}`;
 
-    if (!llm) {
-      const fallbackSubject = `🍕 Special Offer: ${options.prompt.slice(0, 40)}...`;
-      const fallbackHtml = `<div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width:600px; margin:0 auto; background-color:#0f172a; color:#f8fafc; padding:30px; border-radius:20px; border: 1px solid #1e293b;">
+    const fallbackSubject = `🍕 Special Offer: ${options.prompt.slice(0, 40)}...`;
+    const fallbackHtml = `<div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width:600px; margin:0 auto; background-color:#0f172a; color:#f8fafc; padding:30px; border-radius:20px; border: 1px solid #1e293b;">
   <div style="text-align:center; padding-bottom:20px; border-bottom:2px solid #f97316;">
     <h1 style="color:#f97316; margin:0; font-size:28px;">🍕 OLIVE PIZZA</h1>
     <p style="color:#94a3b8; font-size:14px; margin-top:4px;">Hot, Fresh & Handcrafted To Order</p>
@@ -169,60 +211,54 @@ ${options.selectedProducts?.length ? `Featured Products: ${options.selectedProdu
     <p>Olive Pizza Store • Fresh Ingredients Daily • Fast Delivery</p>
   </div>
 </div>`;
-      return { success: true, subject: fallbackSubject, bodyHtml: fallbackHtml, model: 'DeepSeek V4 Flash (Fallback)' };
-    }
+
+    const fallbackOutput = {
+      success: true,
+      subject: fallbackSubject,
+      bodyHtml: fallbackHtml,
+      model: 'Deterministic Fallback',
+    };
 
     try {
-      const response = await llm.client.chat.completions.create({
-        model: llm.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.7,
-        max_tokens: 1200,
-      });
+      const result = await executeModelChain([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ], 1200);
 
-      const raw = response.choices[0]?.message?.content || '';
-      const cleanJson = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+      if (!result) return fallbackOutput;
 
+      const cleanJson = result.content.replace(/```json/gi, '').replace(/```/g, '').trim();
       try {
         const parsed = JSON.parse(cleanJson);
         return {
           success: true,
           subject: parsed.subject || `🍕 Special Offer from Olive Pizza!`,
-          bodyHtml: parsed.bodyHtml || raw,
-          model: 'DeepSeek V4 Flash',
+          bodyHtml: parsed.bodyHtml || result.content,
+          model: result.modelName,
         };
       } catch {
         return {
           success: true,
           subject: `🍕 ${options.prompt.slice(0, 40)}`,
-          bodyHtml: raw,
-          model: 'DeepSeek V4 Flash',
+          bodyHtml: result.content || fallbackHtml,
+          model: result.modelName,
         };
       }
     } catch (err: any) {
-      console.error('[DeepSeekV4Flash] Email error:', err.message);
-      return {
-        success: true,
-        subject: `🍕 Special Offer: ${options.prompt.slice(0, 40)}`,
-        bodyHtml: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; background:#0f172a; color:#fff; padding:20px; border-radius:16px; text-align:center;"><h2 style="color:#f97316;">${options.prompt}</h2><p>Order hot & fresh pizza from Olive Pizza!</p><a href="https://olivepizza.in/menu" style="background:#f97316; color:#fff; padding:12px 24px; text-decoration:none; border-radius:10px; font-weight:bold; display:inline-block;">Order Now</a></div>`,
-        model: 'DeepSeek V4 Flash (Fallback)',
-      };
+      console.error('[AI Generator] Email error:', err.message);
+      return fallbackOutput;
     }
   }
 
   /**
-   * Generate Push Notification Title & Body using DeepSeek V4 Flash
+   * Generate Push Notification Title & Body using approved model hierarchy
    */
   static async generateNotification(options: {
     topic: string;
     offerDetails?: string;
     targetAudience?: string;
   }): Promise<{ success: boolean; title: string; body: string; model: string }> {
-    const llm = getDeepSeekClient();
-    const systemPrompt = `You are DeepSeek V4 Flash, an expert mobile notification copywriter for Olive Pizza.
+    const systemPrompt = `You are an expert mobile notification copywriter for Olive Pizza.
 Write an urgent, high-CTR push notification for pizza lovers.
 Return valid JSON format ONLY:
 {
@@ -234,59 +270,46 @@ Return valid JSON format ONLY:
 ${options.offerDetails ? `Offer Details: ${options.offerDetails}` : ''}
 Target Audience: ${options.targetAudience || 'All Customers'}`;
 
-    if (!llm) {
-      return {
-        success: true,
-        title: `🍕 Hungry? Free Garlic Bread Offer!`,
-        body: `Order your favorite hot & cheesy pizza from Olive Pizza today and enjoy instant delivery to your doorstep! 🚀`,
-        model: 'DeepSeek V4 Flash (Fallback)',
-      };
-    }
+    const fallbackOutput = {
+      success: true,
+      title: `🍕 Hungry? Free Garlic Bread Offer!`,
+      body: `Order your favorite hot & cheesy pizza from Olive Pizza today and enjoy instant delivery to your doorstep! 🚀`,
+      model: 'Deterministic Fallback',
+    };
 
     try {
-      const response = await llm.client.chat.completions.create({
-        model: llm.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        temperature: 0.7,
-        max_tokens: 250,
-      });
+      const result = await executeModelChain([
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ], 250);
 
-      const raw = response.choices[0]?.message?.content || '';
-      const cleanJson = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+      if (!result) return fallbackOutput;
 
+      const cleanJson = result.content.replace(/```json/gi, '').replace(/```/g, '').trim();
       try {
         const parsed = JSON.parse(cleanJson);
         return {
           success: true,
           title: parsed.title || `🍕 Special Offer Alert!`,
           body: parsed.body || `Order fresh hot pizza now at Olive Pizza!`,
-          model: 'DeepSeek V4 Flash',
+          model: result.modelName,
         };
       } catch {
         return {
           success: true,
           title: `🍕 Olive Pizza Special Deal`,
-          body: raw,
-          model: 'DeepSeek V4 Flash',
+          body: result.content || fallbackOutput.body,
+          model: result.modelName,
         };
       }
     } catch (err: any) {
-      console.error('[DeepSeekV4Flash] Notification error:', err.message);
-      return {
-        success: true,
-        title: `🍕 Hot & Cheesy Pizza Offer!`,
-        body: `Order your favorite pizzas fresh from Olive Pizza today! 🚀`,
-        model: 'DeepSeek V4 Flash (Fallback)',
-      };
+      console.error('[AI Generator] Notification error:', err.message);
+      return fallbackOutput;
     }
   }
 
   /**
-   * Interactive Assistant Chat Handler powered by DeepSeek V4 Flash
-   * Responds conversationally in the chatbox AND returns structured output to auto-fill the main message form!
+   * Interactive Assistant Chat Handler powered by approved model hierarchy
    */
   static async handleInteractiveChat(options: {
     mode: 'product-description' | 'combo-description' | 'email-template' | 'notification';
@@ -303,8 +326,7 @@ Target Audience: ${options.targetAudience || 'All Customers'}`;
     body?: string;
     model: string;
   }> {
-    const llm = getDeepSeekClient();
-    const systemPrompt = `You are DeepSeek V4 Flash, an expert AI assistant for Olive Pizza store owners.
+    const systemPrompt = `You are an expert AI assistant for Olive Pizza store owners.
 Your role:
 1. Answer the user's questions or clarifications in a friendly, helpful conversational chat reply.
 2. Generate the requested final marketing copy based on their context and instructions.
@@ -323,32 +345,16 @@ Return valid JSON format ONLY:
 ${contextStr}
 User Request: ${options.message}`;
 
-    if (!llm) {
-      if (options.mode === 'product-description' || options.mode === 'combo-description') {
-        return {
-          success: true,
-          chatReply: `I've created a mouthwatering description for ${options.contextData?.name || 'your item'}! Check your main description box below.`,
-          description: `Delicious handcrafted pizza made with 100% real mozzarella cheese and fresh gourmet ingredients baked to perfection at Olive Pizza.`,
-          model: 'DeepSeek V4 Flash (Fallback)',
-        };
-      }
-      if (options.mode === 'email-template') {
-        return {
-          success: true,
-          chatReply: `I've crafted a full email template for your campaign! Check your main HTML editor.`,
-          subject: `🍕 Exclusive Deal from Olive Pizza!`,
-          html: `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; background:#0f172a; color:#fff; padding:24px; border-radius:16px; text-align:center;"><h2 style="color:#f97316;">${options.message}</h2><p>Order hot & fresh gourmet pizzas from Olive Pizza!</p><a href="https://olivepizza.in/menu" style="background:#f97316; color:#fff; padding:12px 24px; text-decoration:none; border-radius:10px; font-weight:bold; display:inline-block; margin-top:15px;">Order Now 🍕</a></div>`,
-          model: 'DeepSeek V4 Flash (Fallback)',
-        };
-      }
-      return {
-        success: true,
-        chatReply: `I've generated a high-converting notification title and body! Check your notification inputs below.`,
-        title: `🍕 Special Offer Today!`,
-        body: `Order your favorite pizzas fresh from Olive Pizza today and enjoy fast delivery! 🚀`,
-        model: 'DeepSeek V4 Flash (Fallback)',
-      };
-    }
+    const fallbackChat = {
+      success: true,
+      chatReply: `I've generated the content for ${options.message}!`,
+      description: options.mode.includes('description') ? `Delicious handcrafted pizza made with 100% real mozzarella cheese and fresh gourmet ingredients baked to perfection at Olive Pizza.` : undefined,
+      html: options.mode === 'email-template' ? `<div style="font-family:sans-serif; max-width:600px; margin:0 auto; background:#0f172a; color:#fff; padding:24px; border-radius:16px; text-align:center;"><h2 style="color:#f97316;">${options.message}</h2><p>Order hot & fresh gourmet pizzas from Olive Pizza!</p><a href="https://olivepizza.in/menu" style="background:#f97316; color:#fff; padding:12px 24px; text-decoration:none; border-radius:10px; font-weight:bold; display:inline-block; margin-top:15px;">Order Now 🍕</a></div>` : undefined,
+      subject: options.mode === 'email-template' ? `🍕 Exclusive Deal from Olive Pizza!` : undefined,
+      title: options.mode === 'notification' ? `🍕 Special Offer Today!` : undefined,
+      body: options.mode === 'notification' ? `Order your favorite pizzas fresh from Olive Pizza today and enjoy fast delivery! 🚀` : undefined,
+      model: 'Deterministic Fallback',
+    };
 
     try {
       const messagesPayload: any[] = [{ role: 'system', content: systemPrompt }];
@@ -359,16 +365,10 @@ User Request: ${options.message}`;
       }
       messagesPayload.push({ role: 'user', content: userPrompt });
 
-      const response = await llm.client.chat.completions.create({
-        model: llm.model,
-        messages: messagesPayload,
-        temperature: 0.7,
-        max_tokens: 1200,
-      });
+      const result = await executeModelChain(messagesPayload, 1200);
+      if (!result) return fallbackChat;
 
-      const raw = response.choices[0]?.message?.content || '';
-      const cleanJson = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
-
+      const cleanJson = result.content.replace(/```json/gi, '').replace(/```/g, '').trim();
       try {
         const parsed = JSON.parse(cleanJson);
         return {
@@ -379,26 +379,21 @@ User Request: ${options.message}`;
           subject: parsed.subject,
           title: parsed.title,
           body: parsed.body,
-          model: 'DeepSeek V4 Flash',
+          model: result.modelName,
         };
       } catch {
         return {
           success: true,
-          chatReply: raw,
-          description: options.mode.includes('description') ? raw : undefined,
-          html: options.mode === 'email-template' ? raw : undefined,
-          body: options.mode === 'notification' ? raw : undefined,
-          model: 'DeepSeek V4 Flash',
+          chatReply: result.content,
+          description: options.mode.includes('description') ? result.content : undefined,
+          html: options.mode === 'email-template' ? result.content : undefined,
+          body: options.mode === 'notification' ? result.content : undefined,
+          model: result.modelName,
         };
       }
     } catch (err: any) {
-      console.error('[DeepSeekV4Flash] Interactive chat error:', err.message);
-      return {
-        success: true,
-        chatReply: `Generated copy based on "${options.message}". I've filled in your main message box!`,
-        description: `Delicious handcrafted item prepared fresh at Olive Pizza.`,
-        model: 'DeepSeek V4 Flash (Fallback)',
-      };
+      console.error('[AI Generator] Interactive chat error:', err.message);
+      return fallbackChat;
     }
   }
 }

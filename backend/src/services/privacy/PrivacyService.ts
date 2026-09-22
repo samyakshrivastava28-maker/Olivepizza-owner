@@ -152,10 +152,10 @@ Olive Pizza ("we", "us", or "our"), headquartered in Rajnandgaon, Chhattisgarh, 
 
 ### 4. Third-Party Data Processors
 We engage trusted cloud infrastructure, payment gateway, and communication providers strictly under contractual data-protection safeguards:
-- **Firebase / Google Cloud**: Cloud databases, identity authentication, push notifications.
+- **Firebase / Google Cloud**: Cloud databases, identity authentication, Phone OTP SMS delivery, push notifications.
 - **Supabase**: Encrypted live GPS coordinate streaming.
 - **Payment Gateways (Cashfree / Razorpay / PhonePe)**: Secure tokenized payment processing (we never store credit/debit card numbers or CVV).
-- **Fast2SMS / Infobip**: Order status and OTP delivery.
+- **Truecaller**: Verified 1-tap mobile identity verification (upon explicit user consent).
 - **Cloudinary**: Menu and profile image asset optimization.
 
 ### 5. Your Data Rights
@@ -673,7 +673,28 @@ Inquiries or privacy complaints may be submitted through the in-app Privacy Cent
   static async getProcessors(): Promise<ThirdPartyProcessor[]> {
     const snap = await adminDb.collection(this.PROCESSORS_COLLECTION).get();
     if (!snap.empty) {
-      return snap.docs.map(d => d.data() as ThirdPartyProcessor);
+      let docs = snap.docs.map(d => d.data() as ThirdPartyProcessor);
+      const hasInfobip = docs.some(d => d.id === 'proc_infobip');
+      if (hasInfobip) {
+        await adminDb.collection(this.PROCESSORS_COLLECTION).doc('proc_infobip').delete().catch(() => {});
+        docs = docs.filter(d => d.id !== 'proc_infobip');
+      }
+      if (!docs.some(d => d.id === 'proc_truecaller')) {
+        const truecallerProcessor: ThirdPartyProcessor = {
+          id: 'proc_truecaller',
+          providerName: 'Truecaller',
+          purpose: 'Consent-based 1-tap phone identity verification.',
+          dataCategories: ['Mobile Phone Number', 'Truecaller Profile Name'],
+          active: true,
+          processingRegion: 'India / Global',
+          contractStatus: 'Active Developer Partner Agreement',
+          privacyContact: 'privacy@truecaller.com',
+          notes: 'Strictly invoked upon explicit user tap of Truecaller verification CTA.'
+        };
+        await adminDb.collection(this.PROCESSORS_COLLECTION).doc('proc_truecaller').set(truecallerProcessor).catch(() => {});
+        docs.push(truecallerProcessor);
+      }
+      return docs;
     }
 
     const defaultProcessors: ThirdPartyProcessor[] = [
@@ -700,15 +721,15 @@ Inquiries or privacy complaints may be submitted through the in-app Privacy Cent
         notes: 'Subject to automated 5-minute raw breadcrumb purge policy.'
       },
       {
-        id: 'proc_fast2sms',
-        providerName: 'Fast2SMS / Infobip',
-        purpose: 'SMS OTP phone authentication and transactional order alerts.',
-        dataCategories: ['Mobile Phone Number', 'Transactional SMS Text'],
+        id: 'proc_truecaller',
+        providerName: 'Truecaller',
+        purpose: 'Consent-based 1-tap phone identity verification.',
+        dataCategories: ['Mobile Phone Number', 'Truecaller Profile Name'],
         active: true,
-        processingRegion: 'India',
-        contractStatus: 'Active Enterprise API Agreement',
-        privacyContact: 'support@fast2sms.com',
-        notes: 'Exclusively utilized for transactional OTP and high-priority delivery dispatch.'
+        processingRegion: 'India / Global',
+        contractStatus: 'Active Developer Partner Agreement',
+        privacyContact: 'privacy@truecaller.com',
+        notes: 'Strictly invoked upon explicit user tap of Truecaller verification CTA.'
       },
       {
         id: 'proc_razorpay',

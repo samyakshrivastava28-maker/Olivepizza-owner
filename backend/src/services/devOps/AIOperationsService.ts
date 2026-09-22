@@ -222,14 +222,14 @@ class AIOperationsStore {
     const llmOnline = aiProviderStats.nvidia.ok || aiProviderStats.openrouter.ok || aiProviderStats.gemini.ok || aiProviderStats.activeProvider !== 'none';
     const sttOnline = true; // Whisper / Canary route active
     const ttsOnline = true; // Multilingual TTS / WebSpeech active
-    const infobipOnline = Boolean(process.env.INFOBIP_API_KEY && process.env.INFOBIP_API_KEY.length > 5);
+    const firebaseAuthOnline = Boolean(process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || process.env.FIREBASE_PROJECT_ID);
 
     return {
       stt: { status: sttOnline ? 'GREEN' : 'RED', label: 'ASR Transcription Engine (Canary/Whisper)' },
       llm: { status: llmOnline ? 'GREEN' : 'YELLOW', label: 'LLM Multi-Provider Failover Engine', activeProvider: aiProviderStats.activeProvider },
       pinecone: { status: pineconeOnline ? 'GREEN' : 'RED', label: 'Pinecone Vector Database', indexName: PINECONE_INDEX_NAME, ...pineconeDetails },
       tts: { status: ttsOnline ? 'GREEN' : 'RED', label: 'NVIDIA Chatterbox & WebSpeech TTS' },
-      sms: { status: infobipOnline ? 'GREEN' : 'YELLOW', label: 'Infobip 2FA & SMS OTP Gateway', configured: infobipOnline },
+      sms: { status: firebaseAuthOnline ? 'GREEN' : 'YELLOW', label: 'Firebase Phone Auth & SMS Gateway', configured: firebaseAuthOnline },
       imageGen: { status: 'GREEN', label: 'AI Image Engine (FLUX / Pollinations / Cloudinary)' }
     };
   }

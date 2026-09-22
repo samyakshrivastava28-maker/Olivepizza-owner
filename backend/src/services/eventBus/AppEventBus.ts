@@ -30,8 +30,8 @@ export interface BaseOrderEvent {
   permanentBillNo?: number;
   userId: string;
   customerName: string;
-  franchiseId: string;
-  branchId: string;
+  franchiseId?: string;
+  branchId?: string;
   totalAmount: number;
   timestamp: string;
   rawOrderData?: any;
@@ -127,7 +127,6 @@ export interface OrderStatusChangedEvent {
   totalAmount: number;
   deliveryPartnerId?: string;
   deliveryPartnerName?: string;
-  slackThreadTs?: string;
   timestamp: string;
   rawOrderData?: any;
 }

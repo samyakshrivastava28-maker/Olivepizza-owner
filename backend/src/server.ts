@@ -6,7 +6,6 @@ import './services/DataLifecycleService';
 import './services/notification/NotificationQueueService';
 import './jobs/MonthlyReportJob';
 import { kb } from './services/KnowledgeBaseService';
-import { pineconeService } from './services/ai/PineconeService';
 import { storageAnalyzer } from './services/storageAnalyzer.service';
 import { validateEnvironmentVariables } from './config/validator';
 import { initScheduler } from './scripts/scheduler';
@@ -65,8 +64,6 @@ async function startServer() {
   } catch (err: any) {
     console.warn('[KnowledgeSync] Warning:', err?.message);
   }
-
-  pineconeService.getStatus().catch((err: any) => console.warn('[Pinecone] Warning:', err?.message));
 
   const server = app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`🍕 Olive Pizza Standalone Full Owner Backend running on http://localhost:${PORT}`);

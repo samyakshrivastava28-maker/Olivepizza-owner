@@ -1,14 +1,14 @@
-﻿import { PhoneVerificationProvider, OTPRequestResult, VerificationResult } from './PhoneVerificationProvider.js';
-import { InfobipPhoneVerificationProvider } from './InfobipPhoneVerificationProvider.js';
+import { PhoneVerificationProvider, OTPRequestResult, VerificationResult } from './PhoneVerificationProvider.js';
+import { FirebasePhoneVerificationProvider } from './FirebasePhoneVerificationProvider.js';
 import { TruecallerProvider } from './TruecallerProvider.js';
 
 export class PhoneVerificationService {
   private static instance: PhoneVerificationService;
-  private infobipProvider: InfobipPhoneVerificationProvider;
+  private firebaseProvider: FirebasePhoneVerificationProvider;
   private truecallerProvider: TruecallerProvider;
 
   private constructor() {
-    this.infobipProvider = new InfobipPhoneVerificationProvider();
+    this.firebaseProvider = new FirebasePhoneVerificationProvider();
     this.truecallerProvider = new TruecallerProvider();
   }
 
@@ -19,8 +19,8 @@ export class PhoneVerificationService {
     return PhoneVerificationService.instance;
   }
 
-  public getInfobipProvider(): InfobipPhoneVerificationProvider {
-    return this.infobipProvider;
+  public getFirebaseProvider(): FirebasePhoneVerificationProvider {
+    return this.firebaseProvider;
   }
 
   public getTruecallerProvider(): TruecallerProvider {
@@ -28,24 +28,24 @@ export class PhoneVerificationService {
   }
 
   public async sendOtp(phone: string, userId: string, ipAddress?: string): Promise<OTPRequestResult> {
-    return this.infobipProvider.sendOtp(phone, userId, ipAddress);
+    return this.firebaseProvider.sendOtp(phone, userId, ipAddress);
   }
 
   public async verifyOtp(phone: string, code: string, userId: string, pinId?: string): Promise<VerificationResult> {
-    return this.infobipProvider.verifyOtp(phone, code, userId, pinId);
+    return this.firebaseProvider.verifyOtp(phone, code, userId, pinId);
   }
 
   public async getHealthStatus(): Promise<{
-    infobip: { ok: boolean; configured: boolean; latencyMs?: number; error?: string };
+    firebase: { ok: boolean; configured: boolean; latencyMs?: number; error?: string };
     truecaller: { ok: boolean; configured: boolean };
   }> {
-    const infobipHealth = await this.infobipProvider.getHealthStatus();
+    const firebaseHealth = await this.firebaseProvider.getHealthStatus();
     return {
-      infobip: {
-        ok: infobipHealth.ok,
-        configured: infobipHealth.configured,
-        latencyMs: infobipHealth.latencyMs,
-        error: infobipHealth.error
+      firebase: {
+        ok: firebaseHealth.ok,
+        configured: firebaseHealth.configured,
+        latencyMs: firebaseHealth.latencyMs,
+        error: firebaseHealth.error
       },
       truecaller: {
         ok: true,

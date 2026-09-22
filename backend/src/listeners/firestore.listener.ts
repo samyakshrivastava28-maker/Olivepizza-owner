@@ -200,6 +200,8 @@ export class FirestoreListener {
               orderNumber,
               userId: orderData.userId || orderData.firebaseUid || '',
               customerName: orderData.customerName || orderData.customer_name || 'Customer',
+              franchiseId: orderData.franchiseId || 'main',
+              branchId: orderData.branchId || 'main',
               totalAmount,
               items: Array.isArray(orderData.items) ? orderData.items : [],
               paymentMethod: orderData.paymentMethod || 'COD',
@@ -215,7 +217,6 @@ export class FirestoreListener {
           else if (change.type === 'modified') {
             const currentStatus: string = orderData.status;
             const prevStatus = this.orderStatusCache.get(orderData.id);
-            const slackTs: string | undefined = orderData.slackThreadTs;
 
             if (!currentStatus || currentStatus === prevStatus) continue;
             this.orderStatusCache.set(orderData.id, currentStatus);
@@ -391,7 +392,6 @@ export class FirestoreListener {
               totalAmount,
               deliveryPartnerId: orderData.deliveryPartnerId || orderData.delivery_partner_id,
               deliveryPartnerName: orderData.deliveryPartnerName,
-              slackThreadTs: orderData.slackThreadTs,
               timestamp: new Date().toISOString(),
               rawOrderData: orderData,
             });

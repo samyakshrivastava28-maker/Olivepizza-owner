@@ -11,8 +11,8 @@ dotenv.config();
  * It must NEVER be used for Payments, POS shifts, Invoices, or Business data.
  */
 
-const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || 'https://tdjrkqmhdynbaciguyvr.supabase.co';
-const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRkanJrcW1oZHluYmFjaWd1eXZyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMDE4MzUsImV4cCI6MjA5Nzg3NzgzNX0.03rt77yV0zfnxbLNqbEOWijqpT0iAuEgYqSTGN0HPtI';
+const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
+const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 let supabaseClient: SupabaseClient | null = null;
 
@@ -33,6 +33,8 @@ if (supabaseUrl && supabaseKey) {
   } catch (err: any) {
     console.warn('[Supabase Navigation] Initialization warning:', err.message);
   }
+} else {
+  console.warn('[Supabase Navigation] Warning: SUPABASE_URL and/or SUPABASE_ANON_KEY not configured. Realtime live GPS navigation telemetry disabled.');
 }
 
 export const supabaseNav = supabaseClient!;

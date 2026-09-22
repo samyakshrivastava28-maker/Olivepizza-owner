@@ -165,8 +165,11 @@ app.use(cors({
       return callback(null, true);
     }
 
-    // 3. Strict HTTPS official subdomains of olivepizza.in
-    if (/^https:\/\/([a-z0-9-]+\.)*olivepizza\.in$/.test(origin)) {
+    // 3. Strict HTTPS official subdomains of olivepizza.in or Vercel preview deployments
+    if (
+      /^https:\/\/([a-z0-9-]+\.)*olivepizza\.in$/.test(origin) ||
+      /^https:\/\/olive-pizza(-[a-z0-9-]+)?\.vercel\.app$/.test(origin)
+    ) {
       return callback(null, true);
     }
 
@@ -175,20 +178,19 @@ app.use(cors({
       return callback(null, true);
     }
 
-    // 5. Development-only origins
-    if (!isProduction) {
-      if (
-        devOrigins.includes(origin) ||
-        origin.startsWith('http://localhost') ||
-        origin.startsWith('http://127.0.0.1') ||
-        origin.startsWith('http://192.168.') ||
-        origin.startsWith('https://localhost')
-      ) {
-        return callback(null, true);
-      }
+    // 5. Authorized local development & network testing origins
+    if (
+      devOrigins.includes(origin) ||
+      origin.startsWith('http://localhost:') ||
+      origin.startsWith('http://127.0.0.1:') ||
+      origin.startsWith('http://192.168.') ||
+      origin.startsWith('http://10.') ||
+      origin.startsWith('https://localhost')
+    ) {
+      return callback(null, true);
     }
 
-    // Reject all other origins safely in production
+    // Reject all other unknown origins safely
     callback(null, false);
   },
   credentials: true
