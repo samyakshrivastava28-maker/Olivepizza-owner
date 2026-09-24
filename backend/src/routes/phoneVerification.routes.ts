@@ -103,14 +103,32 @@ router.get('/truecaller/session/:requestId', async (req: Request, res: Response)
   }
 });
 
-router.post('/truecaller/callback', authLimiter, async (req: Request, res: Response) => {
+// Probe / Health verification endpoint for Truecaller Developer Portal
+router.get('/truecaller/callback', (req: Request, res: Response) => {
+  return res.json({
+    success: true,
+    message: 'Truecaller webhook callback endpoint is active and listening.'
+  });
+});
+
+// Webhook callback called by Truecaller cloud when user completes web verification on mobile
+router.post('/truecaller/callback', async (req: Request, res: Response) => {
   try {
-    const { requestId, accessToken, endpoint, payload, signature } = req.body;
+    const requestId = req.body?.requestId || req.body?.requestNonce || (req.query?.requestId as string) || (req.query?.requestNonce as string);
+    const accessToken = req.body?.accessToken || req.body?.access_token || (req.query?.accessToken as string) || (req.query?.access_token as string);
+    const endpoint = req.body?.endpoint || req.body?.profileEndpoint || (req.query?.endpoint as string) || (req.query?.profileEndpoint as string);
+    const payload = req.body?.payload || req.query?.payload;
+    const signature = req.body?.signature || req.query?.signature;
+
+    console.log(`[Truecaller Webhook] Received callback for requestId: ${requestId}, endpoint: ${endpoint}, hasToken: ${Boolean(accessToken)}, hasPayload: ${Boolean(payload)}`);
+
     if (!requestId) {
-      return res.status(400).json({ success: false, error: 'Missing requestId parameter in callback.' });
+      console.warn('[Truecaller Webhook] Rejected: Missing requestId / requestNonce in callback payload:', req.body);
+      return res.status(400).json({ success: false, error: 'Missing requestId or requestNonce parameter in callback.' });
     }
 
     if ((!accessToken || !endpoint) && (!payload || !signature)) {
+      console.warn('[Truecaller Webhook] Rejected: Missing profile or crypto payload:', req.body);
       return res.status(400).json({
         success: false,
         error: 'Missing required callback fields (expected accessToken+endpoint or payload+signature).'
@@ -119,9 +137,10 @@ router.post('/truecaller/callback', authLimiter, async (req: Request, res: Respo
 
     const payloadOrOptions = accessToken && endpoint ? { accessToken, endpoint } : payload;
     const result = await truecaller.handleWebCallback(requestId, payloadOrOptions, signature);
+    console.log(`[Truecaller Webhook] Processed callback for ${requestId}: success=${result.success}`);
     return res.json(result);
   } catch (error: any) {
-    console.error('[PhoneVerification] Truecaller callback error:', error);
+    console.error('[Truecaller Webhook] Exception processing callback:', error);
     return res.status(500).json({ success: false, error: error.message || 'Callback verification failed.' });
   }
 });

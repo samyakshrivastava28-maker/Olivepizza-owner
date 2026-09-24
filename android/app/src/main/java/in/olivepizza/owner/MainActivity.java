@@ -67,6 +67,18 @@ public class MainActivity extends BridgeActivity {
         registerFcmTokenNatively();
     }
 
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        try {
+            if (com.truecaller.android.sdk.TruecallerSDK.getInstance() != null) {
+                com.truecaller.android.sdk.TruecallerSDK.getInstance().onActivityResultObtained(this, requestCode, resultCode, data);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Truecaller onActivityResult forwarding error: " + e.getMessage());
+        }
+    }
+
     public static boolean isStaffRole(String role) {
         return "owner".equalsIgnoreCase(role) || "delivery_partner".equalsIgnoreCase(role) || "admin".equalsIgnoreCase(role);
     }

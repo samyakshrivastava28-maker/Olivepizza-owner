@@ -287,8 +287,14 @@ export class TruecallerProvider implements PhoneVerificationProvider {
     payloadOrOptions: any,
     signature?: string
   ): Promise<VerificationResult> {
-    const session = await this.getWebSession(requestId);
+    let session = await this.getWebSession(requestId);
     if (!session) {
+      // Retry after 350ms to handle Firestore eventual consistency / replication
+      await new Promise(r => setTimeout(r, 350));
+      session = await this.getWebSession(requestId);
+    }
+    if (!session) {
+      console.warn(`[Truecaller Callback] Session ${requestId} not found in memory or Firestore.`);
       return { success: false, error: 'Session not found or expired.' };
     }
 

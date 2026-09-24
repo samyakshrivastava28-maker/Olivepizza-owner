@@ -19,7 +19,7 @@ const getEnvNumber = (key: string, defaultValue: number): number => {
 // Auth Limiter: Login, Signup, OTP Sending, Phone Verification, Truecaller
 export const authLimiter = rateLimit({
   windowMs: getEnvNumber('AUTH_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000), // 15 mins
-  max: getEnvNumber('AUTH_RATE_LIMIT_MAX', 15), // Max 15 attempts per window
+  max: getEnvNumber('AUTH_RATE_LIMIT_MAX', 60), // Max 60 attempts per window
   standardHeaders: true,
   legacyHeaders: false,
   message: {

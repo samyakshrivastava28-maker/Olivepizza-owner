@@ -62,8 +62,8 @@
             android:value="olive_order_status" />
 
         <!-- Truecaller SDK -->
-        <meta-data android:name="com.truecaller.android.sdk.ClientId" android:value="um2vaxqdcr3nroydqvyg_hahzikmqrla8w_yxiptsry" />
-        <meta-data android:name="com.truecaller.android.sdk.PartnerKey" android:value="um2vaxqdcr3nroydqvyg_hahzikmqrla8w_yxiptsry" />
+        <meta-data android:name="com.truecaller.android.sdk.ClientId" android:value="@string/truecaller_client_id" />
+        <meta-data android:name="com.truecaller.android.sdk.PartnerKey" android:value="@string/partnerKey" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

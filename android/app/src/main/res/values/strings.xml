@@ -5,4 +5,6 @@
     <string name="package_name">in.olivepizza.owner</string>
     <string name="custom_url_scheme">in.olivepizza.owner</string>
     <string name="default_web_client_id">1017239455106-i8vrpdq1v51pkg0308k7btu1o4img597.apps.googleusercontent.com</string>
+    <string name="partnerKey">um2vaxqdcr3nroydqvyg_hahzikmqrla8w_yxiptsry</string>
+    <string name="truecaller_client_id">um2vaxqdcr3nroydqvyg_hahzikmqrla8w_yxiptsry</string>
 </resources>
