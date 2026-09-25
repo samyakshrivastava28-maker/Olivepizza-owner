@@ -1159,6 +1159,109 @@ router.post('/email/signin', async (req: Request, res: Response): Promise<void> 
 });
 
 // ============================================================================
+// CUSTOMER ONBOARDING: LINK EMAIL (OPTIONAL STEP 4)
+// Supports: Manual 4-Digit OTP Verification OR Google Account ID Token Link OR Skip
+// ============================================================================
+router.post('/customer/link-email', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) {
+      res.status(401).json({ success: false, message: 'Authentication required' });
+      return;
+    }
+
+    const { email, code, googleIdToken, skip } = req.body;
+    const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
+
+    // 1. If customer chooses to skip
+    if (skip === true) {
+      await adminDb.collection('users').doc(uid).set({
+        emailSkipped: true,
+        emailSkippedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }, { merge: true });
+
+      res.json({
+        success: true,
+        skipped: true,
+        message: 'Email linking skipped successfully',
+      });
+      return;
+    }
+
+    let verifiedEmail: string | null = null;
+    let provider = 'email_otp';
+
+    // 2. Google Verified Token
+    if (googleIdToken) {
+      try {
+        const decoded = await adminAuth.verifyIdToken(googleIdToken);
+        if (!decoded.email) {
+          res.status(400).json({ success: false, message: 'No email found in Google credential' });
+          return;
+        }
+        verifiedEmail = decoded.email.toLowerCase().trim();
+        provider = 'google.com';
+      } catch (tokenErr: any) {
+        console.error('[AuthRoutes] Invalid Google ID token for link-email:', tokenErr);
+        res.status(400).json({ success: false, message: 'Invalid Google authentication token' });
+        return;
+      }
+    } else if (email && code) {
+      // 3. Manual 4-digit OTP verification
+      const cleanEmail = String(email).toLowerCase().trim();
+      const verifyResult = await EmailVerificationService.verifyCode(cleanEmail, String(code).trim(), clientIp);
+      if (!verifyResult.success) {
+        res.status(400).json(verifyResult);
+        return;
+      }
+      verifiedEmail = cleanEmail;
+      provider = 'email_otp';
+    } else {
+      res.status(400).json({
+        success: false,
+        message: 'Provide either email + 4-digit code, a valid googleIdToken, or skip: true',
+      });
+      return;
+    }
+
+    // 4. Update Firestore user document
+    const userRef = adminDb.collection('users').doc(uid);
+    await userRef.set({
+      email: verifiedEmail,
+      emailVerified: true,
+      emailLinkedAt: new Date().toISOString(),
+      emailProvider: provider,
+      emailSkipped: false,
+      updatedAt: new Date().toISOString(),
+      role: 'customer', // strictly enforce customer role
+    }, { merge: true });
+
+    // 5. Update Firebase Auth user profile if possible (graceful fallback if email already linked to another auth account)
+    try {
+      await adminAuth.updateUser(uid, {
+        email: verifiedEmail,
+        emailVerified: true,
+      });
+    } catch (firebaseAuthErr: any) {
+      console.warn('[AuthRoutes] Notice: could not update Firebase Auth user record directly (may already exist):', firebaseAuthErr.message);
+      // Still consider success since Firestore profile is updated and verified
+    }
+
+    res.json({
+      success: true,
+      email: verifiedEmail,
+      emailVerified: true,
+      provider,
+      message: 'Email linked and verified successfully',
+    });
+  } catch (err: any) {
+    console.error('[AuthRoutes] Error in /customer/link-email:', err);
+    res.status(500).json({ success: false, message: 'Failed to link email. Please try again.' });
+  }
+});
+
+// ============================================================================
 // POS 4-DIGIT OPERATIONAL PIN MANAGEMENT & UNLOCK
 // ============================================================================
 

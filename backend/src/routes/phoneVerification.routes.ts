@@ -92,7 +92,9 @@ router.get('/truecaller/session/:requestId', async (req: Request, res: Response)
       phone: session.phone,
       error: session.error,
       name: session.name,
-      country: session.country
+      country: session.country,
+      customToken: session.customToken,
+      userId: session.userId
     });
   } catch (error: any) {
     return res.status(500).json({

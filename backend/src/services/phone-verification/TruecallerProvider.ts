@@ -1,7 +1,7 @@
 import axios from 'axios';
 import crypto from 'crypto';
 import { PhoneVerificationProvider, VerificationResult } from './PhoneVerificationProvider.js';
-import { adminDb } from '../../config/firebase.js';
+import { adminDb, adminAuth } from '../../config/firebase.js';
 
 interface TruecallerKey {
   keyType: string;
@@ -21,6 +21,7 @@ export interface TruecallerWebSession {
   expiresAt: number;
   verifiedAt?: number;
   error?: string;
+  customToken?: string;
 }
 
 export class TruecallerProvider implements PhoneVerificationProvider {
@@ -360,6 +361,15 @@ export class TruecallerProvider implements PhoneVerificationProvider {
         session.verifiedAt = now;
         session.error = undefined;
 
+        // Auto-resolve or create user and generate customToken for immediate frontend login
+        try {
+          const { uid, customToken } = await this.resolveUserAndCreateToken(formattedPhone, name, session.userId);
+          session.userId = uid;
+          session.customToken = customToken;
+        } catch (tokenErr: any) {
+          console.warn('[Truecaller Callback] Custom token creation notice:', tokenErr?.message);
+        }
+
         this.webSessions.set(requestId, session);
 
         await adminDb.collection('truecaller_web_sessions').doc(requestId).set({
@@ -402,6 +412,15 @@ export class TruecallerProvider implements PhoneVerificationProvider {
         session.country = (result as any).country;
         session.verifiedAt = now;
         session.error = undefined;
+
+        try {
+          const { uid, customToken } = await this.resolveUserAndCreateToken(result.phone, (result as any).name, session.userId);
+          session.userId = uid;
+          session.customToken = customToken;
+        } catch (tokenErr: any) {
+          console.warn('[Truecaller Callback] Custom token creation notice:', tokenErr?.message);
+        }
+
         this.webSessions.set(requestId, session);
         await adminDb.collection('truecaller_web_sessions').doc(requestId).set({ ...session, updatedAt: now }).catch(() => {});
       } else {
@@ -417,5 +436,49 @@ export class TruecallerProvider implements PhoneVerificationProvider {
       success: false,
       error: 'Unrecognized Truecaller callback parameters. Expected accessToken+endpoint or payload+signature.'
     };
+  }
+
+  private async resolveUserAndCreateToken(
+    phone: string,
+    name?: string,
+    existingUid?: string
+  ): Promise<{ uid: string; customToken: string }> {
+    let uid = existingUid && !existingUid.startsWith('anon_') ? existingUid : null;
+
+    if (!uid) {
+      try {
+        const userRecord = await adminAuth.getUserByPhoneNumber(phone);
+        uid = userRecord.uid;
+      } catch (err: any) {
+        if (err.code === 'auth/user-not-found') {
+          const newUser = await adminAuth.createUser({
+            phoneNumber: phone,
+            displayName: name || 'Customer',
+          });
+          uid = newUser.uid;
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    // Strictly enforce role: customer
+    await adminAuth.setCustomUserClaims(uid, { role: 'customer' }).catch(() => {});
+    const customToken = await adminAuth.createCustomToken(uid, { role: 'customer' });
+
+    // Ensure Firestore profile is synced
+    await adminDb.collection('users').doc(uid).set({
+      phone,
+      phoneVerified: true,
+      phoneSetupCompleted: true,
+      verificationMethod: 'truecaller',
+      role: 'customer',
+      updatedAt: new Date().toISOString(),
+      ...(name ? { name, displayName: name } : {}),
+    }, { merge: true }).catch((err) => {
+      console.warn('[Truecaller] Profile sync notice:', err.message);
+    });
+
+    return { uid, customToken };
   }
 }

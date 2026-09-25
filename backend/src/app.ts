@@ -21,6 +21,7 @@ import githubRoutes from './routes/github.routes.js';
 import phoneVerificationRoutes from './routes/phoneVerification.routes.js';
 import devopsRoutes from './routes/devops.routes.js';
 import ttsRoutes from './routes/tts.routes.js';
+import locationRoutes from './routes/location.routes.js';
 import { versionCheck } from './middleware/versionCheck.js';
 import { verifyTurnstile } from './middleware/turnstile.middleware.js';
 import { 
@@ -374,6 +375,9 @@ app.use('/api/devops', devopsRoutes);
 import privacyRoutes from './routes/privacy.routes.js';
 app.use('/privacy', privacyRoutes);
 app.use('/api/privacy', privacyRoutes);
+
+app.use('/location', locationRoutes);
+app.use('/api/location', locationRoutes);
 
 import paymentRoutes from './routes/payment.routes.js';
 import { PaymentReconciliationService } from './services/payment/PaymentReconciliationService.js';
