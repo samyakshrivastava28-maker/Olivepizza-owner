@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { adminDb } from '../../config/firebase.js';
+import { adminDb, adminAuth } from '../../config/firebase.js';
 import { sendEmailDirect } from '../email.service.js';
 import { AuthAuditService } from './AuthAuditService.js';
 
@@ -145,44 +145,31 @@ export class EmailVerificationService {
       </div>
     `;
 
-    let emailDispatched = false;
-    let dispatchWarning = '';
+    // Dispatch email asynchronously in the background so HTTP response is returned in <80ms
+    sendEmailDirect(cleanEmail, 'Your Olive Pizza 4-Digit Verification Code', emailHtml)
+      .then(() => {
+        console.log(`[EmailVerificationService] ✅ Verification email delivered to ${cleanEmail}`);
+      })
+      .catch((err: any) => {
+        console.error('[EmailVerificationService] ❌ Failed to dispatch email via SMTP/HTTP:', err?.message || err);
+        console.warn(`[EmailVerificationService] ⚠️ Outbound email notice for [${cleanEmail}]: Code is ${code}`);
+      });
 
-    try {
-      await sendEmailDirect(cleanEmail, 'Your Olive Pizza 4-Digit Verification Code', emailHtml);
-      emailDispatched = true;
-    } catch (err: any) {
-      console.error('[EmailVerificationService] ❌ Failed to dispatch email via SMTP/HTTP:', err?.message || err);
-
-      const isDevelopment = process.env.NODE_ENV !== 'production' || process.env.PHONE_AUTH_MODE === 'development';
-      const isTimeoutOrBlocked = /timeout|ETIMEDOUT|ECONNREFUSED|EHOSTUNREACH|465|587/i.test(err?.message || '');
-
-      if (isDevelopment || isTimeoutOrBlocked) {
-        console.warn(`[EmailVerificationService] ⚠️ Outbound SMTP egress restricted by cloud provider. 4-Digit Code for [${cleanEmail}]: ${code}`);
-        dispatchWarning = 'Email egress restricted by host. Verification code ready.';
-      } else {
-        return {
-          success: false,
-          message: 'Failed to deliver verification email. Please check the address or try again.',
-        };
-      }
-    }
-
-    await AuthAuditService.logEvent({
+    // Record audit event asynchronously
+    AuthAuditService.logEvent({
       eventType: 'EMAIL_CODE_REQUESTED',
       identifier: cleanEmail,
       ipAddress,
       status: 'SUCCESS',
-      metadata: { expiresInSeconds: 300, emailDispatched },
-    });
+      metadata: { expiresInSeconds: 300, backgroundDispatched: true },
+    }).catch(() => {});
 
     const isDevelopment = process.env.NODE_ENV !== 'production' || process.env.PHONE_AUTH_MODE === 'development';
     return {
       success: true,
       message: 'Verification code sent successfully. Valid for 5 minutes.',
       expiresInSeconds: 300,
-      demoCode: (isDevelopment || !emailDispatched) ? code : undefined,
-      warning: dispatchWarning || undefined,
+      demoCode: isDevelopment ? code : undefined,
     };
   }
 
@@ -265,8 +252,14 @@ export class EmailVerificationService {
       attempts: currentAttempts,
     });
 
-    // Also mark user record if existing in users collection
+    // Authoritatively mark user record as email verified in Firebase Auth and Firestore
     try {
+      if (adminAuth) {
+        const authUser = await adminAuth.getUserByEmail(cleanEmail).catch(() => null);
+        if (authUser) {
+          await adminAuth.updateUser(authUser.uid, { emailVerified: true }).catch(() => {});
+        }
+      }
       const userQuery = await adminDb.collection('users').where('email', '==', cleanEmail).limit(1).get();
       if (!userQuery.empty) {
         await userQuery.docs[0].ref.update({
@@ -275,7 +268,7 @@ export class EmailVerificationService {
         });
       }
     } catch (err) {
-      console.warn('[EmailVerificationService] Notice: could not update users collection flag:', err);
+      console.warn('[EmailVerificationService] Notice: could not update auth/users collection flag:', err);
     }
 
     await AuthAuditService.logEvent({

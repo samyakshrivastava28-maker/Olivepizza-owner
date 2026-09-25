@@ -1085,6 +1085,9 @@ router.post('/email/signin', async (req: Request, res: Response): Promise<void> 
     try {
       const userRecord = await adminAuth.getUserByEmail(cleanEmail);
       uid = userRecord.uid;
+      if (!userRecord.emailVerified) {
+        await adminAuth.updateUser(uid, { emailVerified: true }).catch(() => {});
+      }
     } catch (authErr: any) {
       if (authErr.code === 'auth/user-not-found') {
         const newUser = await adminAuth.createUser({
