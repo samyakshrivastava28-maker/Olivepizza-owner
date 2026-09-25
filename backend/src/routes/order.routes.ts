@@ -1032,48 +1032,40 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
     // 5. Asynchronous Background Dispatch (Targeted Restaurant Management Notification with Action Buttons)
     setImmediate(async () => {
       try {
-        const branchStaffUids = await notificationEngine.resolveBranchStaff(resolvedBranchId, resolvedFranchiseId);
-        if (branchStaffUids.length > 0) {
-          const isCod = (req.body.paymentMethod || 'COD').toUpperCase() === 'COD';
-          const restaurantPayload = RestaurantTemplates.newOrder(newOrderId, {
-            customerName: userData.name || (req.user as any)?.name || 'Customer',
-            orderNumber,
-            permanentBillNo: permanentBillNo || undefined,
-            orderType: deliveryType,
-            totalAmount: finalOrderTotal,
-            items: validatedItems,
-            paymentMethod: req.body.paymentMethod || 'COD',
-            paymentStatus: isCod ? 'PENDING' : 'PAID',
-            cashToCollect: isCod ? finalOrderTotal : 0,
-            deliveryAddress: userAddress || 'Pickup',
-            deliveryInstructions: req.body.deliveryInstructions || req.body.instructions || '',
-            customerNotes: req.body.customerNotes || req.body.notes || '',
-            lat: effectiveLocation?.lat,
-            lng: effectiveLocation?.lng,
-            phone: userPhone,
-            branchId: resolvedBranchId,
-            franchiseId: resolvedFranchiseId,
-            orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-            version: 1,
-            financials: {
-              subtotal: serverCalculatedTotal,
-              discount: discountAmount,
-              deliveryFee,
-              taxes,
-              packagingCharge: req.body.packagingCharge || 0,
-              couponCode: appliedCouponCode || undefined,
-              total: finalOrderTotal
-            }
-          });
-          await notificationEngine.sendBulk(branchStaffUids, restaurantPayload, {
-            eventId: `order_created_restaurant_${newOrderId}`,
-            category: 'alarm_actionable',
-            priority: 'critical',
-            orderId: newOrderId,
-            targetApp: 'restaurant',
-            tag: `order_restaurant_${newOrderId}`
-          });
-        }
+        const { NotificationRouter } = await import('../services/notification/NotificationRouter.js');
+        const isCod = (req.body.paymentMethod || 'COD').toUpperCase() === 'COD';
+        await NotificationRouter.routeOrderEvent({
+          orderId: newOrderId,
+          orderNumber,
+          dailyOrderNumber: orderNumber,
+          permanentBillNo: permanentBillNo || undefined,
+          orderType: deliveryType,
+          totalAmount: finalOrderTotal,
+          items: validatedItems,
+          paymentMethod: req.body.paymentMethod || 'COD',
+          paymentStatus: isCod ? 'PENDING' : 'PAID',
+          cashToCollect: isCod ? finalOrderTotal : 0,
+          deliveryAddress: userAddress || 'Pickup',
+          deliveryInstructions: req.body.deliveryInstructions || req.body.instructions || '',
+          customerNotes: req.body.customerNotes || req.body.notes || '',
+          lat: effectiveLocation?.lat,
+          lng: effectiveLocation?.lng,
+          contactPhone: userPhone,
+          customerName: userData.name || (req.user as any)?.name || 'Customer',
+          userId,
+          branchId: resolvedBranchId,
+          franchiseId: resolvedFranchiseId,
+          orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+          financials: {
+            subtotal: serverCalculatedTotal,
+            discount: discountAmount,
+            deliveryFee,
+            taxes,
+            packagingCharge: req.body.packagingCharge || 0,
+            couponCode: appliedCouponCode || undefined,
+            total: finalOrderTotal
+          }
+        }, 'RESTAURANT_NEW_ORDER_ALARM');
       } catch (notifErr: any) {
         console.error('[Orders] Async Restaurant Notification dispatch error:', notifErr.message);
       }

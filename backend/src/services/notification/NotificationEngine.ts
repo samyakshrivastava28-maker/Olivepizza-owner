@@ -584,11 +584,17 @@ export class NotificationEngine {
 
       let filteredRows = result.rows;
       if (targetApp) {
-        // Filter rows matching targetApp, or rows where app_name is null/empty for backward compatibility
-        const exactMatches = result.rows.filter((r: any) => r.app_name === targetApp);
-        if (exactMatches.length > 0) {
-          filteredRows = exactMatches;
-        }
+        // STRICT APP ISOLATION:
+        // Only select tokens explicitly matching targetApp.
+        // Never allow tokens registered for a different app (e.g. 'owner' or 'delivery')
+        // to receive alerts for another app (e.g. 'restaurant').
+        filteredRows = result.rows.filter((r: any) => {
+          if (r.app_name === targetApp) return true;
+          // Reject if explicitly tagged for a different app
+          if (r.app_name && r.app_name !== targetApp) return false;
+          // For staff / delivery / owner apps, reject untagged legacy tokens to prevent cross-app leakage
+          return targetApp === 'customer';
+        });
       }
 
       const foundUids = new Set(filteredRows.map((r: any) => r.firebase_uid));
@@ -600,7 +606,25 @@ export class NotificationEngine {
         for (const uid of missingUids) {
           try {
             const userDoc = await db.collection('users').doc(uid).get();
-            const firestoreTokens: string[] = userDoc.data()?.fcmTokens || [];
+            const userData = userDoc.data() || {};
+            const userEmail = (userData.email || '').toLowerCase().trim();
+            const userRole = (userData.role || '').toLowerCase().trim();
+            const isOwner = ['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com'].includes(userEmail) || userRole === 'owner' || userRole === 'platform_owner';
+
+            // Safety Guard: Owner tokens must NEVER fallback for restaurant or delivery notifications
+            if (isOwner && targetApp && targetApp !== 'owner') {
+              continue;
+            }
+            // Delivery tokens fallback guard: only delivery roles
+            if (targetApp === 'delivery' && !['delivery', 'delivery_partner', 'rider'].includes(userRole)) {
+              continue;
+            }
+            // Restaurant tokens fallback guard: only restaurant staff roles
+            if (targetApp === 'restaurant' && !['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef'].includes(userRole)) {
+              continue;
+            }
+
+            const firestoreTokens: string[] = userData.fcmTokens || [];
             for (const t of firestoreTokens) {
               if (t && typeof t === 'string') {
                 tokens.push(t);
@@ -755,7 +779,29 @@ export class NotificationEngine {
       console.warn(`[NotificationEngine] Branch staff lookup failed for branch ${cleanBranchId} (franchise: ${cleanFranchiseId}):`, e.message);
     }
 
-    return Array.from(uidsSet);
+    const FORBIDDEN_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
+    const FORBIDDEN_ROLES = new Set(['owner', 'platform_owner', 'customer', 'delivery', 'delivery_partner', 'rider']);
+
+    const validUids: string[] = [];
+    for (const uid of uidsSet) {
+      try {
+        const uDoc = await db.collection('users').doc(uid).get();
+        if (uDoc.exists) {
+          const ud = uDoc.data() || {};
+          const email = (ud.email || '').toLowerCase().trim();
+          const role = (ud.role || '').toLowerCase().trim();
+          if (FORBIDDEN_EMAILS.has(email) || FORBIDDEN_ROLES.has(role)) {
+            console.log(`[NotificationEngine] Excluded non-restaurant user ${uid} (${email}, role=${role}) from branch staff`);
+            continue;
+          }
+        }
+        validUids.push(uid);
+      } catch {
+        validUids.push(uid);
+      }
+    }
+
+    return validUids;
   }
 
   /**

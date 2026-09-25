@@ -158,6 +158,9 @@ export class NotificationRouter {
 
     // Rule 9: Delivery partner assignment
     if (eventType === 'DELIVERY_ASSIGNED') {
+      if (isOwnerEmail || role === 'owner' || role === 'platform_owner' || app === 'OWNER') {
+        return { allowed: false, reason: 'Owner accounts cannot be assigned as delivery partners or receive delivery alarms.' };
+      }
       if (role !== 'delivery' && role !== 'delivery_partner') {
         return { allowed: false, reason: 'Only delivery partners can receive delivery assignment notifications.' };
       }
@@ -286,6 +289,28 @@ export class NotificationRouter {
     if (eventType === 'DELIVERY_ASSIGNED') {
       if (!order.deliveryPartnerId) {
         return { dispatchedCount: 0, targetUids: [], status: 'NO_ASSIGNED_RIDER' };
+      }
+
+      // Pre-validate delivery partner recipient permissions
+      try {
+        const { adminDb: db } = await import('../../config/firebase.js');
+        const userDoc = await db.collection('users').doc(order.deliveryPartnerId).get();
+        if (userDoc.exists) {
+          const ud = userDoc.data() || {};
+          const evalResult = this.evaluateRecipient({
+            uid: order.deliveryPartnerId,
+            role: ud.role || '',
+            email: ud.email || '',
+            appTarget: 'DELIVERY'
+          }, 'DELIVERY_ASSIGNED', order);
+
+          if (!evalResult.allowed) {
+            console.warn(`[NotificationRouter] Delivery assignment notification blocked for user ${order.deliveryPartnerId}: ${evalResult.reason}`);
+            return { dispatchedCount: 0, targetUids: [], status: 'RECIPIENT_DISALLOWED' };
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[NotificationRouter] Error checking delivery partner profile:`, err.message);
       }
 
       const orderNumber = order.orderNumber || `#${order.orderId.slice(-6).toUpperCase()}`;

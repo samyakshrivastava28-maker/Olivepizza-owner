@@ -120,7 +120,10 @@ export const sendEmailDirect = async (
   htmlContent: string,
   attachments?: any[]
 ) => {
-  const fromAddress = cleanStr(process.env.SMTP_FROM) || '"Olive Pizza" <noreply@olivepizza.app>';
+  const cleanSmtpFrom = cleanStr(process.env.SMTP_FROM);
+  const fromAddress = (cleanSmtpFrom && !cleanSmtpFrom.includes('noreply@olivepizza.app'))
+    ? cleanSmtpFrom
+    : `"Olive Pizza" <${smtpUser}>`;
 
   // Check HTTP provider first
   const hasHttpProvider = Boolean(process.env.RESEND_API_KEY || process.env.BREVO_API_KEY || process.env.SENDGRID_API_KEY);

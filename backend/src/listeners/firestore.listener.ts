@@ -13,6 +13,7 @@ import { notificationEngine } from '../services/notification/NotificationEngine.
 import { appEventBus } from '../services/eventBus/AppEventBus.js';
 
 export class FirestoreListener {
+  private static readonly serverBootTime = Date.now();
   private static orderStatusCache = new Map<string, string>();
   private static processedOrderIds = new Set<string>();
 
@@ -47,6 +48,7 @@ export class FirestoreListener {
         .get();
       activeSnap.docs.forEach((doc: any) => {
         this.orderStatusCache.set(doc.id, doc.data()?.status);
+        this.processedOrderIds.add(doc.id);
       });
       console.log(`[FirestoreListener] Hydrated ${activeSnap.size} active order statuses into cache.`);
     } catch (err: any) {
@@ -117,8 +119,21 @@ export class FirestoreListener {
             this.orderStatusCache.set(orderData.id, orderData.status);
 
             // Skip trigger push alarms for terminal or old orders (server restart replay protection)
-            if (['delivered', 'cancelled', 'completed', 'rejected', 'failed'].includes((orderData.status || '').toLowerCase())) continue;
-            if (Date.now() - createdAt.getTime() > 10 * 60 * 1000) continue;
+            if (createdAt.getTime() <= FirestoreListener.serverBootTime) {
+              this.processedOrderIds.add(orderData.id);
+              continue;
+            }
+            if (Date.now() - createdAt.getTime() > 10 * 60 * 1000) {
+              this.processedOrderIds.add(orderData.id);
+              continue;
+            }
+            
+            // Only genuinely new, pending orders trigger kitchen alarms (never partner_assigned, ready, delivered, etc.)
+            const normStatus = (orderData.status || '').toLowerCase().trim();
+            if (!['pending', 'placed', 'pending_acceptance'].includes(normStatus)) {
+              this.processedOrderIds.add(orderData.id);
+              continue;
+            }
             
             // Prevent duplicate triggers if we already processed this order creation
             if (this.processedOrderIds.has(orderData.id)) continue;
@@ -134,37 +149,41 @@ export class FirestoreListener {
 
             if (orderData.orderTiming === 'scheduled') continue; // Skip push alarms for scheduled until ready
 
-            // 1. FCM PUSH NOTIFICATION FOR NEW ORDER (RESTAURANT MANAGEMENT ALARM & CUSTOMER PLACED)
+            // 1. FCM PUSH NOTIFICATION FOR NEW ORDER (STRICTLY SCOPED RESTAURANT ALARM & CUSTOMER CONFIRMATION)
             (async () => {
               try {
-                // Dispatch Restaurant Management Alarm strictly to authorized staff of this branch and franchise
                 const branchId = orderData.branchId || 'main_branch';
                 const franchiseId = orderData.franchiseId || 'fra_rajnandgaon';
-                const branchStaffRecipients = await notificationEngine.resolveBranchStaff(branchId, franchiseId);
-                if (branchStaffRecipients.length > 0) {
-                  const restaurantPayload = RestaurantTemplates.newOrder(orderData.id, {
-                    customerName: orderData.customerName || orderData.customer_name || 'Customer',
-                    orderNumber,
-                    totalAmount,
-                    items: Array.isArray(orderData.items) ? orderData.items.map((i: any) => typeof i === 'string' ? i : `${i.quantity || 1}x ${i.name || 'Item'}`) : [],
-                    paymentMethod: orderData.paymentMethod || 'COD',
-                    deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Pickup',
-                    phone: orderData.contactPhone || orderData.phone,
-                    branchId,
-                    franchiseId,
-                    orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-                  });
-                  await notificationEngine.sendBulk(branchStaffRecipients, restaurantPayload, {
-                    eventId: `order_created_restaurant_${orderData.id}`,
-                    orderId: orderData.id,
-                    category: 'alarm_actionable',
-                    tag: `order_restaurant_${orderData.id}`,
-                    targetApp: 'restaurant'
-                  });
-                }
+                const customerUid = orderData.customerUid || orderData.firebaseUid || orderData.customerId || orderData.userId || orderData.user_id;
+
+                // Dispatch strictly via NotificationRouter (enforces franchise & branch isolation; never leaks to owner or delivery)
+                const { NotificationRouter } = await import('../services/notification/NotificationRouter.js');
+                await NotificationRouter.routeOrderEvent({
+                  orderId: orderData.id,
+                  orderNumber,
+                  dailyOrderNumber: orderData.dailyOrderNumber || orderData.daily_order_number,
+                  permanentBillNo: orderData.permanentBillNo,
+                  orderType: orderData.deliveryType || orderData.fulfillmentType || 'delivery',
+                  totalAmount,
+                  items: Array.isArray(orderData.items) ? orderData.items : [],
+                  paymentMethod: orderData.paymentMethod || 'COD',
+                  paymentStatus: orderData.paymentStatus || 'PENDING',
+                  cashToCollect: orderData.cashToCollect,
+                  deliveryAddress: orderData.deliveryAddress,
+                  deliveryInstructions: orderData.deliveryInstructions || orderData.instructions,
+                  customerNotes: orderData.customerNotes || orderData.notes,
+                  lat: orderData.lat,
+                  lng: orderData.lng,
+                  contactPhone: orderData.contactPhone || orderData.phone,
+                  customerName: orderData.customerName || orderData.customer_name || 'Customer',
+                  userId: customerUid,
+                  franchiseId,
+                  branchId,
+                  orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+                  rawOrderData: orderData,
+                }, 'RESTAURANT_NEW_ORDER_ALARM');
 
                 // Dispatch Customer Confirmation
-                const customerUid = orderData.customerUid || orderData.firebaseUid || orderData.customerId || orderData.userId || orderData.user_id;
                 if (customerUid) {
                   const customerPayload = CustomerTemplates.orderUpdate(orderData.id, {
                     orderNumber,
@@ -320,25 +339,34 @@ export class FirestoreListener {
                   }
                 }
 
-                // If partner assigned / ready, notify assigned delivery partner
-                if (['partner_assigned', 'ready'].includes(currentStatus) && (orderData.deliveryPartnerId || orderData.delivery_partner_id)) {
+                // If partner assigned, notify assigned delivery partner ONLY (strictly delivery role, never owner)
+                if (currentStatus === 'partner_assigned' && (orderData.deliveryPartnerId || orderData.delivery_partner_id)) {
                   const partnerId = orderData.deliveryPartnerId || orderData.delivery_partner_id;
-                  const partnerPayload = DeliveryTemplates.newAssignment(orderData.id, {
-                    orderNumber,
-                    customerName: orderData.customerName || 'Customer',
-                    customerPhone: orderData.contactPhone || 'N/A',
-                    deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
-                    distance: orderData.deliveryDistance || 'Nearby',
-                    eta: orderData.estimatedDeliveryTime || '30 mins',
-                    totalAmount,
-                    paymentMethod: orderData.paymentMethod || 'COD',
-                  });
-                  await notificationEngine.send(partnerId, partnerPayload, {
+                  const { NotificationRouter } = await import('../services/notification/NotificationRouter.js');
+                  await NotificationRouter.routeOrderEvent({
                     orderId: orderData.id,
-                    category: 'alarm_actionable',
-                    tag: `order_delivery_${orderData.id}`,
-                    targetApp: 'delivery',
-                  });
+                    orderNumber,
+                    dailyOrderNumber: orderData.dailyOrderNumber || orderData.daily_order_number,
+                    permanentBillNo: orderData.permanentBillNo,
+                    orderType: orderData.deliveryType || orderData.fulfillmentType || 'delivery',
+                    totalAmount,
+                    items: Array.isArray(orderData.items) ? orderData.items : [],
+                    paymentMethod: orderData.paymentMethod || 'COD',
+                    paymentStatus: orderData.paymentStatus || 'PENDING',
+                    cashToCollect: orderData.cashToCollect,
+                    deliveryAddress: orderData.deliveryAddress,
+                    deliveryInstructions: orderData.deliveryInstructions || orderData.instructions,
+                    customerNotes: orderData.customerNotes || orderData.notes,
+                    lat: orderData.lat,
+                    lng: orderData.lng,
+                    contactPhone: orderData.contactPhone || orderData.phone,
+                    customerName: orderData.customerName || orderData.customer_name || 'Customer',
+                    deliveryPartnerId: partnerId,
+                    franchiseId: orderData.franchiseId || 'fra_rajnandgaon',
+                    branchId: orderData.branchId || 'main_branch',
+                    orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
+                    rawOrderData: orderData,
+                  }, 'DELIVERY_ASSIGNED');
                 }
 
                 // If order was delivered, notify the branch restaurant staff with delivery success sound
