@@ -301,7 +301,7 @@ export class TruecallerProvider implements PhoneVerificationProvider {
 
     // 1. Truecaller Web SDK Format: { accessToken, endpoint }
     const accessToken = payloadOrOptions?.accessToken || (typeof payloadOrOptions === 'object' ? payloadOrOptions.accessToken : undefined);
-    const endpoint = payloadOrOptions?.endpoint || (typeof payloadOrOptions === 'object' ? payloadOrOptions.endpoint : undefined);
+    const endpoint = payloadOrOptions?.endpoint || (typeof payloadOrOptions === 'object' ? payloadOrOptions.endpoint : undefined) || 'https://profile4-noneu.truecaller.com/v1/default';
 
     if (accessToken && endpoint) {
       try {

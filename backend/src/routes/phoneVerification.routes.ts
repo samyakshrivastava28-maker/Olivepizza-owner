@@ -118,7 +118,8 @@ router.post('/truecaller/callback', async (req: Request, res: Response) => {
   try {
     const requestId = req.body?.requestId || req.body?.requestNonce || (req.query?.requestId as string) || (req.query?.requestNonce as string);
     const accessToken = req.body?.accessToken || req.body?.access_token || (req.query?.accessToken as string) || (req.query?.access_token as string);
-    const endpoint = req.body?.endpoint || req.body?.profileEndpoint || (req.query?.endpoint as string) || (req.query?.profileEndpoint as string);
+    const rawEndpoint = req.body?.endpoint || req.body?.profileEndpoint || (req.query?.endpoint as string) || (req.query?.profileEndpoint as string);
+    const endpoint = rawEndpoint || 'https://profile4-noneu.truecaller.com/v1/default';
     const payload = req.body?.payload || req.query?.payload;
     const signature = req.body?.signature || req.query?.signature;
 
@@ -129,15 +130,15 @@ router.post('/truecaller/callback', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Missing requestId or requestNonce parameter in callback.' });
     }
 
-    if ((!accessToken || !endpoint) && (!payload || !signature)) {
+    if (!accessToken && (!payload || !signature)) {
       console.warn('[Truecaller Webhook] Rejected: Missing profile or crypto payload:', req.body);
       return res.status(400).json({
         success: false,
-        error: 'Missing required callback fields (expected accessToken+endpoint or payload+signature).'
+        error: 'Missing required callback fields (expected accessToken or payload+signature).'
       });
     }
 
-    const payloadOrOptions = accessToken && endpoint ? { accessToken, endpoint } : payload;
+    const payloadOrOptions = accessToken ? { accessToken, endpoint } : payload;
     const result = await truecaller.handleWebCallback(requestId, payloadOrOptions, signature);
     console.log(`[Truecaller Webhook] Processed callback for ${requestId}: success=${result.success}`);
     return res.json(result);

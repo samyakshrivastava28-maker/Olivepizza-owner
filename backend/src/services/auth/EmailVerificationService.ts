@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { adminDb, adminAuth } from '../../config/firebase.js';
-import { sendEmailDirect } from '../email.service.js';
+import { queueEmail, sendEmailDirect } from '../email.service.js';
 import { AuthAuditService } from './AuthAuditService.js';
 
 export interface VerificationSendResult {
@@ -145,14 +145,16 @@ export class EmailVerificationService {
       </div>
     `;
 
-    // Dispatch email asynchronously in the background so HTTP response is returned in <80ms
-    sendEmailDirect(cleanEmail, 'Your Olive Pizza 4-Digit Verification Code', emailHtml)
-      .then(() => {
-        console.log(`[EmailVerificationService] ✅ Verification email delivered to ${cleanEmail}`);
+    // Dispatch email asynchronously using high-speed pooled SMTP queue (matching order emails)
+    queueEmail(cleanEmail, 'Your Olive Pizza 4-Digit Verification Code', emailHtml, 'auth')
+      .then((queueId) => {
+        console.log(`[EmailVerificationService] ✅ Verification email queued for ${cleanEmail} (ID: ${queueId})`);
       })
       .catch((err: any) => {
-        console.error('[EmailVerificationService] ❌ Failed to dispatch email via SMTP/HTTP:', err?.message || err);
-        console.warn(`[EmailVerificationService] ⚠️ Outbound email notice for [${cleanEmail}]: Code is ${code}`);
+        console.warn(`[EmailVerificationService] Queue error, using direct pooled SMTP send:`, err?.message);
+        sendEmailDirect(cleanEmail, 'Your Olive Pizza 4-Digit Verification Code', emailHtml)
+          .then(() => console.log(`[EmailVerificationService] ✅ Verification email delivered directly via SMTP to ${cleanEmail}`))
+          .catch((directErr: any) => console.error('[EmailVerificationService] ❌ Failed to dispatch email via SMTP:', directErr?.message || directErr));
       });
 
     // Record audit event asynchronously
