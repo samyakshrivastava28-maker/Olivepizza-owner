@@ -133,7 +133,10 @@ export class NotificationRouter {
       }
 
       // Rule 7: Strict Franchise Scoping (Cross-Franchise Isolation)
-      if (!recipient.franchiseId || !order.franchiseId || recipient.franchiseId !== order.franchiseId) {
+      const normF = (id?: string) => (id || '').trim().toLowerCase().replace(/^fra_/, '');
+      const recF = normF(recipient.franchiseId) || 'rajnandgaon';
+      const ordF = normF(order.franchiseId) || 'rajnandgaon';
+      if (recF !== ordF && recipient.franchiseId !== 'all') {
         return {
           allowed: false,
           reason: `Franchise mismatch: recipient franchise "${recipient.franchiseId}" does not match order franchise "${order.franchiseId}".`
@@ -276,7 +279,7 @@ export class NotificationRouter {
         priority: 'critical',
         orderId: order.orderId,
         targetApp: 'restaurant',
-        eventId: `NEW_ORDER_${order.orderId}`
+        eventId: `ORDER_CREATED:${order.orderId}`
       });
 
       return {

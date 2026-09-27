@@ -831,11 +831,23 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       return;
     }
 
-    const operationalApps = ['owner', 'pos', 'restaurant_manager', 'franchise_manager', 'delivery'];
-    let safeAppName = appName || (user.role === 'owner' ? 'owner' : 'customer');
-    if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer')) {
+    const rawApp = (appName || '').toLowerCase().trim();
+    let safeAppName = rawApp;
+    if (safeAppName === 'restaurant_manager') safeAppName = 'restaurant';
+    if (safeAppName === 'delivery_partner') safeAppName = 'delivery';
+    if (safeAppName === 'franchise_manager') safeAppName = 'franchise';
+
+    const operationalApps = ['owner', 'pos', 'restaurant', 'franchise', 'delivery'];
+    if (!safeAppName) {
+      safeAppName = user.role === 'owner' ? 'owner' : 'customer';
+    }
+    if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer') && !req.body.role) {
       safeAppName = 'customer';
     }
+
+    const effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || user.role || 'customer');
+    const effectiveBranchId = user.branchId || req.body.branchId || 'main_branch';
+    const effectiveFranchiseId = user.franchiseId || req.body.franchiseId || 'fra_rajnandgaon';
 
     await notificationQueue.registerToken(userId, token, {
       oldToken,
@@ -845,10 +857,10 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       browser,
       appVersion,
       appName: safeAppName,
-      role: user.role || 'customer',
-      franchiseId: user.franchiseId,
-      branchId: user.branchId,
-      terminalId: user.terminalId
+      role: effectiveRole,
+      franchiseId: effectiveFranchiseId,
+      branchId: effectiveBranchId,
+      terminalId: user.terminalId || req.body.terminalId
     });
     res.json({ success: true });
   } catch (error: any) {
@@ -869,11 +881,23 @@ router.post('/register-token', verifyToken, async (req: AuthRequest, res: Respon
       return;
     }
 
-    const operationalApps = ['owner', 'pos', 'restaurant_manager', 'franchise_manager', 'delivery'];
-    let safeAppName = appName || (user.role === 'owner' ? 'owner' : 'customer');
-    if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer')) {
+    const rawApp = (appName || '').toLowerCase().trim();
+    let safeAppName = rawApp;
+    if (safeAppName === 'restaurant_manager') safeAppName = 'restaurant';
+    if (safeAppName === 'delivery_partner') safeAppName = 'delivery';
+    if (safeAppName === 'franchise_manager') safeAppName = 'franchise';
+
+    const operationalApps = ['owner', 'pos', 'restaurant', 'franchise', 'delivery'];
+    if (!safeAppName) {
+      safeAppName = user.role === 'owner' ? 'owner' : 'customer';
+    }
+    if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer') && !req.body.role) {
       safeAppName = 'customer';
     }
+
+    const effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || user.role || 'customer');
+    const effectiveBranchId = user.branchId || req.body.branchId || 'main_branch';
+    const effectiveFranchiseId = user.franchiseId || req.body.franchiseId || 'fra_rajnandgaon';
 
     await notificationQueue.registerToken(userId, token, {
       oldToken,
@@ -883,10 +907,10 @@ router.post('/register-token', verifyToken, async (req: AuthRequest, res: Respon
       browser,
       appVersion,
       appName: safeAppName,
-      role: user.role || 'customer',
-      franchiseId: user.franchiseId,
-      branchId: user.branchId,
-      terminalId: user.terminalId
+      role: effectiveRole,
+      franchiseId: effectiveFranchiseId,
+      branchId: effectiveBranchId,
+      terminalId: user.terminalId || req.body.terminalId
     });
     res.json({ success: true });
   } catch (error: any) {

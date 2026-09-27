@@ -584,16 +584,40 @@ export class NotificationEngine {
 
       let filteredRows = result.rows;
       if (targetApp) {
-        // STRICT APP ISOLATION:
-        // Only select tokens explicitly matching targetApp.
-        // Never allow tokens registered for a different app (e.g. 'owner' or 'delivery')
-        // to receive alerts for another app (e.g. 'restaurant').
+        // STRICT APP ISOLATION with App Synonyms:
         filteredRows = result.rows.filter((r: any) => {
-          if (r.app_name === targetApp) return true;
+          const app = (r.app_name || '').toLowerCase().trim();
+          const target = (targetApp || '').toLowerCase().trim();
+
+          if (!target || target === 'all') return true;
+
+          // Match restaurant / restaurant_manager synonyms
+          if ((target === 'restaurant' || target === 'restaurant_manager') &&
+              (app === 'restaurant' || app === 'restaurant_manager')) {
+            return true;
+          }
+          // Match delivery / delivery_partner synonyms
+          if ((target === 'delivery' || target === 'delivery_partner') &&
+              (app === 'delivery' || app === 'delivery_partner')) {
+            return true;
+          }
+          // Match franchise / franchise_manager synonyms
+          if ((target === 'franchise' || target === 'franchise_manager') &&
+              (app === 'franchise' || app === 'franchise_manager')) {
+            return true;
+          }
+          // Match owner
+          if (target === 'owner' && app === 'owner') return true;
+          // Match pos
+          if (target === 'pos' && app === 'pos') return true;
+          // Match customer
+          if (target === 'customer' && (app === 'customer' || !app)) return true;
+
           // Reject if explicitly tagged for a different app
-          if (r.app_name && r.app_name !== targetApp) return false;
+          if (app && app !== target) return false;
+
           // For staff / delivery / owner apps, reject untagged legacy tokens to prevent cross-app leakage
-          return targetApp === 'customer';
+          return target === 'customer';
         });
       }
 
@@ -715,20 +739,22 @@ export class NotificationEngine {
     const cleanFranchiseId = franchiseId ? franchiseId.trim() : undefined;
     const uidsSet = new Set<string>();
 
+    const normF = (id?: string) => (id || '').trim().toLowerCase().replace(/^fra_/, '');
+    const cleanTargetF = normF(cleanFranchiseId);
+
     try {
-      // 1. Query Firestore users by branchId + role (+ franchiseId if provided)
+      // 1. Query Firestore users by branchId + role
       for (const r of roles) {
-        let q: any = db.collection('users')
+        const snap = await db.collection('users')
           .where('branchId', '==', cleanBranchId)
-          .where('role', '==', r);
-        if (cleanFranchiseId) {
-          q = q.where('franchiseId', '==', cleanFranchiseId);
-        }
-        const snap = await q.get();
+          .where('role', '==', r)
+          .get();
+
         snap.docs.forEach((doc: any) => {
           const d = doc.data();
           if (d?.isActive !== false) {
-            if (!cleanFranchiseId || !d?.franchiseId || d.franchiseId === cleanFranchiseId) {
+            const userF = normF(d?.franchiseId);
+            if (!cleanTargetF || !userF || userF === cleanTargetF || d?.franchiseId === 'all') {
               uidsSet.add(doc.id);
             }
           }
@@ -737,17 +763,16 @@ export class NotificationEngine {
 
       // 2. Query restaurant_managers collection for approved managers (strictly 1:1 branch & franchise)
       try {
-        let rmQ: any = db.collection('restaurant_managers')
+        const rmSnap = await db.collection('restaurant_managers')
           .where('branchId', '==', cleanBranchId)
-          .where('status', '==', 'APPROVED');
-        if (cleanFranchiseId) {
-          rmQ = rmQ.where('franchiseId', '==', cleanFranchiseId);
-        }
-        const rmSnap = await rmQ.get();
+          .get();
+
         rmSnap.docs.forEach((doc: any) => {
           const d = doc.data();
-          if (d?.isActive !== false) {
-            if (!cleanFranchiseId || !d?.franchiseId || d.franchiseId === cleanFranchiseId) {
+          const st = (d?.status || '').toUpperCase();
+          if (d?.isActive !== false && (st === 'APPROVED' || st === 'ACTIVE' || !d?.status)) {
+            const userF = normF(d?.franchiseId);
+            if (!cleanTargetF || !userF || userF === cleanTargetF || d?.franchiseId === 'all') {
               uidsSet.add(doc.id);
             }
           }
@@ -765,8 +790,8 @@ export class NotificationEngine {
                        AND role = ANY($2)`;
         const pgParams: any[] = [cleanBranchId, roles];
         if (cleanFranchiseId) {
-          pgSql += ` AND (franchise_id = $3 OR franchise_id IS NULL)`;
-          pgParams.push(cleanFranchiseId);
+          pgSql += ` AND (franchise_id = $3 OR franchise_id = $4 OR franchise_id IS NULL OR franchise_id = '')`;
+          pgParams.push(cleanFranchiseId, cleanTargetF);
         }
         const pgRes = await pgPool.query(pgSql, pgParams);
         pgRes.rows.forEach((r: any) => {

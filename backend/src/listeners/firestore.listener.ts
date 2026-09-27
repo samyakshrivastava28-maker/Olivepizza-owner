@@ -27,6 +27,14 @@ export class FirestoreListener {
     }
   }, 30 * 60 * 1000);
 
+  public static markOrderProcessed(orderId: string): void {
+    FirestoreListener.processedOrderIds.add(orderId);
+  }
+
+  public static isOrderProcessed(orderId: string): boolean {
+    return FirestoreListener.processedOrderIds.has(orderId);
+  }
+
   static async init() {
     try {
       await this.hydrateActiveOrdersCache();
@@ -135,8 +143,11 @@ export class FirestoreListener {
               continue;
             }
             
-            // Prevent duplicate triggers if we already processed this order creation
-            if (this.processedOrderIds.has(orderData.id)) continue;
+            // Prevent duplicate triggers if already processed or dispatched by authoritative order creation
+            if (orderData.notificationDispatched || this.processedOrderIds.has(orderData.id) || FirestoreListener.isOrderProcessed(orderData.id)) {
+              this.processedOrderIds.add(orderData.id);
+              continue;
+            }
             this.processedOrderIds.add(orderData.id);
 
             const shortId = orderData.id.slice(-6).toUpperCase();
@@ -191,7 +202,7 @@ export class FirestoreListener {
                     totalAmount,
                   });
                   await notificationEngine.send(customerUid, customerPayload, {
-                    eventId: `order_created_customer_${orderData.id}`,
+                    eventId: `ORDER_CREATED:customer:${orderData.id}`,
                     orderId: orderData.id,
                     category: 'pinned_live',
                     tag: `order_${orderData.id}`,
