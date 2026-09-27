@@ -5,6 +5,7 @@ import { TableSkeleton } from '../components/ui/Skeleton';
 import { ErrorState } from '../components/ui/ErrorState';
 import { EmptyState } from '../components/ui/EmptyState';
 import { uploadMediaToCloudinary } from '../lib/cloudinary';
+import { getOptimizedImageUrl } from '../lib/imageOptimizer';
 import { UploadCloud, Copy, Check, Search, Trash2, Image as ImageIcon, ExternalLink } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -138,8 +139,10 @@ export default function MediaLibrary() {
             >
               <div className="h-32 w-full bg-slate-900 overflow-hidden relative flex items-center justify-center">
                 <img
-                  src={item.url}
+                  src={getOptimizedImageUrl(item.url, { width: 320, quality: 'auto:good' })}
                   alt={item.publicId}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
                 />
                 <span className="absolute bottom-2 right-2 text-[9px] font-mono px-1.5 py-0.5 rounded bg-black/80 text-white uppercase">

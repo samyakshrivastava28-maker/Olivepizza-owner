@@ -22,6 +22,7 @@ import {
 import { Product } from '../types/models';
 import { fetchApi } from '../lib/api';
 import { uploadMediaToCloudinary } from '../lib/cloudinary';
+import { getOptimizedImageUrl } from '../lib/imageOptimizer';
 import toast from 'react-hot-toast';
 
 export default function ProductMenuManager() {
@@ -368,8 +369,10 @@ export default function ProductMenuManager() {
                   {/* Thumbnail */}
                   <div className="aspect-video bg-slate-900 overflow-hidden relative">
                     <img
-                      src={prod.imageUrl || prod.image || 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=500'}
+                      src={getOptimizedImageUrl(prod.imageUrl || prod.image, { preset: 'card', width: 480, quality: 'auto:good' })}
                       alt={prod.name}
+                      loading="lazy"
+                      decoding="async"
                       className="w-full h-full object-cover"
                     />
                     <div className="absolute top-2 right-2 flex items-center gap-1.5">

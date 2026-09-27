@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { fetchApi } from '../lib/api';
 import { uploadMediaToCloudinary, deleteMediaFromCloudinary } from '../lib/cloudinary';
+import { getOptimizedImageUrl } from '../lib/imageOptimizer';
 import { db } from '../lib/firebase';
 import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
 import toast from 'react-hot-toast';
@@ -177,7 +178,13 @@ export default function MediaLibrary() {
                     onClick={() => setSelectedPreview(item)}
                     className="cursor-pointer aspect-square rounded-xl overflow-hidden bg-slate-900 relative group"
                   >
-                    <img src={url} alt="Media" className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                    <img
+                      src={getOptimizedImageUrl(url, { width: 320, quality: 'auto:good' })}
+                      alt="Media"
+                      loading="lazy"
+                      decoding="async"
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                    />
                     <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                       <Eye className="w-5 h-5 text-white" />
                     </div>

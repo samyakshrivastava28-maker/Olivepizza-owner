@@ -15,6 +15,7 @@ import { ErrorState } from '../components/ui/ErrorState';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Modal } from '../components/ui/Modal';
 import { uploadMediaToCloudinary } from '../lib/cloudinary';
+import { getOptimizedImageUrl } from '../lib/imageOptimizer';
 import { Plus, Megaphone, Trash2, Edit2, UploadCloud, Eye } from 'lucide-react';
 import toast from 'react-hot-toast';
 
@@ -196,7 +197,13 @@ export default function Ads() {
               </label>
             </div>
             {formData.imageUrl && (
-              <img src={formData.imageUrl} alt="Banner Preview" className="mt-2 w-full h-28 object-cover rounded-xl border border-slate-800" />
+              <img
+                src={getOptimizedImageUrl(formData.imageUrl, { width: 480, quality: 'auto:good' })}
+                alt="Banner Preview"
+                loading="lazy"
+                decoding="async"
+                className="mt-2 w-full h-28 object-cover rounded-xl border border-slate-800"
+              />
             )}
           </div>
 
@@ -243,7 +250,13 @@ export default function Ads() {
           {ads.map((ad) => (
             <div key={ad.id} className="bg-[#131B2B] border border-slate-800 rounded-2xl overflow-hidden shadow-sm flex flex-col">
               <div className="h-36 w-full relative bg-slate-900 overflow-hidden">
-                <img src={ad.imageUrl} alt={ad.title} className="w-full h-full object-cover" />
+                <img
+                  src={getOptimizedImageUrl(ad.imageUrl, { width: 500, quality: 'auto:good' })}
+                  alt={ad.title}
+                  loading="lazy"
+                  decoding="async"
+                  className="w-full h-full object-cover"
+                />
                 <span className="absolute top-3 right-3 text-[10px] font-bold px-2 py-0.5 rounded bg-[#0B0F17]/90 text-orange-400 border border-slate-800 uppercase">
                   {ad.placement.replace('_', ' ')}
                 </span>

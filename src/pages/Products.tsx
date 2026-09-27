@@ -17,6 +17,7 @@ import { ErrorState } from '../components/ui/ErrorState';
 import { EmptyState } from '../components/ui/EmptyState';
 import { Modal } from '../components/ui/Modal';
 import { uploadMediaToCloudinary } from '../lib/cloudinary';
+import { getOptimizedImageUrl } from '../lib/imageOptimizer';
 import {
   Search,
   Plus,
@@ -315,7 +316,13 @@ export default function Products() {
             )}
             {formData.imageUrl && (
               <div className="mt-2 flex items-center gap-3 p-2 bg-[#0E1524] border border-slate-800 rounded-xl">
-                <img src={formData.imageUrl} alt="Preview" className="w-12 h-12 object-cover rounded-lg" />
+                <img
+                  src={getOptimizedImageUrl(formData.imageUrl, { preset: 'thumbnail', width: 96, height: 96 })}
+                  alt="Preview"
+                  loading="lazy"
+                  decoding="async"
+                  className="w-12 h-12 object-cover rounded-lg"
+                />
                 <span className="text-[11px] text-slate-400 truncate flex-1">{formData.imageUrl}</span>
               </div>
             )}
@@ -450,9 +457,14 @@ export default function Products() {
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-3">
                         <img
-                          src={product.imageUrl || '/logo-transparent.png'}
+                          src={getOptimizedImageUrl(product.imageUrl, { preset: 'thumbnail', width: 80, height: 80 })}
                           alt={product.name}
+                          loading="lazy"
+                          decoding="async"
                           className="w-10 h-10 rounded-xl object-cover bg-[#0E1524] border border-slate-800 flex-shrink-0"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).src = '/logo-transparent.png';
+                          }}
                         />
                         <div>
                           <p className="font-bold text-white flex items-center gap-1.5">
