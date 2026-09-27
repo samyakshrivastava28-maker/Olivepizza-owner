@@ -831,21 +831,41 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       return;
     }
 
+    const OWNER_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
+    const OWNER_ROLES = new Set(['owner', 'platform_owner']);
+    const userEmail = (user.email || '').toLowerCase().trim();
+    const userRole = (user.role || '').toLowerCase().trim();
+    const isOwnerIdentity = OWNER_ROLES.has(userRole) || OWNER_EMAILS.has(userEmail);
+
     const rawApp = (appName || '').toLowerCase().trim();
     let safeAppName = rawApp;
     if (safeAppName === 'restaurant_manager') safeAppName = 'restaurant';
     if (safeAppName === 'delivery_partner') safeAppName = 'delivery';
     if (safeAppName === 'franchise_manager') safeAppName = 'franchise';
 
-    const operationalApps = ['owner', 'pos', 'restaurant', 'franchise', 'delivery'];
-    if (!safeAppName) {
-      safeAppName = user.role === 'owner' ? 'owner' : 'customer';
-    }
-    if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer') && !req.body.role) {
-      safeAppName = 'customer';
+    let effectiveRole: string;
+
+    if (isOwnerIdentity) {
+      // 🚨 HARD ISOLATION: Owner devices must ONLY ever register as 'owner'
+      safeAppName = 'owner';
+      effectiveRole = 'owner';
+    } else {
+      const operationalApps = ['pos', 'restaurant', 'franchise', 'delivery'];
+      if (!safeAppName) {
+        safeAppName = 'customer';
+      }
+      if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer') && !req.body.role) {
+        safeAppName = 'customer';
+      }
+
+      effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || user.role || 'customer');
+      const RESTAURANT_STAFF_ROLES = new Set(['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef']);
+      if ((safeAppName === 'restaurant' || RESTAURANT_STAFF_ROLES.has(effectiveRole)) && !RESTAURANT_STAFF_ROLES.has(user.role)) {
+        safeAppName = 'customer';
+        effectiveRole = 'customer';
+      }
     }
 
-    const effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || user.role || 'customer');
     const effectiveBranchId = user.branchId || req.body.branchId || 'main_branch';
     const effectiveFranchiseId = user.franchiseId || req.body.franchiseId || 'fra_rajnandgaon';
 
@@ -881,21 +901,41 @@ router.post('/register-token', verifyToken, async (req: AuthRequest, res: Respon
       return;
     }
 
+    const OWNER_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
+    const OWNER_ROLES = new Set(['owner', 'platform_owner']);
+    const userEmail = (user.email || '').toLowerCase().trim();
+    const userRole = (user.role || '').toLowerCase().trim();
+    const isOwnerIdentity = OWNER_ROLES.has(userRole) || OWNER_EMAILS.has(userEmail);
+
     const rawApp = (appName || '').toLowerCase().trim();
     let safeAppName = rawApp;
     if (safeAppName === 'restaurant_manager') safeAppName = 'restaurant';
     if (safeAppName === 'delivery_partner') safeAppName = 'delivery';
     if (safeAppName === 'franchise_manager') safeAppName = 'franchise';
 
-    const operationalApps = ['owner', 'pos', 'restaurant', 'franchise', 'delivery'];
-    if (!safeAppName) {
-      safeAppName = user.role === 'owner' ? 'owner' : 'customer';
-    }
-    if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer') && !req.body.role) {
-      safeAppName = 'customer';
+    let effectiveRole: string;
+
+    if (isOwnerIdentity) {
+      // 🚨 HARD ISOLATION: Owner devices must ONLY ever register as 'owner'
+      safeAppName = 'owner';
+      effectiveRole = 'owner';
+    } else {
+      const operationalApps = ['pos', 'restaurant', 'franchise', 'delivery'];
+      if (!safeAppName) {
+        safeAppName = 'customer';
+      }
+      if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer') && !req.body.role) {
+        safeAppName = 'customer';
+      }
+
+      effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || user.role || 'customer');
+      const RESTAURANT_STAFF_ROLES = new Set(['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef']);
+      if ((safeAppName === 'restaurant' || RESTAURANT_STAFF_ROLES.has(effectiveRole)) && !RESTAURANT_STAFF_ROLES.has(user.role)) {
+        safeAppName = 'customer';
+        effectiveRole = 'customer';
+      }
     }
 
-    const effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || user.role || 'customer');
     const effectiveBranchId = user.branchId || req.body.branchId || 'main_branch';
     const effectiveFranchiseId = user.franchiseId || req.body.franchiseId || 'fra_rajnandgaon';
 

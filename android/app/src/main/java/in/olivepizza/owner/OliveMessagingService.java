@@ -37,25 +37,38 @@ public class OliveMessagingService extends MessagingService {
         String category = data.get("category");
         String stage = data.get("stage");
         String alertType = data.get("alert");
+        String targetApp = data.get("targetApp");
+        String actions = data.get("actions");
 
-        // Owner app must never trigger full-screen sirens for incoming orders.
-        // New order sirens are handled strictly by Restaurant Management & Delivery apps.
-        if ("alarm_actionable".equalsIgnoreCase(category) || 
-            "new_order".equalsIgnoreCase(stage) ||
+        // 🚨 NATIVE DEFENSE-IN-DEPTH: Block any operational restaurant alarms / sirens on Owner app
+        boolean isOperationalAlarm = "RESTAURANT_NEW_ORDER_ALARM".equalsIgnoreCase(stage)
+            || "restaurant".equalsIgnoreCase(targetApp)
+            || "alarm_actionable".equalsIgnoreCase(category)
+            || (actions != null && (actions.contains("\"accept\"") || actions.contains("\"reject\"") || actions.contains("\"stop_alert\"")));
+
+        if (isOperationalAlarm) {
+            Log.w(TAG, "OWNER_NATIVE_ALARM_BLOCKED: Dropped operational restaurant alarm on Owner app. Stage=" + stage + ", targetApp=" + targetApp);
+            return;
+        }
+
+        // New order notifications on Owner app are purely informational summaries:
+        if ("new_order".equalsIgnoreCase(stage) ||
             "NEW_ORDER".equalsIgnoreCase(data.get("type")) ||
-            "NEW_ORDER".equalsIgnoreCase(data.get("eventType"))) {
+            "NEW_ORDER".equalsIgnoreCase(data.get("eventType")) ||
+            "order_summary".equalsIgnoreCase(stage)) {
             alertType = "standard";
+            data.put("alert", "standard");
         }
 
         boolean isContinuousAlarm = "continuous".equalsIgnoreCase(alertType);
         boolean isOngoing = "true".equalsIgnoreCase(data.get("ongoing"));
 
         if (isContinuousAlarm) {
-            turnScreenOn();
-            launchAlarmActivity(data);
+            Log.w(TAG, "OWNER_NATIVE_ALARM_BLOCKED: Continuous alarm suppressed on Owner app");
+            isContinuousAlarm = false;
         }
 
-        if (isContinuousAlarm || isOngoing || remoteMessage.getNotification() == null) {
+        if (isOngoing || remoteMessage.getNotification() == null) {
             showNativeNotification(remoteMessage, data, isContinuousAlarm, isOngoing);
         } else {
             super.onMessageReceived(remoteMessage);
@@ -176,6 +189,13 @@ public class OliveMessagingService extends MessagingService {
                 String actionKey   = actionObj.optString("action", actionObj.optString("id"));
                 String actionTitle = actionObj.optString("title", actionKey);
                 if (actionKey == null || actionKey.isEmpty()) continue;
+
+                // 🚨 Defense-in-depth: Never add operational Accept / Reject / Stop Alert buttons in Owner App!
+                String lowerKey = actionKey.toLowerCase();
+                if (lowerKey.equals("accept") || lowerKey.equals("reject") || lowerKey.equals("stop_alert") || lowerKey.equals("stop")) {
+                    Log.w(TAG, "OWNER_NATIVE_ALARM_BLOCKED: Filtered operational action '" + actionKey + "' from Owner notification");
+                    continue;
+                }
 
                 Intent actionIntent = new Intent(this, NotificationActionReceiver.class);
                 actionIntent.setAction(actionKey);

@@ -278,6 +278,27 @@ export class NotificationQueueService {
       // Ensure 1 Device Token = 1 User (deactivate token for any previous user)
       await client.query('UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW() WHERE token = $1 AND user_id != $2', [token, pgUserId]);
 
+      // Enforce authoritative owner role & appName
+      const OWNER_ROLES = new Set(['owner', 'platform_owner']);
+      const OWNER_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
+      let finalAppName = deviceInfo.appName || 'customer';
+      let finalRole = deviceInfo.role || null;
+
+      try {
+        const uDoc = await db.collection('users').doc(firebaseUserId).get();
+        if (uDoc.exists) {
+          const uData = uDoc.data() || {};
+          const uEmail = (uData.email || '').toLowerCase().trim();
+          const uRole = (uData.role || '').toLowerCase().trim();
+          if (OWNER_ROLES.has(uRole) || OWNER_EMAILS.has(uEmail)) {
+            finalAppName = 'owner';
+            finalRole = 'owner';
+          }
+        }
+      } catch (err) {
+        // Non-fatal
+      }
+
       // Upsert token with complete application and RBAC metadata
       await client.query(
         `INSERT INTO fcm_tokens (user_id, token, device_id, device_name, platform, browser, app_version, is_active, last_used_at, app_name, role, branch_id, franchise_id, updated_at)
@@ -301,8 +322,8 @@ export class NotificationQueueService {
           deviceInfo.platform || 'unknown',
           deviceInfo.browser || null,
           deviceInfo.appVersion || null,
-          deviceInfo.appName || 'customer',
-          deviceInfo.role || null,
+          finalAppName,
+          finalRole,
           deviceInfo.branchId || null,
           deviceInfo.franchiseId || null
         ]
@@ -316,7 +337,7 @@ export class NotificationQueueService {
              device_name = EXCLUDED.device_name, platform = EXCLUDED.platform,
              browser = EXCLUDED.browser, app_version = EXCLUDED.app_version,
              app_name = COALESCE(EXCLUDED.app_name, fcm_tokens.app_name)`,
-          [pgUserId, token, deviceInfo.deviceName, deviceInfo.platform, deviceInfo.browser, deviceInfo.appVersion, deviceInfo.appName || 'customer']
+          [pgUserId, token, deviceInfo.deviceName, deviceInfo.platform, deviceInfo.browser, deviceInfo.appVersion, finalAppName]
         ).catch(async () => {
           await client.query(
             `INSERT INTO fcm_tokens (user_id, token, device_name, platform, browser, app_version, is_active, last_used_at)
@@ -361,8 +382,8 @@ export class NotificationQueueService {
         deviceId: deviceInfo.deviceId || null,
         deviceName: deviceInfo.deviceName || null,
         platform: deviceInfo.platform || 'unknown',
-        appName: deviceInfo.appName || 'customer',
-        role: deviceInfo.role || null,
+        appName: finalAppName,
+        role: finalRole,
         branchId: deviceInfo.branchId || null,
         franchiseId: deviceInfo.franchiseId || null,
         lastSeenAt: FieldValue.serverTimestamp(),
@@ -456,7 +477,28 @@ export class NotificationQueueService {
       ]);
 
       const userEmail: string | null = userResult.rows[0]?.email || null;
+      const userRole: string | null = userResult.rows[0]?.role || null;
       const customerName: string = userResult.rows[0]?.name || 'Customer';
+
+      // ── AUTHORIZATION HARD GUARD: Drop operational restaurant alarms destined for Owner ──
+      const OWNER_ROLES = new Set(['owner', 'platform_owner']);
+      const OWNER_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
+      const cleanEmail = (userEmail || '').toLowerCase().trim();
+      const cleanRole = (userRole || role || '').toLowerCase().trim();
+      const isOwner = OWNER_ROLES.has(cleanRole) || OWNER_EMAILS.has(cleanEmail);
+
+      const isOperationalAlarm = 
+        stage === 'RESTAURANT_NEW_ORDER_ALARM' ||
+        category === 'alarm_actionable' ||
+        parsedPayload.data?.category === 'alarm_actionable' ||
+        parsedPayload.data?.targetApp === 'restaurant' ||
+        parsedPayload.data?.stage === 'RESTAURANT_NEW_ORDER_ALARM';
+
+      if (isOperationalAlarm && isOwner) {
+        console.warn(`[NotifQueue] 🚨 NOTIFICATION_DROPPED_AUTHORIZATION: Dropped operational restaurant notification id=${id} for Owner ${target_user_id} (${cleanEmail})`);
+        await client.query(`DELETE FROM notification_queue WHERE id = $1`, [id]);
+        return;
+      }
 
       // Fallback to Firestore if cache+DB found no tokens
       let tokens: string[] = cachedTokens;

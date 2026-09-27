@@ -32,20 +32,10 @@ public class AlarmActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        try {
-            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-            if (pm != null) {
-                @SuppressWarnings("deprecation")
-                PowerManager.WakeLock wl = pm.newWakeLock(
-                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE,
-                    "OlivePizza::AlarmActivityScreenOn"
-                );
-                wl.acquire(30000);
-                wakeLock = wl;
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "Failed to acquire screen wake lock: " + e.getMessage());
-        }
+        // 🚨 NATIVE DEFENSE-IN-DEPTH: Full-screen sirens & operational alarms are strictly blocked in Owner app.
+        Log.w(TAG, "OWNER_NATIVE_ALARM_BLOCKED: Full-screen operational alarm blocked in Owner app. Finishing activity.");
+        finish();
+        return;
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true);

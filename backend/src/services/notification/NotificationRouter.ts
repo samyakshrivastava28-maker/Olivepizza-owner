@@ -228,16 +228,46 @@ export class NotificationRouter {
       const rawUids = await notificationEngine.resolveBranchStaff(cleanBranchId, cleanFranchiseId);
 
       // 2. Filter UIDs to ensure strict role and privacy isolation
+      const { adminDb: db } = await import('../../config/firebase.js');
       const finalUids: string[] = [];
       for (const uid of rawUids) {
-        // Pre-validate through policy table
+        let userRole = '';
+        let userEmail = '';
+        let userBranch = cleanBranchId;
+        let userFranchise = cleanFranchiseId;
+
+        try {
+          const uDoc = await db.collection('users').doc(uid).get();
+          if (uDoc.exists) {
+            const ud = uDoc.data() || {};
+            userRole = ud.role || '';
+            userEmail = ud.email || '';
+            userBranch = ud.branchId || userBranch;
+            userFranchise = ud.franchiseId || userFranchise;
+          } else {
+            const rmDoc = await db.collection('restaurant_managers').doc(uid).get().catch(() => null);
+            if (rmDoc && rmDoc.exists) {
+              const rmd = rmDoc.data() || {};
+              userRole = rmd.role || 'restaurant_manager';
+              userEmail = rmd.email || '';
+              userBranch = rmd.branchId || userBranch;
+              userFranchise = rmd.franchiseId || userFranchise;
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[NotificationRouter] Failed to fetch profile for UID ${uid}:`, e.message);
+        }
+
+        // Pre-validate through policy table with real verified identity
         const evaluation = this.evaluateRecipient(
-          { uid, role: 'restaurant_manager', franchiseId: cleanFranchiseId, branchId: cleanBranchId, appTarget: 'RESTAURANT' },
+          { uid, role: userRole, email: userEmail, franchiseId: userFranchise, branchId: userBranch, appTarget: 'RESTAURANT' },
           'RESTAURANT_NEW_ORDER_ALARM',
           order
         );
         if (evaluation.allowed) {
           finalUids.push(uid);
+        } else {
+          console.warn(`[NotificationRouter] 🚨 Recipient ${uid} blocked from RESTAURANT_NEW_ORDER_ALARM: ${evaluation.reason}`);
         }
       }
 

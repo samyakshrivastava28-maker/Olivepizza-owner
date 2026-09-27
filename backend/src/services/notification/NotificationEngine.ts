@@ -567,20 +567,31 @@ export class NotificationEngine {
   private async resolveTokens(firebaseUserIds: string[], targetApp?: string): Promise<string[]> {
     const client = await pgPool.connect();
     try {
-      let queryStr = `SELECT user_id as firebase_uid, token, app_name
+      let queryStr = `SELECT user_id as firebase_uid, token, app_name, role
                       FROM fcm_tokens
                       WHERE user_id = ANY($1) AND is_active = TRUE`;
       const params: any[] = [firebaseUserIds];
 
       const result = await client.query(queryStr, params).catch(async () => {
-        // Graceful fallback if app_name column is not yet present
+        // Graceful fallback if role or app_name column is not yet present
         return await client.query(
-          `SELECT user_id as firebase_uid, token
+          `SELECT user_id as firebase_uid, token, app_name
            FROM fcm_tokens
            WHERE user_id = ANY($1) AND is_active = TRUE`,
           [firebaseUserIds]
-        );
+        ).catch(async () => {
+          return await client.query(
+            `SELECT user_id as firebase_uid, token
+             FROM fcm_tokens
+             WHERE user_id = ANY($1) AND is_active = TRUE`,
+            [firebaseUserIds]
+          );
+        });
       });
+
+      const OWNER_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
+      const OWNER_ROLES = new Set(['owner', 'platform_owner']);
+      const ALLOWED_STAFF_ROLES = new Set(['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef']);
 
       let filteredRows = result.rows;
       if (targetApp) {
@@ -588,6 +599,16 @@ export class NotificationEngine {
         filteredRows = result.rows.filter((r: any) => {
           const app = (r.app_name || '').toLowerCase().trim();
           const target = (targetApp || '').toLowerCase().trim();
+          const tokenRole = (r.role || '').toLowerCase().trim();
+
+          // CRITICAL SERVER-SIDE OWNER HARD-BLOCK (§3 & §4):
+          // For restaurant operational targetApp, NO owner token or owner-role token is EVER allowed!
+          if (target === 'restaurant' || target === 'restaurant_manager') {
+            if (OWNER_ROLES.has(tokenRole) || app === 'owner') {
+              console.warn(`[NotificationEngine] 🚨 SECURITY BLOCK: Dropped owner token for UID ${r.firebase_uid} from restaurant delivery`);
+              return false;
+            }
+          }
 
           if (!target || target === 'all') return true;
 
@@ -621,6 +642,57 @@ export class NotificationEngine {
         });
       }
 
+      // SECOND PASS: Authoritative Identity Verification for Restaurant Target (§3 & §4)
+      if (targetApp && (targetApp.toLowerCase().trim() === 'restaurant' || targetApp.toLowerCase().trim() === 'restaurant_manager')) {
+        const verifiedRows: any[] = [];
+        for (const row of filteredRows) {
+          try {
+            const uid = row.firebase_uid;
+            let isVerifiedStaff = false;
+
+            // 1. Check users collection
+            const uDoc = await db.collection('users').doc(uid).get().catch(() => null);
+            if (uDoc && uDoc.exists) {
+              const ud = uDoc.data() || {};
+              const email = (ud.email || '').toLowerCase().trim();
+              const role = (ud.role || '').toLowerCase().trim();
+
+              if (OWNER_EMAILS.has(email) || OWNER_ROLES.has(role)) {
+                console.warn(`[NotificationEngine] 🚨 SECURITY BLOCK: Rejected owner token (UID ${uid}, email ${email}) from restaurant targetApp`);
+                continue;
+              }
+
+              if (ALLOWED_STAFF_ROLES.has(role) && ud.isActive !== false) {
+                isVerifiedStaff = true;
+              }
+            }
+
+            // 2. Check restaurant_managers collection if not verified in users
+            if (!isVerifiedStaff) {
+              const rmDoc = await db.collection('restaurant_managers').doc(uid).get().catch(() => null);
+              if (rmDoc && rmDoc.exists) {
+                const rmd = rmDoc.data() || {};
+                const email = (rmd.email || '').toLowerCase().trim();
+                const st = (rmd.status || '').toUpperCase();
+                if (!OWNER_EMAILS.has(email) && (st === 'APPROVED' || st === 'ACTIVE' || !rmd.status) && rmd.isActive !== false) {
+                  isVerifiedStaff = true;
+                }
+              }
+            }
+
+            // Fail-closed: Only allow positively verified restaurant staff tokens
+            if (isVerifiedStaff) {
+              verifiedRows.push(row);
+            } else {
+              console.warn(`[NotificationEngine] 🚨 SECURITY BLOCK: Token for UID ${uid} rejected — not verified as active restaurant staff`);
+            }
+          } catch (vErr: any) {
+            console.warn(`[NotificationEngine] Error verifying token for UID ${row.firebase_uid} — failing closed:`, vErr.message);
+          }
+        }
+        filteredRows = verifiedRows;
+      }
+
       const foundUids = new Set(filteredRows.map((r: any) => r.firebase_uid));
       let tokens: string[] = filteredRows.map((r: any) => r.token);
 
@@ -633,7 +705,7 @@ export class NotificationEngine {
             const userData = userDoc.data() || {};
             const userEmail = (userData.email || '').toLowerCase().trim();
             const userRole = (userData.role || '').toLowerCase().trim();
-            const isOwner = ['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com'].includes(userEmail) || userRole === 'owner' || userRole === 'platform_owner';
+            const isOwner = OWNER_EMAILS.has(userEmail) || OWNER_ROLES.has(userRole);
 
             // Safety Guard: Owner tokens must NEVER fallback for restaurant or delivery notifications
             if (isOwner && targetApp && targetApp !== 'owner') {
@@ -804,25 +876,66 @@ export class NotificationEngine {
       console.warn(`[NotificationEngine] Branch staff lookup failed for branch ${cleanBranchId} (franchise: ${cleanFranchiseId}):`, e.message);
     }
 
+    const ALLOWED_STAFF_ROLES = new Set(['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef']);
     const FORBIDDEN_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
     const FORBIDDEN_ROLES = new Set(['owner', 'platform_owner', 'customer', 'delivery', 'delivery_partner', 'rider']);
 
     const validUids: string[] = [];
     for (const uid of uidsSet) {
       try {
-        const uDoc = await db.collection('users').doc(uid).get();
-        if (uDoc.exists) {
+        let isAuthorized = false;
+
+        // 1. Check users collection
+        const uDoc = await db.collection('users').doc(uid).get().catch(() => null);
+        if (uDoc && uDoc.exists) {
           const ud = uDoc.data() || {};
           const email = (ud.email || '').toLowerCase().trim();
           const role = (ud.role || '').toLowerCase().trim();
+
           if (FORBIDDEN_EMAILS.has(email) || FORBIDDEN_ROLES.has(role)) {
-            console.log(`[NotificationEngine] Excluded non-restaurant user ${uid} (${email}, role=${role}) from branch staff`);
+            console.log(`[NotificationEngine] 🚨 SECURITY: Excluded non-restaurant user ${uid} (${email}, role=${role}) from branch staff`);
             continue;
           }
+
+          if (ALLOWED_STAFF_ROLES.has(role) && ud.isActive !== false) {
+            const userF = normF(ud.franchiseId);
+            const userB = (ud.branchId || '').trim();
+            const branchMatches = !cleanBranchId || userB === cleanBranchId || userB === 'all';
+            const franchiseMatches = !cleanTargetF || !userF || userF === cleanTargetF || ud.franchiseId === 'all';
+            if (branchMatches && franchiseMatches) {
+              isAuthorized = true;
+            }
+          }
         }
-        validUids.push(uid);
-      } catch {
-        validUids.push(uid);
+
+        // 2. If not confirmed in users, check restaurant_managers collection
+        if (!isAuthorized) {
+          const rmDoc = await db.collection('restaurant_managers').doc(uid).get().catch(() => null);
+          if (rmDoc && rmDoc.exists) {
+            const rmd = rmDoc.data() || {};
+            const email = (rmd.email || '').toLowerCase().trim();
+            const st = (rmd.status || '').toUpperCase();
+            if (!FORBIDDEN_EMAILS.has(email) && (st === 'APPROVED' || st === 'ACTIVE' || !rmd.status) && rmd.isActive !== false) {
+              const userF = normF(rmd.franchiseId);
+              const userB = (rmd.branchId || '').trim();
+              const branchMatches = !cleanBranchId || userB === cleanBranchId || userB === 'all';
+              const franchiseMatches = !cleanTargetF || !userF || userF === cleanTargetF || rmd.franchiseId === 'all';
+              if (branchMatches && franchiseMatches) {
+                isAuthorized = true;
+              }
+            }
+          }
+        }
+
+        // FAIL CLOSED (§5): Only include positively verified restaurant staff!
+        if (isAuthorized) {
+          validUids.push(uid);
+        } else {
+          console.warn(`[NotificationEngine] Recipient ${uid} failed positive restaurant staff verification — excluded.`);
+        }
+      } catch (verErr: any) {
+        // FAIL CLOSED on error — do NOT include
+        console.warn(`[NotificationEngine] Error verifying user ${uid} — failing closed:`, verErr.message);
       }
     }
 
