@@ -741,7 +741,7 @@ router.get('/:id/dashboard', requireRole(['owner', 'admin', 'developer', 'platfo
       : (branches.length > 0 ? branches.map(b => b.id) : [id]);
 
     // Fetch orders for metrics
-    const orderSnap = await adminDb.collection('orders').limit(500).get().catch(() => ({ docs: [] } as any));
+    const orderSnap = await adminDb.collection('orders').where('franchiseId', '==', id).get().catch(async () => await adminDb.collection('orders').get().catch(() => ({ docs: [] } as any)));
     const allOrders: any[] = orderSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
 
     const scopedOrders = allOrders.filter(o => {
@@ -1803,7 +1803,7 @@ router.get('/:id/reports', requireRole(['owner', 'admin', 'developer', 'platform
     if (!branchIds.includes(id)) branchIds.push(id);
 
     // 2. Query orders
-    const orderSnap = await adminDb.collection('orders').limit(500).get().catch(() => ({ docs: [] } as any));
+    const orderSnap = await adminDb.collection('orders').where('franchiseId', '==', id).get().catch(async () => await adminDb.collection('orders').get().catch(() => ({ docs: [] } as any)));
 
     const parseOrderIso = (val: any): string => {
       if (!val) return '';

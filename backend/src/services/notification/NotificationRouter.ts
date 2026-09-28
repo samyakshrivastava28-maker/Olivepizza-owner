@@ -134,12 +134,12 @@ export class NotificationRouter {
 
       // Rule 7: Strict Franchise Scoping (Cross-Franchise Isolation)
       const normF = (id?: string) => (id || '').trim().toLowerCase().replace(/^fra_/, '');
-      const recF = normF(recipient.franchiseId) || 'rajnandgaon';
-      const ordF = normF(order.franchiseId) || 'rajnandgaon';
-      if (recF !== ordF && recipient.franchiseId !== 'all') {
+      const recF = normF(recipient.franchiseId);
+      const ordF = normF(order.franchiseId);
+      if (recipient.franchiseId !== 'all' && (!recF || !ordF || recF !== ordF)) {
         return {
           allowed: false,
-          reason: `Franchise mismatch: recipient franchise "${recipient.franchiseId}" does not match order franchise "${order.franchiseId}".`
+          reason: `Franchise mismatch: recipient franchise "${recipient.franchiseId || 'NONE'}" does not match order franchise "${order.franchiseId || 'NONE'}".`
         };
       }
 
@@ -147,7 +147,7 @@ export class NotificationRouter {
       if (!recipient.branchId || !order.branchId || recipient.branchId !== order.branchId) {
         return {
           allowed: false,
-          reason: `Branch mismatch: recipient branch "${recipient.branchId}" does not match order branch "${order.branchId}".`
+          reason: `Branch mismatch: recipient branch "${recipient.branchId || 'NONE'}" does not match order branch "${order.branchId || 'NONE'}".`
         };
       }
 
@@ -220,10 +220,15 @@ export class NotificationRouter {
     order: OrderRoutingContext,
     eventType: OrderNotificationEventType
   ): Promise<{ dispatchedCount: number; targetUids: string[]; status: string }> {
-    const cleanFranchiseId = order.franchiseId || 'fra_rajnandgaon';
-    const cleanBranchId = order.branchId || 'main_branch';
+    const cleanFranchiseId = (order.franchiseId || '').trim();
+    const cleanBranchId = (order.branchId || '').trim();
 
     if (eventType === 'RESTAURANT_NEW_ORDER_ALARM') {
+      if (!cleanBranchId) {
+        console.warn(`[NotificationRouter] Cannot route RESTAURANT_NEW_ORDER_ALARM: order ${order.orderId} missing authoritative branchId.`);
+        return { dispatchedCount: 0, targetUids: [], status: 'MISSING_BRANCH_ID' };
+      }
+
       // 1. Resolve staff strictly bound to this franchise and branch
       const rawUids = await notificationEngine.resolveBranchStaff(cleanBranchId, cleanFranchiseId);
 

@@ -163,8 +163,12 @@ export class FirestoreListener {
             // 1. FCM PUSH NOTIFICATION FOR NEW ORDER (STRICTLY SCOPED RESTAURANT ALARM & CUSTOMER CONFIRMATION)
             (async () => {
               try {
-                const branchId = orderData.branchId || 'main_branch';
-                const franchiseId = orderData.franchiseId || 'fra_rajnandgaon';
+                const branchId = (orderData.branchId || '').trim();
+                const franchiseId = (orderData.franchiseId || '').trim();
+                if (!branchId) {
+                  console.warn(`[FirestoreListener] Order ${orderData.id} missing authoritative branchId; skipping alarm dispatch.`);
+                  return;
+                }
                 const customerUid = orderData.customerUid || orderData.firebaseUid || orderData.customerId || orderData.userId || orderData.user_id;
 
                 // Dispatch strictly via NotificationRouter (enforces franchise & branch isolation; never leaks to owner or delivery)
@@ -373,8 +377,8 @@ export class FirestoreListener {
                     contactPhone: orderData.contactPhone || orderData.phone,
                     customerName: orderData.customerName || orderData.customer_name || 'Customer',
                     deliveryPartnerId: partnerId,
-                    franchiseId: orderData.franchiseId || 'fra_rajnandgaon',
-                    branchId: orderData.branchId || 'main_branch',
+                    franchiseId: (orderData.franchiseId || '').trim(),
+                    branchId: (orderData.branchId || '').trim(),
                     orderTime: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
                     rawOrderData: orderData,
                   }, 'DELIVERY_ASSIGNED');
@@ -382,27 +386,29 @@ export class FirestoreListener {
 
                 // If order was delivered, notify the branch restaurant staff with delivery success sound
                 if (currentStatus === 'delivered') {
-                  const branchId = orderData.branchId || 'main_branch';
-                  const franchiseId = orderData.franchiseId || 'fra_rajnandgaon';
-                  const branchStaff = await notificationEngine.resolveBranchStaff(branchId, franchiseId);
-                  if (branchStaff.length > 0) {
-                    const deliveredPayload = RestaurantTemplates.orderDelivered(orderData.id, {
-                      orderNumber,
-                      customerName: orderData.customerName || 'Customer',
-                      totalAmount,
-                      branchId,
-                      franchiseId,
-                      riderName: orderData.deliveryPartnerName,
-                      deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
-                      deliveredAt: new Date().toISOString(),
-                    });
-                    await notificationEngine.sendBulk(branchStaff, deliveredPayload, {
-                      orderId: orderData.id,
-                      category: 'simple_informational',
-                      priority: 'high',
-                      tag: `order_delivered_${orderData.id}`,
-                      targetApp: 'restaurant'
-                    });
+                  const branchId = (orderData.branchId || '').trim();
+                  const franchiseId = (orderData.franchiseId || '').trim();
+                  if (branchId) {
+                    const branchStaff = await notificationEngine.resolveBranchStaff(branchId, franchiseId);
+                    if (branchStaff.length > 0) {
+                      const deliveredPayload = RestaurantTemplates.orderDelivered(orderData.id, {
+                        orderNumber,
+                        customerName: orderData.customerName || 'Customer',
+                        totalAmount,
+                        branchId,
+                        franchiseId,
+                        riderName: orderData.deliveryPartnerName,
+                        deliveryAddress: orderData.deliveryAddress?.addressLine || orderData.deliveryAddress || 'Delivery Address',
+                        deliveredAt: new Date().toISOString(),
+                      });
+                      await notificationEngine.sendBulk(branchStaff, deliveredPayload, {
+                        orderId: orderData.id,
+                        category: 'simple_informational',
+                        priority: 'high',
+                        tag: `order_delivered_${orderData.id}`,
+                        targetApp: 'restaurant'
+                      });
+                    }
                   }
                 }
               } catch (notifErr: any) {
@@ -442,8 +448,8 @@ export class FirestoreListener {
               permanentBillNo: orderData.permanentBillNo ? Number(orderData.permanentBillNo) : undefined,
               userId: orderData.userId || orderData.firebaseUid || '',
               customerName: orderData.customerName || orderData.customer_name || 'Customer',
-              franchiseId: orderData.franchiseId || 'fra_primary',
-              branchId: orderData.branchId || 'main_branch',
+              franchiseId: (orderData.franchiseId || '').trim(),
+              branchId: (orderData.branchId || '').trim(),
               totalAmount,
               timestamp: new Date().toISOString(),
               rawOrderData: orderData,

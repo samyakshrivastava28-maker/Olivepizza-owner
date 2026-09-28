@@ -6,6 +6,7 @@ import { query } from '../lib/db.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { idempotency } from '../middleware/idempotency.middleware.js';
 import { adminDb } from '../config/firebase.js';
+import { FirestoreListener } from '../listeners/firestore.listener.js';
 import { OwnerTemplates, CustomerTemplates, RestaurantTemplates } from '../services/notification/NotificationTemplates.js';
 
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
@@ -961,9 +962,13 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         franchiseId: resolvedFranchiseId,
         organizationId: resolvedOrgId,
         paymentDetails: req.body.paymentDetails || null,
+        notificationDispatched: true,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
+
+      // Mark order as already processed in FirestoreListener to prevent duplicate new-order alert
+      FirestoreListener.markOrderProcessed(newOrderId);
 
       trace.steps.push({ step: 'Firestore Write', status: 'success', orderId: newOrderId, dailyOrderNumber, permanentBillNo, billReference });
 
@@ -1079,7 +1084,7 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
           version: 1
         });
         await notificationEngine.send(userId, customerPlacedPayload, {
-          eventId: `order_created_customer_${newOrderId}`,
+          eventId: `ORDER_CREATED:customer:${newOrderId}`,
           category: 'pinned_live',
           orderId: newOrderId,
           targetApp: 'customer',

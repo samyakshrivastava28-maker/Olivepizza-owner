@@ -294,10 +294,10 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     }
 
     let role = userData?.role || user.role || 'customer';
-    let branchId = userData?.branchId || user.branchId || 'main_branch';
-    let branchName = userData?.branchName || 'Olive Pizza — Rajnandgaon (HQ)';
-    let franchiseId = userData?.franchiseId || user.franchiseId || 'fra_primary';
-    let branchIds = userData?.branchIds || [branchId];
+    let branchId = userData?.branchId || user.branchId || '';
+    let branchName = userData?.branchName || '';
+    let franchiseId = userData?.franchiseId || user.franchiseId || '';
+    let branchIds = userData?.branchIds || (branchId ? [branchId] : []);
     let permissions = userData?.permissions || [];
     let allowedApps: string[] = Array.isArray(userData?.allowedApps) ? userData.allowedApps : [];
     let isAuthorized = false;

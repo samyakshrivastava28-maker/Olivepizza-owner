@@ -707,11 +707,14 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
     // ── SYSTEM ACTIONS ─────────────────────────────────────────────────────
     else if (action === 'stop_alert') {
       try {
-        const ownerDocs = await db.collection('users').where('role', '==', 'owner').get();
-        const ownerUids = ownerDocs.docs.map(d => d.id);
-        if (ownerUids.length > 0) {
-          const stopPayload = { data: { action: 'stop_alert', orderId: orderId } };
-          await notificationEngine.sendBulk(ownerUids, stopPayload as any, { priority: 'high', tag: `order_owner_stop_${orderId}`, orderId });
+        const branchId = (orderData?.branchId || '').trim();
+        const franchiseId = (orderData?.franchiseId || '').trim();
+        if (branchId) {
+          const branchStaff = await notificationEngine.resolveBranchStaff(branchId, franchiseId);
+          if (branchStaff.length > 0) {
+            const stopPayload = { data: { action: 'stop_alert', orderId } };
+            await notificationEngine.sendBulk(branchStaff, stopPayload as any, { priority: 'high', tag: `order_restaurant_stop_${orderId}`, orderId });
+          }
         }
       } catch (e: any) {
         console.error(`[ManualAction] Failed to send stop_alert for ${orderId}:`, e.message);
@@ -866,8 +869,8 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       }
     }
 
-    const effectiveBranchId = user.branchId || req.body.branchId || 'main_branch';
-    const effectiveFranchiseId = user.franchiseId || req.body.franchiseId || 'fra_rajnandgaon';
+    const effectiveBranchId = user.branchId || (isOwnerIdentity ? null : req.body.branchId) || null;
+    const effectiveFranchiseId = user.franchiseId || (isOwnerIdentity ? null : req.body.franchiseId) || null;
 
     await notificationQueue.registerToken(userId, token, {
       oldToken,
@@ -936,8 +939,8 @@ router.post('/register-token', verifyToken, async (req: AuthRequest, res: Respon
       }
     }
 
-    const effectiveBranchId = user.branchId || req.body.branchId || 'main_branch';
-    const effectiveFranchiseId = user.franchiseId || req.body.franchiseId || 'fra_rajnandgaon';
+    const effectiveBranchId = user.branchId || (isOwnerIdentity ? null : req.body.branchId) || null;
+    const effectiveFranchiseId = user.franchiseId || (isOwnerIdentity ? null : req.body.franchiseId) || null;
 
     await notificationQueue.registerToken(userId, token, {
       oldToken,
