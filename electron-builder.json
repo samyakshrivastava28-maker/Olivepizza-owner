@@ -28,11 +28,15 @@
     "target": [
       {
         "target": "dmg",
-        "arch": ["x64", "arm64"]
+        "arch": ["universal", "arm64", "x64"]
+      },
+      {
+        "target": "zip",
+        "arch": ["universal"]
       }
     ],
     "category": "public.app-category.business",
-    "icon": "electron/resources/icon.icns"
+    "icon": "electron/resources/icon.png"
   },
   "dmg": {
     "background": null,

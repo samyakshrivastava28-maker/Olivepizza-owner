@@ -44,12 +44,39 @@ jobs:
           mkdir -p artifact
           COMMIT_NUM=$(git rev-list --count HEAD)
           TARGET_NAME="olivepizza-owner-${COMMIT_NUM}.dmg"
+          
+          echo "Listing all generated packages in dist-electron:"
+          ls -la dist-electron/ || true
+
+          # 1. Prefer Universal DMG as default primary DMG, fallback to first DMG found
+          UNIVERSAL_DMG=$(ls dist-electron/*universal*.dmg 2>/dev/null | head -n 1)
           FIRST_DMG=$(ls dist-electron/*.dmg 2>/dev/null | head -n 1)
-          if [ -n "$FIRST_DMG" ] && [ -f "$FIRST_DMG" ]; then
+
+          if [ -n "$UNIVERSAL_DMG" ] && [ -f "$UNIVERSAL_DMG" ]; then
+            cp "$UNIVERSAL_DMG" "artifact/${TARGET_NAME}"
+            echo "✅ Packaged primary ${TARGET_NAME} from universal: ${UNIVERSAL_DMG}"
+          elif [ -n "$FIRST_DMG" ] && [ -f "$FIRST_DMG" ]; then
             cp "$FIRST_DMG" "artifact/${TARGET_NAME}"
-            echo "Packaged ${TARGET_NAME} from ${FIRST_DMG}"
+            echo "✅ Packaged primary ${TARGET_NAME} from ${FIRST_DMG}"
+          else
+            echo "⚠️ No DMG found in dist-electron!"
           fi
-          echo "Packaged ${TARGET_NAME}"
+
+          # 2. Also copy specific architectures for direct explicit compatibility
+          for dmg_file in dist-electron/*.dmg; do
+            if [ -f "$dmg_file" ]; then
+              base=$(basename "$dmg_file")
+              if [[ "$base" == *"arm64"* ]]; then
+                cp "$dmg_file" "artifact/olivepizza-owner-${COMMIT_NUM}-arm64.dmg"
+                echo "Packaged ARM64: artifact/olivepizza-owner-${COMMIT_NUM}-arm64.dmg"
+              elif [[ "$base" == *"x64"* ]] || [[ "$base" == *"x86_64"* ]]; then
+                cp "$dmg_file" "artifact/olivepizza-owner-${COMMIT_NUM}-x64.dmg"
+                echo "Packaged x64: artifact/olivepizza-owner-${COMMIT_NUM}-x64.dmg"
+              fi
+            fi
+          done
+
+          ls -lh artifact/
       - uses: actions/upload-artifact@v4
         with:
           name: OlivePizzaOwner-macOS-Installer
@@ -61,8 +88,7 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: |
           COMMIT_NUM=$(git rev-list --count HEAD)
-          TARGET_NAME="olivepizza-owner-${COMMIT_NUM}.dmg"
-          echo "Publishing ${TARGET_NAME} to release tag 'latest'..."
+          echo "Publishing macOS release assets for commit ${COMMIT_NUM} to release tag 'latest'..."
 
           # Ensure 'latest' release exists or create it
           gh release view latest --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
@@ -75,10 +101,13 @@ jobs:
             gh release delete-asset latest "${old}" --repo "${GITHUB_REPOSITORY}" --yes || true
           done
 
-          # Upload the new commit's DMG
-          if ls artifact/*.dmg 1>/dev/null 2>&1; then
-            gh release upload latest "artifact/${TARGET_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber
-          fi
+          # Upload all generated DMG files
+          for dmg in artifact/*.dmg; do
+            if [ -f "$dmg" ]; then
+              echo "Uploading $dmg to release 'latest'..."
+              gh release upload latest "$dmg" --repo "${GITHUB_REPOSITORY}" --clobber
+            fi
+          done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

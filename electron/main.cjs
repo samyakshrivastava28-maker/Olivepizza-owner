@@ -107,9 +107,24 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5174');
   } else {
     const fs = require('fs');
-    const p1 = path.join(__dirname, '../dist/index.html');
-    const p2 = path.join(__dirname, '../frontend/dist/index.html');
-    mainWindow.loadFile(fs.existsSync(p1) ? p1 : p2);
+    const candidates = [
+      path.join(__dirname, '../dist/index.html'),
+      path.join(__dirname, '../frontend/dist/index.html'),
+      path.join(app.getAppPath(), 'dist/index.html'),
+      path.join(app.getAppPath(), 'frontend/dist/index.html'),
+      path.join(__dirname, 'index.html'),
+    ];
+    let loaded = false;
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        mainWindow.loadFile(p);
+        loaded = true;
+        break;
+      }
+    }
+    if (!loaded) {
+      mainWindow.loadFile(candidates[0]);
+    }
   }
 
   mainWindow.on('closed', () => {
