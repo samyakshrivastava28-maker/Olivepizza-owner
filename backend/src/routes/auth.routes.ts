@@ -524,30 +524,77 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
         }
       }
     } else if (targetApp === 'FRANCHISE_MANAGER') {
-      const allowedRoles = ['owner', 'admin', 'developer', 'franchise_manager'];
-      if (allowedRoles.includes(role) || allowedApps.includes('FRANCHISE_MANAGER')) {
-        isAuthorized = true;
-      } else {
-        // Check franchise_users collection
-        try {
-          let fraDoc = await adminDb.collection('franchise_users').doc(user.uid).get();
-          if (!fraDoc.exists && emailLower) {
-            const fraSnap = await adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get();
-            if (!fraSnap.empty) {
-              fraDoc = fraSnap.docs[0];
-            }
-          }
-          if (fraDoc.exists && fraDoc.data()?.isActive !== false) {
-            const fData = fraDoc.data()!;
-            role = 'franchise_manager';
-            franchiseId = fData.franchiseId || franchiseId;
-            branchIds = fData.branchIds || branchIds;
-            isAuthorized = true;
-            adminDb.collection('users').doc(user.uid).set({ role, franchiseId, branchIds }, { merge: true }).catch(() => {});
-          }
-        } catch (fraErr) {
-          console.warn('[AuthorizeApp] Franchise check notice:', fraErr);
+      // 1. Check email verification (if not phone authenticated)
+      if (user.email_verified === false && !user.phone_number) {
+        res.status(403).json({
+          authorized: false,
+          code: 'EMAIL_NOT_VERIFIED',
+          reason: 'Email verification required. Please verify your email before accessing Franchise Management.',
+          app: targetApp
+        });
+        return;
+      }
+
+      // 2. Fetch franchise user document
+      let fraDoc = await adminDb.collection('franchise_users').doc(user.uid).get();
+      if (!fraDoc.exists && emailLower) {
+        const fraSnap = await adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get();
+        if (!fraSnap.empty) {
+          fraDoc = fraSnap.docs[0];
         }
+      }
+
+      const fData = fraDoc?.exists ? fraDoc.data() : null;
+      const accountStatus = fData?.status || userData?.status || (fData ? 'APPROVED' : null);
+
+      if (accountStatus === 'PENDING_OWNER_APPROVAL' || accountStatus === 'PENDING') {
+        res.status(403).json({
+          authorized: false,
+          code: 'PENDING_OWNER_APPROVAL',
+          status: 'PENDING_OWNER_APPROVAL',
+          reason: 'Your Franchise Manager account is pending Owner approval. You will be able to log in once the store owner verifies and approves your account.',
+          app: targetApp
+        });
+        return;
+      }
+
+      if (accountStatus === 'REJECTED' || accountStatus === 'ACCOUNT_REJECTED') {
+        res.status(403).json({
+          authorized: false,
+          code: 'ACCOUNT_REJECTED',
+          status: 'ACCOUNT_REJECTED',
+          reason: 'Your Franchise Manager account request was rejected by the Owner.',
+          app: targetApp
+        });
+        return;
+      }
+
+      if (accountStatus === 'DEACTIVATED' || fData?.isActive === false || userData?.isActive === false) {
+        res.status(403).json({
+          authorized: false,
+          code: 'ACCOUNT_DEACTIVATED',
+          status: 'ACCOUNT_DEACTIVATED',
+          reason: 'This Franchise Manager account has been deactivated.',
+          app: targetApp
+        });
+        return;
+      }
+
+      const allowedRoles = ['owner', 'admin', 'developer', 'franchise_manager', 'franchise_owner'];
+      if (allowedRoles.includes(role) || allowedApps.includes('FRANCHISE_MANAGER') || fData) {
+        isAuthorized = true;
+        role = 'franchise_manager';
+        if (fData?.franchiseId) franchiseId = fData.franchiseId;
+        if (fData?.branchIds) branchIds = fData.branchIds;
+        adminDb.collection('users').doc(user.uid).set({ role, franchiseId, branchIds }, { merge: true }).catch(() => {});
+      } else {
+        res.status(403).json({
+          authorized: false,
+          code: 'NOT_REGISTERED',
+          reason: 'No Franchise Manager record found for this account. Please request provisioning through the Platform Owner.',
+          app: targetApp
+        });
+        return;
       }
     } else if (targetApp === 'DELIVERY') {
       // 1. Check email verification (if not phone authenticated)
@@ -589,6 +636,31 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
         }
       }
 
+      const dData = dpDoc?.exists ? dpDoc.data()! : userData;
+      const deliveryStatus = dData?.status || userData?.status || 'APPROVED';
+
+      if (deliveryStatus === 'PENDING_OWNER_APPROVAL' || deliveryStatus === 'PENDING') {
+        res.status(403).json({
+          authorized: false,
+          code: 'PENDING_OWNER_APPROVAL',
+          status: 'PENDING_OWNER_APPROVAL',
+          reason: 'Your Delivery Partner account is pending Owner approval. You will be able to log in once your store owner verifies and approves your account.',
+          app: targetApp
+        });
+        return;
+      }
+
+      if (deliveryStatus === 'REJECTED' || deliveryStatus === 'ACCOUNT_REJECTED') {
+        res.status(403).json({
+          authorized: false,
+          code: 'ACCOUNT_REJECTED',
+          status: 'ACCOUNT_REJECTED',
+          reason: 'Your Delivery Partner account request was rejected by the store owner.',
+          app: targetApp
+        });
+        return;
+      }
+
       if (!dpDoc.exists) {
         const hasExplicitDeliveryGrant = allowedApps.includes('DELIVERY') || Boolean(userData?.applicationAccess?.app_delivery);
         if (!hasExplicitDeliveryGrant) {
@@ -602,7 +674,6 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
         }
       }
 
-      const dData = dpDoc?.exists ? dpDoc.data()! : userData;
       if (dData.isActive === false || dData.status === 'INACTIVE' || dData.status === 'inactive' || dData.status === 'BLOCKED') {
         res.status(403).json({
           authorized: false,

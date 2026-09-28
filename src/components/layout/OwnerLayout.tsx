@@ -18,6 +18,7 @@ import {
   Bike,
   FileText,
   Users,
+  UserCheck,
   Mail,
   Bell,
   Radio,
@@ -73,6 +74,7 @@ export const OwnerLayout: React.FC = () => {
     {
       group: 'Business & CRM',
       items: [
+        { label: 'Staff & Approvals', path: '/account-approvals', icon: UserCheck },
         { label: 'Financial Reports', path: '/reports', icon: FileText },
         { label: 'Customer CRM', path: '/customers', icon: Users },
         { label: 'Email Center', path: '/email', icon: Mail },
