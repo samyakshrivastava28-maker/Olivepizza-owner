@@ -36,10 +36,11 @@ export class RiderDispatchEngine {
     const orderDoc = await adminDb.collection('orders').doc(orderId).get();
     if (!orderDoc.exists) return [];
     const orderData = orderDoc.data()!;
-    const branchId = orderData.branchId || 'main_branch';
+    const branchId = (orderData.branchId || '').trim();
+    if (!branchId) return [];
     const excludedUids = new Set<string>(orderData.declinedPartnerIds || []);
 
-    // Get restaurant coordinates (default Rajnandgaon HQ: 21.0967, 81.0315)
+    // Get restaurant coordinates
     const restaurantLat = orderData.restaurantLat || 21.0967;
     const restaurantLng = orderData.restaurantLng || 81.0315;
 
@@ -71,7 +72,8 @@ export class RiderDispatchEngine {
     for (const [uid, rData] of ridersMap.entries()) {
       if (excludedUids.has(uid)) continue;
 
-      const riderBranchId = rData.branchId || 'main_branch';
+      const riderBranchId = (rData.branchId || '').trim();
+      if (!riderBranchId) continue;
       const riderFranchiseId = rData.franchiseId;
       const orderFranchiseId = orderData.franchiseId;
 
@@ -131,7 +133,8 @@ export class RiderDispatchEngine {
     const orderDoc = await orderRef.get();
     if (!orderDoc.exists) return { success: false, reason: 'Order not found' };
     const orderData = orderDoc.data()!;
-    const branchId = orderData.branchId || 'main_branch';
+    const branchId = (orderData.branchId || '').trim();
+    if (!branchId) return { success: false, reason: 'Order has no assigned branch' };
 
     // 1. Primary: Server-authoritative store-bound FIFO queue
     try {

@@ -378,7 +378,6 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
     } catch (bErr) {
       console.warn('[POS] Branch lookup notice:', bErr);
     }
-    franchiseId = franchiseId || 'fra_rajnandgaon';
     const cashierName = user.email?.split('@')[0] || 'Counter Cashier';
 
     // Map orderSource
@@ -1016,7 +1015,11 @@ router.get('/receipt/:orderId', verifyToken, requirePOSRole, async (req: AuthReq
 router.get('/terminals', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
-    const franchiseId = user.franchiseId || 'fra_primary';
+    const franchiseId = user.franchiseId;
+    if (!franchiseId) {
+      res.status(403).json({ success: false, error: 'AUTHORIZED_FRANCHISE_SCOPE_REQUIRED: Account has no assigned franchise.' });
+      return;
+    }
 
     const snap = await adminDb.collection('pos_terminals')
       .where('franchiseId', '==', franchiseId)
@@ -1035,8 +1038,13 @@ router.post('/terminals/register', verifyToken, requireRole(['franchise_owner', 
     const user = req.user!;
     const { branchId, terminalName } = req.body;
 
-    const franchiseId = user.franchiseId || 'fra_primary';
-    const effectiveBranchId = branchId || user.branchId || 'main_branch';
+    const franchiseId = user.franchiseId || req.body.franchiseId;
+    const effectiveBranchId = branchId || user.branchId;
+
+    if (!franchiseId || !effectiveBranchId) {
+      res.status(400).json({ success: false, error: 'franchiseId and branchId are required to register a terminal.' });
+      return;
+    }
     const terminalId = `POS-${effectiveBranchId.toUpperCase().slice(0, 4)}-${crypto.randomInt(1000, 10000)}`;
     const activationCode = String(crypto.randomInt(100000, 1000000)); // Cryptographically secure 6-digit PIN
     const activationCodeExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24hr expiration
@@ -1350,18 +1358,10 @@ router.get('/all-terminals', verifyToken, requireRole(['owner', 'admin', 'develo
     const franchisesMap = new Map<string, any>();
     fSnap.docs.forEach(d => franchisesMap.set(d.id, { id: d.id, ...(d.data() as any) }));
 
-    if (franchisesMap.size === 0) {
-      franchisesMap.set('fra_rajnandgaon', { id: 'fra_rajnandgaon', name: 'Olive Pizza — Rajnandgaon', code: 'OP-RJN-01', city: 'Rajnandgaon' });
-    }
-
     // Fetch all branches
     const bSnap = await adminDb.collection('franchises').get();
     const branchesMap = new Map<string, any>();
     bSnap.docs.forEach(d => branchesMap.set(d.id, { id: d.id, ...(d.data() as any) }));
-
-    if (branchesMap.size === 0) {
-      branchesMap.set('main_branch', { id: 'main_branch', name: 'Olive Pizza — Rajnandgaon', franchiseId: 'fra_rajnandgaon' });
-    }
 
     // Fetch all POS terminals
     const posSnap = await adminDb.collection('pos_terminals').get();
@@ -1867,8 +1867,9 @@ router.post('/customers/save', verifyToken, requirePOSRole, async (req: AuthRequ
     }
 
     const now = new Date().toISOString();
-    const branchId = req.user?.branchId || (req.headers['x-branch-id'] as string) || 'main_branch';
-    const franchiseId = req.user?.franchiseId || (req.headers['x-franchise-id'] as string) || 'fra_rajnandgaon';
+    const isGlobal = ['owner', 'admin', 'developer'].includes(req.user?.role || '');
+    const branchId = req.user?.branchId || (isGlobal ? (req.headers['x-branch-id'] as string) : null) || null;
+    const franchiseId = req.user?.franchiseId || (isGlobal ? (req.headers['x-franchise-id'] as string) : null) || null;
     const cashierUid = req.user?.uid || 'pos_cashier';
 
     // 1. Check if customer already exists by phone
@@ -2031,12 +2032,6 @@ router.get('/branches', verifyToken, requirePOSRole, async (req: AuthRequest, re
       };
     });
 
-    if (branches.length === 0) {
-      branches = [
-        { franchiseId: 'fra_rajnandgaon', branchId: 'main_branch', name: 'Olive Pizza — Rajnandgaon', code: 'OP-RJN-01', city: 'Rajnandgaon' }
-      ];
-    }
-
     res.json({
       success: true,
       isOwner: true,
@@ -2065,9 +2060,9 @@ router.get('/users', verifyToken, requireRole(['owner', 'admin', 'developer', 'p
         email: d.email,
         name: d.name || d.displayName || d.email?.split('@')[0],
         role: d.role || 'cashier',
-        franchiseId: d.franchiseId || 'fra_primary',
-        branchId: d.branchId || 'main_branch',
-        terminalId: d.terminalId || 'POS-TERM-01',
+        franchiseId: d.franchiseId || null,
+        branchId: d.branchId || null,
+        terminalId: d.terminalId || null,
         organizationId: d.organizationId || 'org_olive_pizza',
         status: d.isActive === false ? 'DISABLED' : (d.status || 'ACTIVE'),
         permissions: d.permissions || [

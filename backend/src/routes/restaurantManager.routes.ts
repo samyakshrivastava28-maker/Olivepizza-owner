@@ -17,7 +17,7 @@ async function logManagerAudit(
 ) {
   try {
     await adminDb.collection('restaurant_audit_logs').add({
-      branchId: branchId || 'main_branch',
+      branchId: branchId || 'unassigned',
       actorUid,
       actorEmail,
       actionType: action,
@@ -39,10 +39,15 @@ router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userRole = req.user?.role || 'customer';
     const isOwnerOrAdmin = ['owner', 'admin', 'developer'].includes(userRole);
-    const callerBranch = req.user?.branchId || (req.query.branchId as string) || 'main_branch';
+    const callerBranch = isOwnerOrAdmin ? (req.query.branchId as string | undefined) : req.user?.branchId;
 
     if (!isOwnerOrAdmin && userRole !== 'restaurant_manager' && userRole !== 'manager') {
       res.status(403).json({ error: 'Forbidden: Insufficient permissions to view manager directory' });
+      return;
+    }
+
+    if (!isOwnerOrAdmin && !callerBranch) {
+      res.status(403).json({ error: 'AUTHORIZED_BRANCH_SCOPE_REQUIRED: Your account is not assigned to a branch.' });
       return;
     }
 
@@ -79,8 +84,8 @@ router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
         email: d.email || '',
         phone: d.phone || d.phoneNumber || '',
         role: d.role || 'restaurant_manager',
-        branchId: d.branchId || 'main_branch',
-        branchName: d.branchName || 'Olive Pizza — Rajnandgaon (Main Branch)',
+        branchId: d.branchId || null,
+        branchName: d.branchName || (d.branchId ? `Branch ${d.branchId}` : 'Unassigned Branch'),
         isActive: d.isActive !== false,
         permissions: d.permissions || [
           'dashboard.view',
@@ -131,8 +136,8 @@ router.get('/me', async (req: AuthRequest, res: Response): Promise<void> => {
         email: data.email || req.user?.email || '',
         phone: data.phone || '',
         role: data.role || 'restaurant_manager',
-        branchId: data.branchId || 'main_branch',
-        branchName: data.branchName || 'Olive Pizza — Rajnandgaon (Main Branch)',
+        branchId: data.branchId || null,
+        branchName: data.branchName || (data.branchId ? `Branch ${data.branchId}` : 'Unassigned Branch'),
         isActive: data.isActive !== false,
         permissions: data.permissions || [
           'dashboard.view',
@@ -160,7 +165,11 @@ router.post('/', requireRole(['owner', 'admin', 'developer']), async (req: AuthR
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-    const selectedBranch = branchId || 'main_branch';
+    const selectedBranch = branchId || req.user?.branchId;
+    if (!selectedBranch) {
+      res.status(400).json({ error: 'branchId is required to provision a Restaurant Manager' });
+      return;
+    }
     const finalPermissions = permissions || [
       'dashboard.view',
       'orders.live',
@@ -226,7 +235,7 @@ router.post('/', requireRole(['owner', 'admin', 'developer']), async (req: AuthR
       phone: phone || '',
       role: 'restaurant_manager',
       branchId: selectedBranch,
-      branchName: branchName || (selectedBranch === 'main_branch' ? 'Olive Pizza — Rajnandgaon (Main Branch)' : `Branch ${selectedBranch}`),
+      branchName: branchName || `Branch ${selectedBranch}`,
       permissions: finalPermissions,
       isActive: true,
       createdAt: new Date().toISOString(),
@@ -289,7 +298,7 @@ router.patch('/:id', requireRole(['owner', 'admin', 'developer']), async (req: A
         const currentData = existingUser.data() || {};
         await adminAuth.setCustomUserClaims(targetUid, {
           role: currentData.role || 'restaurant_manager',
-          branchId: branchId || currentData.branchId || 'main_branch',
+          branchId: branchId || currentData.branchId || null,
           permissions: permissions || currentData.permissions || []
         });
       } catch (claimsErr) {
@@ -298,7 +307,7 @@ router.patch('/:id', requireRole(['owner', 'admin', 'developer']), async (req: A
     }
 
     await logManagerAudit(
-      branchId || 'main_branch',
+      branchId || 'unassigned',
       req.user?.uid || 'owner',
       req.user?.email || 'owner@olivepizza.in',
       'MANAGER_ACCOUNT_UPDATED',
@@ -344,7 +353,7 @@ router.patch('/:id/status', requireRole(['owner', 'admin', 'developer']), async 
 
     const userDoc = await adminDb.collection('users').doc(targetUid).get();
     const managerEmail = userDoc.data()?.email || '';
-    const branchId = userDoc.data()?.branchId || 'main_branch';
+    const branchId = userDoc.data()?.branchId || '';
 
     await logManagerAudit(
       branchId,

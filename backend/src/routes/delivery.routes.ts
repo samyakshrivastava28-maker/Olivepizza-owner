@@ -207,9 +207,10 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
 
         // Notify Restaurant Management when order is successfully delivered
         if (status === 'delivered') {
-          const branchId = orderData.branchId || 'main_branch';
-          const branchStaffUids = await notificationEngine.resolveBranchStaff(branchId);
-          if (branchStaffUids.length > 0) {
+          const branchId = orderData.branchId;
+          if (branchId) {
+            const branchStaffUids = await notificationEngine.resolveBranchStaff(branchId);
+            if (branchStaffUids.length > 0) {
             const shortId = orderData.dailyOrderNumber ? `#${orderData.dailyOrderNumber}` : (orderData.orderNumber || `#${id.slice(-6).toUpperCase()}`);
             const deliveredPayload = RestaurantTemplates.orderDelivered(id, {
               orderNumber: shortId,
@@ -227,6 +228,7 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
               orderId: id,
               targetApp: 'restaurant'
             });
+            }
           }
         }
       } catch (e: any) {
@@ -671,18 +673,18 @@ router.get('/rider/me', requireRole(['delivery', 'delivery_partner', 'owner', 'a
       id: uid,
       name: data.name || req.user!.email?.split('@')[0] || 'Delivery Partner',
       email: data.email || req.user!.email || '',
-      phone: data.phone || '+91 91799 44445',
+      phone: data.phone || data.contactPhone || null,
       role: isOwner ? 'owner' : (data.role || 'delivery_partner'),
-      vehicleType: data.vehicleType || 'Motorcycle / Scooter',
-      vehicleNumber: data.vehicleNumber || 'CG-08-AB-1234',
+      vehicleType: data.vehicleType || null,
+      vehicleNumber: data.vehicleNumber || null,
       organizationId: data.organizationId || 'org_olive_pizza',
-      franchiseId: data.franchiseId || 'fra_primary',
-      branchId: data.branchId || 'main_branch',
-      branchName: data.branchName || 'Olive Pizza — Rajnandgaon (Main Branch)',
-      branchAddress: data.branchAddress || 'Dongargaon Rd, near Saraswati school, Gokul Nagar, Rajnandgaon, CG 491441',
-      branchPhone: data.branchPhone || '+91 91799 44445',
+      franchiseId: data.franchiseId || null,
+      branchId: data.branchId || null,
+      branchName: data.branchName || null,
+      branchAddress: data.branchAddress || null,
+      branchPhone: data.branchPhone || null,
       isOnline: data.isOnline !== false,
-      rating: data.rating || 4.9,
+      rating: data.rating != null ? Number(data.rating) : null,
       totalDeliveriesLifetime: data.totalDeliveriesLifetime || 0,
       activeOrderId: data.activeOrderId || null
     };

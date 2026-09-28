@@ -223,6 +223,52 @@ export class OrderStateMachine {
         };
       }
 
+      // Cross-Tenant / Cross-Role Isolation Checks
+      if (normalizedActorRole === 'customer') {
+        const orderUserId = orderData.userId || orderData.customerId || orderData.customerUid;
+        if (orderUserId && actor.uid !== orderUserId) {
+          if (client) await client.query('ROLLBACK').catch(() => {});
+          return {
+            success: false,
+            orderId,
+            previousStatus: fromState,
+            currentStatus: fromState,
+            version: orderData.notification_version || 1,
+            error: `Customer '${actor.uid}' cannot modify order belonging to user '${orderUserId}'.`,
+          };
+        }
+      }
+
+      if (['restaurant_manager', 'kitchen_staff', 'cashier'].includes(normalizedActorRole)) {
+        if (actor.branchId && orderData.branchId && actor.branchId !== orderData.branchId && actor.branchId !== 'all') {
+          if (client) await client.query('ROLLBACK').catch(() => {});
+          return {
+            success: false,
+            orderId,
+            previousStatus: fromState,
+            currentStatus: fromState,
+            version: orderData.notification_version || 1,
+            error: `Staff of branch '${actor.branchId}' cannot modify order belonging to branch '${orderData.branchId}'.`,
+          };
+        }
+      }
+
+      if (normalizedActorRole === 'delivery_partner') {
+        const assignedRiderId = orderData.deliveryPartnerId || orderData.riderId;
+        // If order already has an assigned rider, only that rider can perform rider transitions
+        if (assignedRiderId && actor.uid !== assignedRiderId) {
+          if (client) await client.query('ROLLBACK').catch(() => {});
+          return {
+            success: false,
+            orderId,
+            previousStatus: fromState,
+            currentStatus: fromState,
+            version: orderData.notification_version || 1,
+            error: `Delivery partner '${actor.uid}' is not assigned to order '${orderId}' (assigned: '${assignedRiderId}').`,
+          };
+        }
+      }
+
       const currentVersion = Number(orderData.notification_version || 1);
       const newVersion = currentVersion + 1;
       const nowIso = new Date().toISOString();
@@ -279,10 +325,12 @@ export class OrderStateMachine {
           // If this is a delivery order without an assigned partner yet, auto-dispatch immediately using Store FIFO Queue
           const fulfillment = (orderData.fulfillmentType || orderData.deliveryType || 'delivery').toLowerCase();
           if (fulfillment === 'delivery' && !orderData.deliveryPartnerId && !metadata.deliveryPartnerId) {
-            const branchId = orderData.branchId || 'main_branch';
-            StoreBoundDeliveryFleetService.assignOrderToFifoRider(orderId, branchId).catch((e) =>
-              console.warn('[OrderStateMachine] Store FIFO dispatch on ready notice:', e.message)
-            );
+            const branchId = orderData.branchId;
+            if (branchId) {
+              StoreBoundDeliveryFleetService.assignOrderToFifoRider(orderId, branchId).catch((e) =>
+                console.warn('[OrderStateMachine] Store FIFO dispatch on ready notice:', e.message)
+              );
+            }
           }
           break;
         }
@@ -353,7 +401,7 @@ export class OrderStateMachine {
         actorUid: actor.uid,
         actorRole: actor.role,
         actorName: actor.name || 'Staff',
-        branchId: orderData.branchId || 'main_branch',
+        branchId: orderData.branchId || null,
         timestamp: nowIso,
         metadata,
       }).catch(() => {});
@@ -419,7 +467,7 @@ export class OrderStateMachine {
   ) {
     try {
       const orderNumber = order.orderNumber || ('#' + (order.dailyOrderNumber || orderId.slice(-6)));
-      const branchId = order.branchId || 'main_branch';
+      const branchId = order.branchId || '';
       const customerUid = order.userId || order.customerId || order.customerUid || order.firebaseUid || order.user_id;
       const fulfillment = (order.fulfillmentType || order.deliveryType || 'delivery').toLowerCase();
       const isPickup = fulfillment === 'pickup' || fulfillment === 'dine_in' || fulfillment === 'takeaway';

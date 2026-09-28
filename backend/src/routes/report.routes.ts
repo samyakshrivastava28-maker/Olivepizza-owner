@@ -246,17 +246,42 @@ router.post('/generate-monthly', verifyToken, requireOwnerOrAdmin, async (req: A
     const now = new Date();
     const month = req.body.month || now.toLocaleString('default', { month: 'long' });
     const year = Number(req.body.year) || now.getFullYear();
-    const branchId = user.branchId || req.body.branchId || 'main_branch';
-    const franchiseId = user.franchiseId || req.body.franchiseId || 'fra_primary';
+    let branchId = user.branchId || req.body.branchId;
+    let franchiseId = user.franchiseId || req.body.franchiseId;
+    let branchName = 'Olive Pizza Branch';
+    let franchiseName = 'Olive Pizza Franchise';
+
+    if (!branchId || !franchiseId) {
+      const bSnap = await adminDb.collection('franchises').limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+      if (!bSnap.empty) {
+        const firstBranch = bSnap.docs[0];
+        branchId = branchId || firstBranch.id;
+        franchiseId = franchiseId || firstBranch.data().franchiseId || firstBranch.id;
+      }
+    }
+
+    if (!branchId || !franchiseId) {
+      res.status(400).json({ error: 'Valid branchId and franchiseId are required to generate monthly report' });
+      return;
+    }
+
+    try {
+      const bDoc = await adminDb.collection('franchises').doc(branchId).get();
+      if (bDoc.exists) {
+        const data = bDoc.data()!;
+        branchName = data.name || branchName;
+        franchiseName = data.franchiseName || franchiseName;
+      }
+    } catch (_) {}
 
     // 1. Generate Multi-Page Monthly PDF Report (100% real PostgreSQL data)
     const pdfBuffer = await MonthlyPdfReportService.generateMonthlyReportBuffer({
       monthName: month,
       year,
       branchId,
-      branchName: 'Olive Pizza — Rajnandgaon HQ',
+      branchName,
       franchiseId,
-      franchiseName: 'Olive Pizza Franchise'
+      franchiseName
     });
 
     const reportKey = `${franchiseId}_${branchId}_${year}_${month.toLowerCase()}`;

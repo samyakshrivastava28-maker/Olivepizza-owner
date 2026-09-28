@@ -129,7 +129,7 @@ export class CustomerOrderingContextService {
       };
     }
 
-    const resolvedFranchiseId = closestBranch.franchiseId || closestBranch.id || 'fra_rajnandgaon';
+    const resolvedFranchiseId = closestBranch.franchiseId || closestBranch.id;
     const resolvedBranchId = closestBranch.id;
     const resolvedBranchName = closestBranch.name || 'Olive Pizza Branch';
     const now = Date.now();

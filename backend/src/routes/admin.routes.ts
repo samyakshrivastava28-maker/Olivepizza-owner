@@ -493,14 +493,58 @@ router.post('/accounts/approve', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    const now = new Date().toISOString();
     const cleanEmail = (email || '').toLowerCase().trim();
-    const resolvedRole = role || (
+
+    // 0. Locate existing account record to prevent arbitrary privilege escalation
+    let existingDoc: any = null;
+    let existingCollection = 'users';
+
+    if (uid) {
+      const uDoc = await adminDb.collection('users').doc(uid).get();
+      if (uDoc.exists) {
+        existingDoc = uDoc;
+        existingCollection = 'users';
+      }
+    }
+    if (!existingDoc && cleanEmail) {
+      const q = await adminDb.collection('users').where('email', '==', cleanEmail).limit(1).get();
+      if (!q.empty) {
+        existingDoc = q.docs[0];
+        existingCollection = 'users';
+      }
+    }
+
+    // Check specific operational pending collections if not in users
+    if (!existingDoc && uid) {
+      for (const coll of ['restaurant_managers', 'pos_accounts', 'franchise_users', 'delivery_partners']) {
+        const doc = await adminDb.collection(coll).doc(uid).get();
+        if (doc.exists) {
+          existingDoc = doc;
+          existingCollection = coll;
+          break;
+        }
+      }
+    }
+
+    const existingData = existingDoc?.data() || {};
+
+    // Prevent privilege escalation: Cannot grant owner or developer via general approval
+    const requestedRole = (role || existingData.role || '').toLowerCase();
+    if (requestedRole === 'owner' || requestedRole === 'developer' || requestedRole === 'platform_owner') {
+      res.status(403).json({ error: 'Forbidden: Owner and Developer privileges cannot be granted through operational account approval.' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const resolvedRole = role || existingData.role || (
       targetApp === 'RESTAURANT_MANAGER' ? 'restaurant_manager' :
       targetApp === 'POS' ? 'pos_operator' :
       targetApp === 'FRANCHISE_MANAGER' ? 'franchise_manager' :
       targetApp === 'DELIVERY' ? 'delivery_partner' : 'restaurant_manager'
     );
+
+    const effectiveFranchiseId = franchiseId || existingData.franchiseId || null;
+    const effectiveBranchId = branchId || existingData.branchId || null;
 
     const updatePayload: Record<string, any> = {
       role: resolvedRole,
@@ -509,12 +553,16 @@ router.post('/accounts/approve', async (req: AuthRequest, res: Response) => {
       approvedAt: now,
       approvedByUid: req.user?.uid || 'owner',
       approvedByEmail: req.user?.email || 'owner@olivepizza.in',
-      updatedAt: now
+      updatedAt: now,
+      franchiseId: effectiveFranchiseId,
+      branchId: effectiveBranchId
     };
 
-    if (franchiseId) updatePayload.franchiseId = franchiseId;
-    if (branchId) updatePayload.branchId = branchId;
-    if (permissions && Array.isArray(permissions)) updatePayload.permissions = permissions;
+    if (permissions && Array.isArray(permissions)) {
+      updatePayload.permissions = permissions;
+    } else if (existingData.permissions) {
+      updatePayload.permissions = existingData.permissions;
+    }
 
     // 1. Update users collection
     if (uid) {
@@ -563,13 +611,13 @@ router.post('/accounts/approve', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    // 3. Set custom claims if UID is available
+    // 3. Set custom claims if UID is available — NO HARDCODED FALLBACKS
     if (uid && !uid.startsWith('mgr_') && !uid.startsWith('pos_')) {
       try {
         await adminAuth.setCustomUserClaims(uid, {
           role: resolvedRole,
-          branchId: branchId || 'main_branch',
-          franchiseId: franchiseId || 'fra_rajnandgaon',
+          branchId: effectiveBranchId,
+          franchiseId: effectiveFranchiseId,
           status: 'APPROVED'
         });
       } catch (claimsErr: any) {

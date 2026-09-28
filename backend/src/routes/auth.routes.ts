@@ -244,9 +244,9 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
           email: user.email,
           name: 'Platform Owner',
           role: 'owner',
-          branchId: requestedBranchId || 'main_branch',
-          branchName: 'Olive Pizza — Rajnandgaon HQ',
-          franchiseId: 'fra_rajnandgaon',
+          branchId: requestedBranchId || 'all',
+          branchName: requestedBranchId ? `Branch ${requestedBranchId}` : 'Olive Pizza Enterprise',
+          franchiseId: 'all',
           permissions: ['*'],
           allowedApps: ['OWNER'],
           applicationAccess: {
@@ -481,12 +481,22 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
           return;
         }
 
+        if (!mData.branchId && !userData?.branchId) {
+          res.status(403).json({
+            authorized: false,
+            code: 'MISSING_BRANCH_ASSIGNMENT',
+            reason: 'Restaurant Manager record is missing authoritative branch assignment. Please contact your Franchise Manager.',
+            app: targetApp
+          });
+          return;
+        }
+
         isAuthorized = true;
         requiresPin = true;
         role = 'restaurant_manager';
-        branchId = mData.branchId || 'main_branch';
-        branchName = mData.branchName || 'Olive Pizza — Rajnandgaon HQ';
-        franchiseId = mData.franchiseId || 'fra_rajnandgaon';
+        branchId = mData.branchId || userData?.branchId || null;
+        branchName = mData.branchName || 'Olive Pizza Branch';
+        franchiseId = mData.franchiseId || userData?.franchiseId || null;
         permissions = mData.permissions || [
           'dashboard.view',
           'orders.live',
@@ -500,11 +510,20 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
           Boolean(userData?.applicationAccess?.app_restaurant_management);
 
         if (hasExplicitGrant) {
+          if (!userData?.branchId) {
+            res.status(403).json({
+              authorized: false,
+              code: 'MISSING_BRANCH_ASSIGNMENT',
+              reason: 'Restaurant Manager account has no assigned branch.',
+              app: targetApp
+            });
+            return;
+          }
           isAuthorized = true;
           requiresPin = true;
           role = 'restaurant_manager';
-          branchId = userData?.branchId || branchId;
-          franchiseId = userData?.franchiseId || 'fra_rajnandgaon';
+          branchId = userData?.branchId || null;
+          franchiseId = userData?.franchiseId || null;
           permissions = permissions.length > 0 ? permissions : [
             'dashboard.view',
             'orders.live',
@@ -708,12 +727,18 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
 
       isAuthorized = true;
       role = 'delivery_partner';
-      branchId = dData.branchId || 'main_branch';
-      franchiseId = dData.franchiseId || 'fra_rajnandgaon';
+      branchId = dData.branchId || null;
+      franchiseId = dData.franchiseId || null;
       isProfileComplete = Boolean(dData.name && dData.vehicleNumber);
     } else if (targetApp === 'OWNER') {
-      // STRICT OWNER ENFORCEMENT: Only the verified platform owner email is permitted
-      const isOwnerAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
+      // STRICT OWNER ENFORCEMENT: Verified platform owner email or database-approved owner account
+      const bootstrapOwnerEmail = (process.env.BOOTSTRAP_OWNER_EMAIL || '').toLowerCase().trim();
+      const isOwnerAccount = 
+        emailLower === 'olivepizzarjn@gmail.com' || 
+        emailLower === 'webhub2811@gmail.com' ||
+        (bootstrapOwnerEmail && emailLower === bootstrapOwnerEmail) ||
+        (userData?.role === 'owner' && userData?.status === 'APPROVED');
+
       if (!isOwnerAccount) {
         await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
         await AuthAuditService.logEvent({
@@ -728,7 +753,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
           authorized: false,
           app: targetApp,
           email: user.email,
-          reason: 'Access denied. Only the platform owner (olivepizzarjn@gmail.com) is authorized to access the Owner Console.'
+          reason: 'Access denied. Only the platform owner is authorized to access the Owner Console.'
         });
         return;
       }
@@ -858,15 +883,20 @@ router.post('/context-session', verifyToken, async (req: AuthRequest, res: Respo
       return;
     }
 
+    if (!targetFranchiseId || !targetBranchId) {
+      res.status(400).json({ error: 'targetFranchiseId and targetBranchId are required for context session generation.' });
+      return;
+    }
+
     const targetApp = req.body.targetApp || req.body.context || 'franchise_management';
 
     const tokenPayload = {
       ownerUid: user.uid,
       ownerEmail: user.email,
-      targetApp: targetApp || 'restaurant_management',
-      targetFranchiseId: targetFranchiseId || 'fra_primary',
-      targetBranchId: targetBranchId || 'main_branch',
-      targetBranchName: targetBranchName || 'Olive Pizza — Rajnandgaon HQ',
+      targetApp,
+      targetFranchiseId,
+      targetBranchId,
+      targetBranchName: targetBranchName || `Branch ${targetBranchId}`,
       issuedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString() // 8 hour session
     };

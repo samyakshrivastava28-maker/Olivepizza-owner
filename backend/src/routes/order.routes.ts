@@ -67,7 +67,7 @@ router.get('/', verifyToken, async (req: AuthRequest, res: Response): Promise<vo
 
     if (isStaff) {
       const scope = FranchiseScopeService.resolveScope(user);
-      const requestedBranchId = (req.query.branchId as string) || (req.headers['x-branch-id'] as string) || 'main_branch';
+      const requestedBranchId = (req.query.branchId as string) || (scope.isGlobalOwner ? 'all' : (scope.branchId || ''));
       const effectiveBranchId = FranchiseScopeService.getEffectiveBranchId(scope, requestedBranchId);
 
       let q: any = adminDb.collection('orders');
@@ -123,7 +123,7 @@ router.get('/live', verifyToken, requireRole(['restaurant_manager', 'owner', 'ki
     }
 
     const scope = FranchiseScopeService.resolveScope(user);
-    const requestedBranchId = (req.query.branchId as string) || (req.headers['x-branch-id'] as string) || 'main_branch';
+    const requestedBranchId = (req.query.branchId as string) || (scope.isGlobalOwner ? 'all' : (scope.branchId || ''));
     const effectiveBranchId = FranchiseScopeService.getEffectiveBranchId(scope, requestedBranchId);
 
     const activeStatuses = ['pending', 'pending_acceptance', 'accepted', 'preparing', 'ready', 'partner_assigned', 'picked_up', 'out_for_delivery'];
@@ -531,15 +531,19 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
     const callerRole = req.user?.role || 'customer';
     const isStaffMember = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(callerRole);
 
-    let resolvedBranchId = 'main_branch';
-    let resolvedFranchiseId = 'fra_rajnandgaon';
+    let resolvedBranchId = '';
+    let resolvedFranchiseId = '';
     let resolvedOrgId = 'org_olive_pizza';
-    let resolvedBranchName = 'Olive Pizza — Rajnandgaon HQ';
+    let resolvedBranchName = '';
 
     if (isStaffMember) {
       const scope = FranchiseScopeService.resolveScope(req.user);
-      resolvedBranchId = FranchiseScopeService.getEffectiveBranchId(scope, req.body.branchId || (req.headers['x-branch-id'] as string));
-      resolvedFranchiseId = scope.franchiseId || req.user?.franchiseId || 'fra_rajnandgaon';
+      resolvedBranchId = FranchiseScopeService.getEffectiveBranchId(scope, req.body.branchId || undefined);
+      if (!resolvedBranchId || resolvedBranchId === 'all') {
+        res.status(400).json({ error: 'Specific branch is required to create an order.', code: 'BRANCH_REQUIRED' });
+        return;
+      }
+      resolvedFranchiseId = scope.franchiseId || req.user?.franchiseId || '';
       resolvedOrgId = scope.organizationId || 'org_olive_pizza';
     } else {
       // Customer: Enforcement Point 4 (Authoritative radius verification & single-franchise lock immediately before persisting)
@@ -595,6 +599,14 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
             resolvedBranchId = res.context.branchId;
             resolvedFranchiseId = res.context.franchiseId;
           }
+        }
+
+        if (!resolvedBranchId) {
+          res.status(400).json({
+            error: "A valid branch is required for takeaway/pickup orders.",
+            code: 'BRANCH_REQUIRED'
+          });
+          return;
         }
       }
     }
@@ -929,6 +941,7 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         status: 'pending',
         notification_version: 1,
         acceptanceDeadline,
+        acceptDeadlineAt: acceptanceDeadline,
         cancellationAcknowledged: false,
         cancellationAcknowledgedAt: null,
         deliveryAddress: { 
@@ -1120,8 +1133,8 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
           tableNumber: req.body.tableNumber || undefined,
           terminalId: req.body.session?.terminalId || req.body.terminalId || (req.headers['x-terminal-id'] as string) || undefined,
           cashierName: req.body.session?.cashierName || req.body.cashierName || undefined,
-          branchName: req.body.session?.branchName || req.body.branchName || 'Olive Pizza — Rajnandgaon HQ',
-          franchiseId: req.body.session?.franchiseId || req.body.franchiseId || 'fra_primary',
+          branchName: resolvedBranchName || req.body.session?.branchName || req.body.branchName || 'Olive Pizza',
+          franchiseId: resolvedFranchiseId || req.body.session?.franchiseId || req.body.franchiseId || '',
           status: 'pending',
           itemCount: validatedItems.reduce((sum: number, it: any) => sum + (it.quantity || 1), 0),
           items: validatedItems,
@@ -1204,7 +1217,7 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
     }
 
     const orderData = orderDoc.data()!;
-    const orderBranchId = orderData.branchId || 'main_branch';
+    const orderBranchId = orderData.branchId || '';
     const userBranchId = req.user?.branchId;
 
     if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && role !== 'owner' && role !== 'admin') {
@@ -1220,7 +1233,7 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
     if (deliveryPartnerName) metadata.deliveryPartnerName = deliveryPartnerName;
     if (deliveryPartnerPhone) metadata.deliveryPartnerPhone = deliveryPartnerPhone;
 
-    const result = await OrderStateMachine.transition(id, status as any, { uid, role: effectiveRole, name, branchId: orderBranchId }, metadata);
+    const result = await OrderStateMachine.transition(id, status as any, { uid, role: effectiveRole, name, branchId: userBranchId || orderBranchId }, metadata);
     if (!result.success) {
       res.status(400).json({ error: result.error || 'Failed to update order status' });
       return;
@@ -1274,7 +1287,7 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
     }
 
     const orderData = orderDoc.data()!;
-    const orderBranchId = orderData.branchId || 'main_branch';
+    const orderBranchId = orderData.branchId || '';
 
     if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
       return res.status(403).json({
@@ -1308,14 +1321,14 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
 
     // Step 1: If pending, transition to accepted
     if (currentStatus === 'pending' || currentStatus === 'pending_acceptance') {
-      const accResult = await OrderStateMachine.transition(id, 'accepted', { uid, role: effectiveRole, name, branchId: orderBranchId });
+      const accResult = await OrderStateMachine.transition(id, 'accepted', { uid, role: effectiveRole, name, branchId: userBranchId || orderBranchId });
       if (!accResult.success) {
         return res.status(400).json({ success: false, error: accResult.error, requestId });
       }
     }
 
     // Step 2: Transition to preparing
-    const prepResult = await OrderStateMachine.transition(id, 'preparing', { uid, role: effectiveRole, name, branchId: orderBranchId });
+    const prepResult = await OrderStateMachine.transition(id, 'preparing', { uid, role: effectiveRole, name, branchId: userBranchId || orderBranchId });
     if (!prepResult.success) {
       return res.status(400).json({ success: false, error: prepResult.error, requestId });
     }
@@ -1389,7 +1402,7 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
     }
 
     const orderData = orderDoc.data()!;
-    const orderBranchId = orderData.branchId || 'main_branch';
+    const orderBranchId = orderData.branchId || '';
 
     if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
       return res.status(403).json({
@@ -1410,7 +1423,7 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
     }
 
     const cancellationReason = req.body.reason || 'Restaurant is at full capacity';
-    const result = await OrderStateMachine.transition(id, 'cancelled', { uid, role: effectiveRole, name, branchId: orderBranchId }, {
+    const result = await OrderStateMachine.transition(id, 'cancelled', { uid, role: effectiveRole, name, branchId: userBranchId || orderBranchId }, {
       cancellationReason,
       cancellationSource: 'restaurant_manager'
     });
@@ -1480,7 +1493,7 @@ router.post('/:id/acknowledge', verifyToken, async (req: AuthRequest, res: Respo
     }
 
     const orderData = orderDoc.data()!;
-    const orderBranchId = orderData.branchId || 'main_branch';
+    const orderBranchId = orderData.branchId || '';
 
     if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
       return res.status(403).json({
@@ -1645,7 +1658,7 @@ router.post('/:id/rating', verifyToken, async (req: AuthRequest, res: Response):
       deliveryRating: Number(deliveryRating || overallRating),
       overallRating: Number(overallRating),
       comment: comment ? String(comment).trim() : '',
-      branchId: orderData.branchId || 'main_branch',
+      branchId: orderData.branchId || null,
       deliveryPartnerId: orderData.deliveryPartnerId || null,
       createdAt: new Date().toISOString(),
     };

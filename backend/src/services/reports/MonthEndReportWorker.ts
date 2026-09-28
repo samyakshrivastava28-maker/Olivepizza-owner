@@ -21,18 +21,27 @@ export class MonthEndReportWorker {
     const isLastDay = tomorrow.getMonth() !== istTime.getMonth();
     if (isLastDay || istTime.getDate() === 1) {
       try {
-        const franchises = ['fra_rajnandgaon', 'fra_durg', 'fra_bhilai', 'fra_raipur'];
-        for (const fId of franchises) {
-          const branchId = fId === 'fra_durg' ? 'durg_branch' : 'main_branch';
-          const reportKey = fId + '_' + branchId + '_' + currentYear + '_' + currentMonth.toLowerCase();
+        const branchSnap = await db.collection('franchises').get().catch(() => ({ docs: [] } as any));
+        const targets = branchSnap.docs
+          .filter((d: any) => d.data().isActive !== false)
+          .map((d: any) => {
+            const data = d.data();
+            return {
+              branchId: d.id,
+              franchiseId: data.franchiseId || d.id
+            };
+          });
+
+        for (const target of targets) {
+          const reportKey = `${target.franchiseId}_${target.branchId}_${currentYear}_${currentMonth.toLowerCase()}`;
           const docSnap = await db.collection('monthly_reports').doc(reportKey).get();
           if (!docSnap.exists) {
-            console.log('[MonthEndReportWorker] Triggering automatic month-end report for ' + reportKey + '...');
+            console.log(`[MonthEndReportWorker] Triggering automatic month-end report for ${reportKey}...`);
             await MonthlyReportGenerator.generateAndArchiveMonthlyReport({
               monthName: currentMonth,
               year: currentYear,
-              franchiseId: fId,
-              branchId
+              franchiseId: target.franchiseId,
+              branchId: target.branchId
             });
           }
         }

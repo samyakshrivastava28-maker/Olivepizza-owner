@@ -117,7 +117,11 @@ export class DailySheetsSyncJob {
       // 2. Group orders by franchiseId
       const franchiseBuckets = new Map<string, any[]>();
       for (const ord of orders) {
-        const fId = ord.franchise_id || ord.franchiseId || 'fra_primary';
+        const fId = ord.franchise_id || ord.franchiseId;
+        if (!fId) {
+          console.warn(`[DailySheetsSyncJob] Skipping unassigned order ${ord.id} - missing authoritative franchiseId`);
+          continue;
+        }
         if (specificFranchiseId && fId !== specificFranchiseId) continue;
         if (!franchiseBuckets.has(fId)) franchiseBuckets.set(fId, []);
         franchiseBuckets.get(fId)!.push(ord);
@@ -131,6 +135,12 @@ export class DailySheetsSyncJob {
 
         for (const rawOrder of franchiseOrders) {
           const orderId = rawOrder.id;
+          const assignedBranchId = rawOrder.branch_id || rawOrder.branchId;
+          if (!assignedBranchId) {
+            console.warn(`[DailySheetsSyncJob] Skipping order ${orderId} - missing authoritative branchId`);
+            failedCount++;
+            continue;
+          }
           const auditKey = `${fId}_${orderId}`;
 
           // Check if already synced in Firestore audit
@@ -167,7 +177,7 @@ export class DailySheetsSyncJob {
             cashierName: rawOrder.cashier_name || rawOrder.cashierName,
             terminalId: rawOrder.terminal_id || rawOrder.terminalId,
             franchiseId: fId,
-            branchId: rawOrder.branch_id || rawOrder.branchId || 'main_branch'
+            branchId: assignedBranchId
           };
 
           const success = await FranchiseGoogleSheetsService.syncOrderToFranchise(orderPayload);

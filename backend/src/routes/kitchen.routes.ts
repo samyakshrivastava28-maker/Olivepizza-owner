@@ -25,17 +25,43 @@ const requireKitchenAccess = (req: AuthRequest, res: Response, next: Function) =
   next();
 };
 
+function resolveKitchenScope(req: AuthRequest): { branchId: string; franchiseId?: string } | { error: string; status: number } {
+  const role = req.user?.role || '';
+  const isGlobal = ['owner', 'admin', 'developer'].includes(role) || ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'].includes(req.user?.email?.toLowerCase() || '');
+  
+  if (isGlobal) {
+    const branchId = (req.query.branchId as string) || req.body?.branchId;
+    if (!branchId) {
+      return { error: 'branchId query or body parameter is required for Kitchen Management', status: 400 };
+    }
+    const franchiseId = (req.query.franchiseId as string) || req.body?.franchiseId || req.user?.franchiseId || undefined;
+    return { branchId, franchiseId };
+  }
+
+  // Operational staff: Strictly bound to server-assigned branch
+  const userBranch = (req.user?.branchId || '').trim();
+  if (!userBranch) {
+    return { error: 'AUTHORIZED_BRANCH_SCOPE_REQUIRED: Your staff account is not assigned to an active branch.', status: 403 };
+  }
+  return { branchId: userBranch, franchiseId: req.user?.franchiseId || undefined };
+}
+
 /**
  * GET /api/kitchen/inventory
  * List items for authorized branch
  */
 router.get('/inventory', verifyToken, requireKitchenAccess, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = (req.query.branchId as string) || req.user?.branchId || 'main_branch';
+    const scope = resolveKitchenScope(req);
+    if ('error' in scope) {
+      res.status(scope.status).json({ success: false, error: scope.error });
+      return;
+    }
+
     const category = req.query.category as string;
     const status = req.query.status as string;
 
-    const items = await KitchenInventoryService.listItems(branchId, { category, status });
+    const items = await KitchenInventoryService.listItems(scope.branchId, { category, status });
     res.json({ success: true, items, count: items.length });
   } catch (error: any) {
     console.error('[KitchenRoutes] Failed to list inventory:', error);
@@ -56,8 +82,12 @@ router.post('/inventory', verifyToken, requireKitchenAccess, async (req: AuthReq
       return;
     }
 
-    const branchId = req.body.branchId || req.user?.branchId || 'main_branch';
-    const franchiseId = req.body.franchiseId || req.user?.franchiseId || 'default_franchise';
+    const scope = resolveKitchenScope(req);
+    if ('error' in scope) {
+      res.status(scope.status).json({ success: false, error: scope.error });
+      return;
+    }
+
     const userId = req.user?.uid || 'anonymous';
     const userName = req.user?.email || 'Restaurant Staff';
 
@@ -69,8 +99,8 @@ router.post('/inventory', verifyToken, requireKitchenAccess, async (req: AuthReq
         availableQuantity: Number(availableQuantity) || 0,
         minimumQuantity: Number(minimumQuantity) || 0,
         description,
-        branchId,
-        franchiseId,
+        branchId: scope.branchId,
+        franchiseId: scope.franchiseId,
       },
       userId,
       userName
@@ -97,8 +127,12 @@ router.post('/inventory/:itemId/adjust', verifyToken, requireKitchenAccess, asyn
       return;
     }
 
-    const branchId = req.body.branchId || req.user?.branchId || 'main_branch';
-    const franchiseId = req.body.franchiseId || req.user?.franchiseId || 'default_franchise';
+    const scope = resolveKitchenScope(req);
+    if ('error' in scope) {
+      res.status(scope.status).json({ success: false, error: scope.error });
+      return;
+    }
+
     const userId = req.user?.uid || 'anonymous';
     const userName = req.user?.email || 'Staff';
 
@@ -109,8 +143,8 @@ router.post('/inventory/:itemId/adjust', verifyToken, requireKitchenAccess, asyn
       reason,
       userId,
       userName,
-      branchId,
-      franchiseId
+      scope.branchId,
+      scope.franchiseId
     );
 
     res.json({ success: true, item: updatedItem });
@@ -127,11 +161,16 @@ router.post('/inventory/:itemId/adjust', verifyToken, requireKitchenAccess, asyn
 router.patch('/inventory/:itemId', verifyToken, requireKitchenAccess, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { itemId } = req.params;
-    const branchId = req.body.branchId || req.user?.branchId || 'main_branch';
+    const scope = resolveKitchenScope(req);
+    if ('error' in scope) {
+      res.status(scope.status).json({ success: false, error: scope.error });
+      return;
+    }
+
     const userId = req.user?.uid || 'anonymous';
     const userName = req.user?.email || 'Staff';
 
-    const updated = await KitchenInventoryService.updateItem(itemId, req.body, userId, userName, branchId);
+    const updated = await KitchenInventoryService.updateItem(itemId, req.body, userId, userName, scope.branchId);
     res.json({ success: true, item: updated });
   } catch (error: any) {
     console.error('[KitchenRoutes] Failed to update item:', error);
@@ -146,10 +185,15 @@ router.patch('/inventory/:itemId', verifyToken, requireKitchenAccess, async (req
 router.delete('/inventory/:itemId', verifyToken, requireKitchenAccess, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { itemId } = req.params;
-    const branchId = (req.query.branchId as string) || req.user?.branchId || 'main_branch';
+    const scope = resolveKitchenScope(req);
+    if ('error' in scope) {
+      res.status(scope.status).json({ success: false, error: scope.error });
+      return;
+    }
+
     const userId = req.user?.uid || 'anonymous';
 
-    await KitchenInventoryService.archiveItem(itemId, userId, branchId);
+    await KitchenInventoryService.archiveItem(itemId, userId, scope.branchId);
     res.json({ success: true, message: 'Item archived successfully' });
   } catch (error: any) {
     console.error('[KitchenRoutes] Failed to archive item:', error);
@@ -163,10 +207,15 @@ router.delete('/inventory/:itemId', verifyToken, requireKitchenAccess, async (re
  */
 router.get('/history', verifyToken, requireKitchenAccess, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = (req.query.branchId as string) || req.user?.branchId || 'main_branch';
+    const scope = resolveKitchenScope(req);
+    if ('error' in scope) {
+      res.status(scope.status).json({ success: false, error: scope.error });
+      return;
+    }
+
     const limit = Number(req.query.limit) || 50;
 
-    const history = await KitchenInventoryService.getHistory(branchId, limit);
+    const history = await KitchenInventoryService.getHistory(scope.branchId, limit);
     res.json({ success: true, history, count: history.length });
   } catch (error: any) {
     console.error('[KitchenRoutes] Failed to fetch history:', error);
@@ -180,8 +229,13 @@ router.get('/history', verifyToken, requireKitchenAccess, async (req: AuthReques
  */
 router.get('/stats', verifyToken, requireKitchenAccess, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const branchId = (req.query.branchId as string) || req.user?.branchId || 'main_branch';
-    const items = await KitchenInventoryService.listItems(branchId);
+    const scope = resolveKitchenScope(req);
+    if ('error' in scope) {
+      res.status(scope.status).json({ success: false, error: scope.error });
+      return;
+    }
+
+    const items = await KitchenInventoryService.listItems(scope.branchId);
 
     const inStock = items.filter(i => i.status === 'IN_STOCK').length;
     const lowStock = items.filter(i => i.status === 'LOW_STOCK').length;
