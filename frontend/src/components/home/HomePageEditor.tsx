@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Plus,
@@ -157,10 +157,27 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
     sectionsList.length > 0 ? sectionsList[0].id : ''
   );
   const [viewMode, setViewMode] = useState<'mobile' | 'tablet' | 'desktop'>('mobile');
+  const [previewLayout, setPreviewLayout] = useState<'fit' | 'unfolded'>('fit');
+  const previewScrollContainerRef = useRef<HTMLDivElement>(null);
   const [activeTab, setActiveTab] = useState<'sections' | 'add_section' | 'settings'>('sections');
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+
+  // Smooth scroll sync between sidebar and preview canvas
+  const handleSelectSection = (sectionId: string) => {
+    setSelectedSectionId(sectionId);
+    setTimeout(() => {
+      const previewEl = document.getElementById(`preview-section-${sectionId}`);
+      if (previewEl) {
+        previewEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+      const sidebarEl = document.getElementById(`sidebar-section-${sectionId}`);
+      if (sidebarEl) {
+        sidebarEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }, 60);
+  };
 
   // Media Library Picker Modal state
   const [showMediaPicker, setShowMediaPicker] = useState(false);
@@ -449,9 +466,9 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
       </header>
 
       {/* Main Studio Body: Side-by-Side Editor & Live Preview */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex min-h-0 overflow-hidden">
         {/* Left Side: Control Drawer */}
-        <aside className="w-full lg:w-[460px] border-r border-slate-800 bg-[#0E1524] flex flex-col shrink-0 overflow-hidden">
+        <aside className="w-full lg:w-[460px] border-r border-slate-800 bg-[#0E1524] flex flex-col shrink-0 min-h-0 overflow-hidden">
           {/* Navigation Sub-Tabs */}
           <div className="flex items-center border-b border-slate-800 bg-[#0B0F17]/60 p-2 gap-1.5 shrink-0">
             <button
@@ -474,7 +491,7 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
 
           {/* TAB 1: SECTION LIST & CONFIGURATION */}
           {activeTab === 'sections' && (
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
               {/* Section Accordion / List */}
               <div className="space-y-2">
                 <label className="text-[11px] font-extrabold text-slate-400 uppercase tracking-wider block">
@@ -488,6 +505,7 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
 
                   return (
                     <div
+                      id={`sidebar-section-${sec.id}`}
                       key={sec.id}
                       className={`border rounded-2xl transition-all ${
                         isSelected
@@ -497,7 +515,7 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                     >
                       {/* Section Summary Header */}
                       <div
-                        onClick={() => setSelectedSectionId(sec.id)}
+                        onClick={() => handleSelectSection(sec.id)}
                         className="p-3 flex items-center justify-between cursor-pointer"
                       >
                         <div className="flex items-center gap-3 overflow-hidden">
@@ -807,18 +825,116 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
         </aside>
 
         {/* Right Side: Interactive Live Customer Parity Preview */}
-        <main className="flex-1 bg-[#06070A] overflow-y-auto p-4 sm:p-8 flex flex-col items-center justify-start relative">
+        <main className="flex-1 bg-[#06070A] overflow-y-auto min-h-0 p-3 sm:p-6 flex flex-col items-center justify-start relative custom-scrollbar">
+          {/* Preview Toolbar Controls */}
+          <div className="w-full max-w-5xl mb-4 flex flex-wrap items-center justify-between gap-3 bg-[#0E1524]/90 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-slate-800 text-xs shadow-lg shrink-0">
+            <div className="flex items-center gap-3">
+              <span className="font-extrabold text-slate-200 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-orange-400" />
+                <span>Live Interactive Preview</span>
+              </span>
+              <span className="text-slate-600">•</span>
+              <span className="text-[11px] text-slate-400">
+                {sectionsList.filter((s) => !s.isHidden).length} visible of {sectionsList.length} total sections
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {/* Quick Jump to Section Dropdown */}
+              <div className="flex items-center gap-1.5 bg-[#0B0F17] px-2.5 py-1 rounded-xl border border-slate-800 text-slate-300">
+                <span className="text-[10px] uppercase font-bold text-slate-500">Jump:</span>
+                <select
+                  value={selectedSectionId}
+                  onChange={(e) => handleSelectSection(e.target.value)}
+                  className="bg-transparent text-xs text-orange-400 font-bold focus:outline-none cursor-pointer max-w-[140px] truncate"
+                >
+                  {sectionsList.map((sec, i) => (
+                    <option key={sec.id} value={sec.id} className="bg-[#0E1524] text-white">
+                      {i + 1}. {sec.config?.headline || sec.type}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* View Layout Toggle: Device Mockup vs Full Continuous Page */}
+              <div className="flex items-center bg-[#0B0F17] p-1 rounded-xl border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setPreviewLayout('fit')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                    previewLayout === 'fit'
+                      ? 'bg-orange-500 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Realistic device viewport with internal smooth scroll"
+                >
+                  Device Mockup
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewLayout('unfolded')}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                    previewLayout === 'unfolded'
+                      ? 'bg-orange-500 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Continuous unfolded page view"
+                >
+                  Full Page
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Interactive Mockup Container */}
           <div
-            className={`w-full transition-all duration-300 rounded-3xl overflow-hidden border border-slate-800 shadow-2xl bg-[#06070A] ${
+            className={`w-full transition-all duration-300 bg-black shadow-[0_25px_60px_-15px_rgba(0,0,0,0.9)] flex flex-col relative ${
+              previewLayout === 'fit'
+                ? 'h-[calc(100vh-175px)] max-h-[860px] min-h-[580px]'
+                : 'min-h-[780px]'
+            } ${
               viewMode === 'mobile'
-                ? 'max-w-[420px] min-h-[780px]'
+                ? 'max-w-[420px] rounded-[44px] border-[10px] border-slate-900 ring-1 ring-slate-800'
                 : viewMode === 'tablet'
-                ? 'max-w-[768px] min-h-[850px]'
-                : 'max-w-5xl min-h-[900px]'
+                ? 'max-w-[768px] rounded-[36px] border-[12px] border-slate-900 ring-1 ring-slate-800'
+                : 'max-w-5xl rounded-2xl border border-slate-800'
             }`}
           >
+            {/* Mobile Dynamic Island / Camera Notch */}
+            {viewMode === 'mobile' && (
+              <div className="py-2 shrink-0 flex justify-center bg-black select-none pointer-events-none z-30">
+                <div className="w-24 h-4 bg-slate-900 rounded-full flex items-center justify-center gap-1.5 border border-slate-800/60 shadow-inner">
+                  <span className="w-2 h-2 rounded-full bg-slate-950 inline-block" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-900/60 inline-block" />
+                </div>
+              </div>
+            )}
+
+            {/* Tablet Top Camera */}
+            {viewMode === 'tablet' && (
+              <div className="py-1 shrink-0 flex justify-center bg-black select-none pointer-events-none z-30">
+                <span className="w-2 h-2 rounded-full bg-slate-800 inline-block border border-slate-700/50" />
+              </div>
+            )}
+
+            {/* Desktop Browser Chrome Bar */}
+            {viewMode === 'desktop' && (
+              <div className="bg-[#0A0D14] px-4 py-2 border-b border-slate-800 flex items-center justify-between shrink-0 select-none">
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-full bg-rose-500/80 inline-block" />
+                  <span className="w-3 h-3 rounded-full bg-amber-500/80 inline-block" />
+                  <span className="w-3 h-3 rounded-full bg-emerald-500/80 inline-block" />
+                </div>
+                <div className="bg-[#0E1524] px-4 py-1 rounded-lg border border-slate-800 text-[11px] font-mono text-slate-400 flex items-center gap-2">
+                  <span className="text-slate-600">🔒</span>
+                  <span>https://olivepizza.in/home</span>
+                </div>
+                <div className="text-[10px] text-slate-500 font-bold">100% Zoom</div>
+              </div>
+            )}
+
             {/* Mock Header Preview */}
-            <div className="bg-[#0E1524]/95 backdrop-blur-md p-3.5 border-b border-slate-800 flex items-center justify-between sticky top-0 z-30">
+            <div className="bg-[#0E1524]/95 backdrop-blur-md p-3.5 border-b border-slate-800 flex items-center justify-between shrink-0 z-30">
               <div className="flex items-center gap-2">
                 <span className="text-base">🍕</span>
                 <span className="font-black text-xs text-white">OLIVE PIZZA</span>
@@ -828,12 +944,17 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
               </div>
               <div className="flex items-center gap-2 text-[10px] text-slate-400">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span>Live View</span>
+                <span>Live View ({sectionsList.filter((s) => !s.isHidden).length} Sections)</span>
               </div>
             </div>
 
-            {/* Render Sections with Rich Visual Parity */}
-            <div className="p-4 space-y-5">
+            {/* SCROLLABLE TEMPLATE CANVAS */}
+            <div
+              ref={previewScrollContainerRef}
+              className={`flex-1 overflow-y-auto overscroll-contain p-4 space-y-5 scroll-smooth custom-scrollbar ${
+                previewLayout === 'fit' ? 'scrollbar-thin scrollbar-thumb-slate-700' : ''
+              }`}
+            >
               {sectionsList
                 .filter((s) => !s.isHidden)
                 .map((sec) => {
@@ -843,17 +964,31 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
 
                   return (
                     <div
+                      id={`preview-section-${sec.id}`}
                       key={sec.id}
-                      onClick={() => setSelectedSectionId(sec.id)}
-                      className={`relative rounded-3xl overflow-hidden transition-all cursor-pointer ${
-                        isSelected ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black' : 'hover:opacity-95'
+                      onClick={() => handleSelectSection(sec.id)}
+                      className={`relative rounded-3xl overflow-hidden transition-all cursor-pointer group ${
+                        isSelected
+                          ? 'ring-2 ring-orange-500 ring-offset-2 ring-offset-black shadow-xl shadow-orange-500/20'
+                          : 'hover:ring-1 hover:ring-slate-600 hover:opacity-95'
                       }`}
                       style={{ backgroundColor: bg }}
                     >
-                      {/* Section Type Tag in Preview */}
-                      <span className="absolute top-3 right-3 px-2.5 py-0.5 rounded-md bg-black/70 backdrop-blur-sm text-[9px] font-black text-white uppercase tracking-wider z-20 border border-white/10">
-                        {sec.type}
-                      </span>
+                      {/* Top Header inside preview section card */}
+                      <div className="absolute top-3 left-3 right-3 flex items-center justify-between z-20 pointer-events-none">
+                        {isSelected ? (
+                          <span className="px-2.5 py-0.5 rounded-md bg-orange-500 text-[9px] font-black text-white uppercase tracking-wider shadow-md pointer-events-auto flex items-center gap-1">
+                            <span>✏️ Editing in Sidebar</span>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-md bg-black/60 backdrop-blur-sm text-[8px] font-bold text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity">
+                            Click to Customize
+                          </span>
+                        )}
+                        <span className="px-2.5 py-0.5 rounded-md bg-black/70 backdrop-blur-sm text-[9px] font-black text-white uppercase tracking-wider border border-white/10">
+                          {sec.type}
+                        </span>
+                      </div>
 
                       {/* 1. HERO / VIDEO HERO */}
                       {sec.type === 'HERO' || sec.type === 'VIDEO_HERO' ? (
@@ -967,8 +1102,45 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                             ))}
                           </div>
                         </div>
+                      ) : sec.type === 'PIZZA_SHOWCASE' ? (
+                        /* 5. SPECIAL COMBOS & PIZZA SHOWCASE */
+                        <div className="p-5 space-y-3">
+                          <div className="flex justify-between items-center">
+                            <h3 className="text-xs font-black uppercase tracking-wider" style={{ color: textCol }}>
+                              {sec.config?.headline || 'SPECIAL OFFERS & COMBOS'}
+                            </h3>
+                            <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[9px] font-black uppercase">
+                              Chef's Special
+                            </span>
+                          </div>
+                          <div className="p-4 rounded-2xl bg-gradient-to-br from-amber-600/20 via-orange-600/10 to-transparent border border-amber-500/30 space-y-3">
+                            <div className="flex items-center gap-3">
+                              <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-orange-500 to-amber-500 flex items-center justify-center text-2xl shadow-lg shrink-0">
+                                🍕🎉
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <h4 className="font-black text-xs text-white truncate">
+                                  {sec.config?.headline || 'Grand Family Feast Box (4-6 People)'}
+                                </h4>
+                                <p className="text-[10px] text-slate-300 line-clamp-1">
+                                  {sec.config?.subtitle || '2 Large Pizzas + Stuffed Garlic Bread + 2 Choco Lava + 1.25L Beverage'}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between pt-2 border-t border-white/10">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-black text-sm text-amber-400">₹699</span>
+                                <span className="line-through text-[11px] text-slate-400">₹1,199</span>
+                                <span className="text-[9px] font-black text-emerald-400 bg-emerald-500/20 px-1.5 py-0.5 rounded">SAVE 42%</span>
+                              </div>
+                              <button className="px-3.5 py-1.5 bg-gradient-to-r from-orange-500 to-amber-500 text-white font-black text-[10px] rounded-xl shadow-md">
+                                + ADD COMBO
+                              </button>
+                            </div>
+                          </div>
+                        </div>
                       ) : sec.type === 'COUPONS' ? (
-                        /* 5. COUPONS & PROMOS */
+                        /* 6. COUPONS & PROMOS */
                         <div className="p-5 space-y-2">
                           <h3 className="text-xs font-black uppercase tracking-wider" style={{ color: textCol }}>
                             {sec.config?.headline || 'EXCLUSIVE PROMO CODES'}
@@ -984,7 +1156,7 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                           </div>
                         </div>
                       ) : sec.type === 'TESTIMONIALS' ? (
-                        /* 6. TESTIMONIALS & SOCIAL PROOF */
+                        /* 7. TESTIMONIALS & SOCIAL PROOF */
                         <div className="p-5 space-y-3">
                           <h3 className="text-xs font-black uppercase tracking-wider" style={{ color: textCol }}>
                             {sec.config?.headline || 'CUSTOMER REVIEWS'}
@@ -1001,8 +1173,100 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                             <div className="text-[10px] font-bold text-white">— Priya S., Verified Foodie</div>
                           </div>
                         </div>
+                      ) : sec.type === 'DOWNLOAD_APP' ? (
+                        /* 8. DOWNLOAD APP PROMO */
+                        <div className="p-5 space-y-3">
+                          <div className="p-4 rounded-2xl bg-gradient-to-r from-orange-500/15 via-rose-500/15 to-transparent border border-orange-500/30 flex items-center justify-between gap-3">
+                            <div className="space-y-1">
+                              <span className="text-[8px] font-black text-orange-400 uppercase tracking-wider bg-orange-500/10 px-2 py-0.5 rounded-full border border-orange-500/20">
+                                APP EXCLUSIVE OFFER
+                              </span>
+                              <h4 className="font-black text-xs text-white">Experience Olive Pizza on Mobile</h4>
+                              <p className="text-[10px] text-slate-300">Get Flat ₹100 OFF on your first app order</p>
+                            </div>
+                            <div className="flex flex-col gap-1 shrink-0">
+                              <div className="px-2.5 py-1 bg-black/60 border border-white/15 rounded-lg text-[9px] font-bold text-slate-200 text-center">
+                                Google Play
+                              </div>
+                              <div className="px-2.5 py-1 bg-black/60 border border-white/15 rounded-lg text-[9px] font-bold text-slate-200 text-center">
+                                App Store
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ) : sec.type === 'ADS' ? (
+                        /* 9. PROMOTIONAL ADS BANNER */
+                        <div className="p-5 space-y-2">
+                          <div className="p-4 rounded-2xl bg-gradient-to-r from-red-600/30 to-amber-600/30 border border-red-500/40 flex items-center justify-between">
+                            <div className="space-y-1">
+                              <span className="text-[8px] font-black text-yellow-300 uppercase tracking-wider">LIMITED TIME</span>
+                              <h4 className="font-black text-xs text-white">{sec.config?.headline || 'Weekend BOGO Fest'}</h4>
+                              <p className="text-[10px] text-slate-200">{sec.config?.subtitle || 'Buy Any Medium Pizza & Get 1 Free'}</p>
+                            </div>
+                            <button className="px-3 py-1.5 bg-yellow-400 text-black font-black text-[10px] rounded-xl shadow-md shrink-0">
+                              Order Now
+                            </button>
+                          </div>
+                        </div>
+                      ) : sec.type === 'ORDER_AGAIN' ? (
+                        /* 10. ORDER AGAIN (RECENT ORDERS) */
+                        <div className="p-5 space-y-3">
+                          <h3 className="text-xs font-black uppercase tracking-wider" style={{ color: textCol }}>
+                            {sec.config?.headline || 'ORDER AGAIN'}
+                          </h3>
+                          <div className="flex gap-2.5 overflow-x-auto pb-1 scrollbar-none">
+                            {['Paneer Tikka Wood-Fired', 'Cheese Garlic Bread'].map((item, i) => (
+                              <div key={i} className="min-w-[170px] p-2.5 rounded-xl bg-black/40 border border-white/10 space-y-2">
+                                <div className="font-bold text-[11px] text-white truncate">{item}</div>
+                                <div className="flex justify-between items-center">
+                                  <span className="text-[10px] font-mono font-bold text-orange-400">₹299</span>
+                                  <button className="px-2 py-0.5 bg-orange-500 text-white font-bold text-[9px] rounded">
+                                    Reorder
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : sec.type === 'COMPLETE_MEAL' ? (
+                        /* 11. COMPLETE YOUR MEAL (CROSS-SELL) */
+                        <div className="p-5 space-y-3">
+                          <h3 className="text-xs font-black uppercase tracking-wider" style={{ color: textCol }}>
+                            {sec.config?.headline || 'COMPLETE YOUR MEAL'}
+                          </h3>
+                          <div className="grid grid-cols-3 gap-2">
+                            {[
+                              { name: 'Choco Lava', price: '₹99', emoji: '🍫' },
+                              { name: 'Garlic Dip', price: '₹35', emoji: '🧄' },
+                              { name: 'Cold Drink', price: '₹60', emoji: '🥤' },
+                            ].map((side, i) => (
+                              <div key={i} className="p-2 rounded-xl bg-black/40 border border-white/10 text-center space-y-1">
+                                <span className="text-base">{side.emoji}</span>
+                                <div className="text-[10px] font-bold text-white truncate">{side.name}</div>
+                                <div className="text-[9px] text-orange-400 font-mono font-bold">{side.price}</div>
+                                <button className="w-full py-0.5 bg-white/10 hover:bg-orange-500 text-white font-bold text-[8px] rounded">
+                                  + ADD
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : sec.type === 'GALLERY' ? (
+                        /* 12. PHOTO GALLERY */
+                        <div className="p-5 space-y-3">
+                          <h3 className="text-xs font-black uppercase tracking-wider" style={{ color: textCol }}>
+                            {sec.config?.headline || 'FROM OUR WOOD-FIRED OVEN'}
+                          </h3>
+                          <div className="grid grid-cols-3 gap-2">
+                            {[1, 2, 3].map((g) => (
+                              <div key={g} className="aspect-square rounded-xl bg-slate-800 flex items-center justify-center text-xl">
+                                🍕
+                              </div>
+                            ))}
+                          </div>
+                        </div>
                       ) : (
-                        /* 7. GENERIC SECTION */
+                        /* 13. GENERIC SECTION FALLBACK */
                         <div className="p-6 text-center space-y-1">
                           <h4 className="font-black text-sm" style={{ color: textCol }}>
                             {sec.config?.headline || sec.type}
@@ -1018,7 +1282,7 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
             </div>
 
             {/* Mock Floating Cart Bar in Preview */}
-            <div className="sticky bottom-0 bg-[#0E1524]/95 backdrop-blur-md p-3 border-t border-slate-800 flex items-center justify-between z-30">
+            <div className="shrink-0 bg-[#0E1524]/95 backdrop-blur-md p-3 border-t border-slate-800 flex items-center justify-between z-30">
               <div className="flex items-center gap-2">
                 <ShoppingBag className="w-4 h-4 text-orange-400" />
                 <span className="text-xs font-black text-white">View Cart (2 Items)</span>
@@ -1027,6 +1291,13 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                 Checkout ₹598 →
               </button>
             </div>
+
+            {/* Mobile Home Indicator Bar */}
+            {viewMode === 'mobile' && (
+              <div className="py-1.5 shrink-0 flex justify-center bg-black select-none pointer-events-none">
+                <div className="w-28 h-1 bg-slate-700/60 rounded-full" />
+              </div>
+            )}
           </div>
         </main>
       </div>

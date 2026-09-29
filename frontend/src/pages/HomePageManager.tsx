@@ -710,7 +710,7 @@ export default function HomePageManager() {
             </div>
 
             {/* Preview Viewport Frame */}
-            <div className="flex-1 overflow-y-auto p-6 flex justify-center bg-[#06070A]">
+            <div className="flex-1 overflow-y-auto min-h-0 p-6 flex justify-center bg-[#06070A] custom-scrollbar">
               <div
                 className={`w-full bg-[#06070A] rounded-2xl overflow-hidden border border-slate-800 shadow-2xl space-y-4 p-4 ${
                   previewDevice === 'mobile'
