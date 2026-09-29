@@ -8,6 +8,7 @@ import { FraudProtectionEngine } from './FraudProtectionEngine.js';
 import { PaymentAuditLogger } from './PaymentAuditLogger.js';
 import { PaymentEventQueue } from './PaymentEventQueue.js';
 import { PaymentRecoveryQueue } from './PaymentRecoveryQueue.js';
+import { CODCollectionService } from './CODCollectionService.js';
 import crypto from 'crypto';
 
 export interface CreatePaymentSessionParams {
@@ -222,7 +223,13 @@ export class PaymentService {
    * Process Webhook Notification safely with HMAC validation
    */
   public static async processWebhook(providerName: string, rawBody: string | object, signature: string): Promise<{ success: boolean; eventType: string }> {
-    const provider = PaymentProviderFactory.getProvider(providerName);
+    const normProvider = (providerName || '').toLowerCase().trim();
+    const ALLOWED_PROVIDERS = ['razorpay', 'phonepe', 'cashfree', 'mock'];
+    if (!ALLOWED_PROVIDERS.includes(normProvider)) {
+      throw new Error(`Unsupported payment provider: ${providerName}`);
+    }
+
+    const provider = PaymentProviderFactory.getProvider(normProvider);
     const isSignatureValid = provider.verifySignature(rawBody, signature);
 
     if (!isSignatureValid) {
@@ -249,8 +256,10 @@ export class PaymentService {
 
     console.log(`✅ [Webhook] Verified webhook received from ${providerName}:`, payload.event || 'payment.success');
 
-    // Extract payment ID & Provider Transaction ID across standard gateway payloads
+    // Extract payment ID, order ID, attempt ID & Provider Transaction ID across standard gateway payloads
     let paymentId = payload.paymentId || payload.orderId;
+    let orderId = payload.orderId;
+    let attemptId = payload.attemptId;
     let providerTxId = payload.id;
     let amount = payload.amount;
 
@@ -258,13 +267,42 @@ export class PaymentService {
       // Razorpay webhook format
       const rzpPayment = payload.payload.payment.entity;
       paymentId = rzpPayment.notes?.paymentId || rzpPayment.order_id || paymentId;
+      orderId = rzpPayment.notes?.orderId || orderId;
+      attemptId = rzpPayment.notes?.attemptId || attemptId;
       providerTxId = rzpPayment.id || providerTxId;
       amount = rzpPayment.amount ? rzpPayment.amount / 100 : amount;
     } else if (payload.data?.order) {
       // Cashfree webhook format
       const cfOrder = payload.data.order;
       paymentId = cfOrder.order_id || cfOrder.order_tags?.paymentId || paymentId;
+      orderId = cfOrder.order_tags?.orderId || orderId;
+      attemptId = cfOrder.order_tags?.attemptId || attemptId;
       providerTxId = payload.data?.payment?.cf_payment_id || providerTxId;
+    }
+
+    // Check if this payment is for a COD order / UPI QR attempt
+    const targetOrderId = orderId || paymentId;
+    if (targetOrderId) {
+      try {
+        const orderSnap = await adminDb.collection('orders').doc(targetOrderId).get();
+        if (orderSnap.exists) {
+          const oData = orderSnap.data()!;
+          const isCodOrder = (oData.paymentMethod || '').toLowerCase() === 'cod' || oData.isCod === true;
+          if (isCodOrder) {
+            await CODCollectionService.captureUpiPaymentFromWebhook({
+              orderId: targetOrderId,
+              attemptId: attemptId || oData.codPaymentAttempt?.attemptId,
+              provider: providerName,
+              providerTransactionId: providerTxId || `tx_${Date.now()}`,
+              amountPaid: Number(amount || oData.totalAmount || 0),
+              rawPayload: payload,
+            });
+            return { success: true, eventType: payload.event || 'payment.success' };
+          }
+        }
+      } catch (codErr: any) {
+        console.warn('[Webhook] COD UPI capture check warning:', codErr.message);
+      }
     }
 
     if (paymentId) {

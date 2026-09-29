@@ -7,6 +7,7 @@ import { getPaymentConfig, updatePaymentConfig } from '../config/payment.config.
 import { optionalAuth, verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { query } from '../lib/db.js';
 import { adminDb } from '../config/firebase.js';
+import { CODCollectionService } from '../services/payment/CODCollectionService.js';
 
 const router = Router();
 
@@ -137,6 +138,126 @@ router.get('/history', verifyToken, async (req: AuthRequest, res: Response) => {
     }
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── 4A. COD Cash Collection (Rider / Manager Auth Required) ───────────────────
+router.post('/cod/cash-collect', verifyToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { orderId, amount, notes } = req.body;
+    const user = req.user!;
+
+    if (!orderId) {
+      res.status(400).json({ success: false, error: 'Order ID is required' });
+      return;
+    }
+
+    const allowedRoles = ['delivery_partner', 'rider', 'delivery', 'restaurant_manager', 'cashier', 'admin', 'owner', 'system'];
+    const userRole = (user.role || 'customer').toLowerCase().trim();
+    if (!allowedRoles.includes(userRole)) {
+      res.status(403).json({ success: false, error: `Role '${user.role}' is not authorized to collect cash payments.` });
+      return;
+    }
+
+    const result = await CODCollectionService.collectCash({
+      orderId,
+      actorUid: user.uid,
+      actorRole: user.role || 'delivery_partner',
+      actorName: (user as any).name || 'Delivery Partner',
+      actorBranchId: (user as any).branchId,
+      clientAmount: amount !== undefined ? Number(amount) : undefined,
+      notes,
+      ipAddress: (req.headers['x-forwarded-for'] as string) || req.ip || '127.0.0.1',
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    console.error('[PaymentRoute] Error in /cod/cash-collect:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// ─── 4B. COD Dynamic UPI QR Intent Generation ─────────────────────────────────
+router.post('/cod/upi-intent', verifyToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const { orderId } = req.body;
+    const user = req.user!;
+
+    if (!orderId) {
+      res.status(400).json({ success: false, error: 'Order ID is required' });
+      return;
+    }
+
+    const allowedRoles = ['delivery_partner', 'rider', 'delivery', 'restaurant_manager', 'cashier', 'admin', 'owner', 'system'];
+    const userRole = (user.role || 'customer').toLowerCase().trim();
+    if (!allowedRoles.includes(userRole)) {
+      res.status(403).json({ success: false, error: `Role '${user.role}' is not authorized to generate COD UPI QR codes.` });
+      return;
+    }
+
+    const result = await CODCollectionService.createUpiAttempt({
+      orderId,
+      actorUid: user.uid,
+      actorRole: user.role || 'delivery_partner',
+      actorName: (user as any).name || 'Delivery Partner',
+      actorBranchId: (user as any).branchId,
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    console.error('[PaymentRoute] Error in /cod/upi-intent:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// ─── 4C. COD Authoritative Payment Status ─────────────────────────────────────
+router.get('/cod/status/:orderId', verifyToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const orderId = req.params.orderId;
+    if (!orderId) {
+      res.status(400).json({ success: false, error: 'Order ID is required' });
+      return;
+    }
+
+    const result = await CODCollectionService.getPaymentStatus(orderId);
+    res.json({ success: true, ...result });
+  } catch (error: any) {
+    console.error('[PaymentRoute] Error in /cod/status:', error.message);
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// ─── 4D. COD Webhook Simulation (Sandbox / Test Verification) ─────────────────
+router.post('/cod/simulate-webhook', verifyToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const config = getPaymentConfig();
+    const isSandboxOrDev = config.sandboxMode || process.env.NODE_ENV !== 'production';
+    const user = req.user!;
+    const isPrivileged = ['admin', 'owner', 'developer', 'system'].includes((user.role || '').toLowerCase());
+
+    if (!isSandboxOrDev && !isPrivileged) {
+      res.status(403).json({ success: false, error: 'Simulated webhooks only permitted in sandbox mode or by privileged roles.' });
+      return;
+    }
+
+    const { orderId, attemptId, amount, provider = 'mock' } = req.body;
+    if (!orderId) {
+      res.status(400).json({ success: false, error: 'Order ID is required' });
+      return;
+    }
+
+    const txId = `sim_tx_${Date.now()}`;
+    const captureResult = await CODCollectionService.captureUpiPaymentFromWebhook({
+      orderId,
+      attemptId,
+      provider,
+      providerTransactionId: txId,
+      amountPaid: Number(amount || 0),
+    });
+
+    res.json({ success: true, simulated: true, providerTransactionId: txId, ...captureResult });
+  } catch (error: any) {
+    res.status(400).json({ success: false, error: error.message });
   }
 });
 

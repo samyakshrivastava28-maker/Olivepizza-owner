@@ -346,6 +346,25 @@ export class OrderStateMachine {
         }
 
         case 'delivered': {
+          // Delivery Completion Gate: Enforce that COD orders must have verified payment collection before transition succeeds
+          const paymentMethod = (orderData.paymentMethod || '').toLowerCase();
+          const isCod = paymentMethod === 'cod' || orderData.isCod === true;
+          if (isCod) {
+            const pStatus = (orderData.paymentStatus || '').toUpperCase();
+            const isPaid = orderData.isPaid === true || pStatus === 'PAID' || pStatus === 'COLLECTED';
+            if (!isPaid) {
+              if (client) await client.query('ROLLBACK').catch(() => {});
+              return {
+                success: false,
+                orderId,
+                previousStatus: fromState,
+                currentStatus: fromState,
+                version: orderData.notification_version || 1,
+                error: `Cannot deliver COD order '${orderId}' before payment is collected and verified. Please collect via Cash or dynamic UPI QR.`,
+              };
+            }
+          }
+
           updates.deliveredAt = nowIso;
           // Release rider active order lock
           const riderId = orderData.deliveryPartnerId || metadata.deliveryPartnerId;

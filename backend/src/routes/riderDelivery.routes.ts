@@ -612,6 +612,21 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           return;
         }
 
+        // COD Payment Collection Gate: Enforce payment collection before delivery completion
+        const paymentMethod = (orderData.paymentMethod || '').toLowerCase();
+        const isCod = paymentMethod === 'cod' || orderData.isCod === true;
+        if (isCod) {
+          const pStatus = (orderData.paymentStatus || '').toUpperCase();
+          const isPaid = orderData.isPaid === true || pStatus === 'PAID' || pStatus === 'COLLECTED';
+          if (!isPaid) {
+            res.status(400).json({
+              success: false,
+              error: 'Payment has not been collected for this Cash on Delivery order. Please collect payment (Cash or dynamic UPI QR) before marking delivered.'
+            });
+            return;
+          }
+        }
+
         // Proximity Check: Resolve coordinates (payload vs PostgreSQL delivery_locations)
         const destLat = orderData.deliveryAddress?.lat || orderData.deliveryAddressCoordinates?.lat || orderData.location?.lat;
         const destLng = orderData.deliveryAddress?.lng || orderData.deliveryAddressCoordinates?.lng || orderData.location?.lng;

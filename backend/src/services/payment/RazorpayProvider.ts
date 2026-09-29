@@ -78,7 +78,10 @@ export class RazorpayProvider implements PaymentProvider {
       .update(data)
       .digest('hex');
 
-    return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature));
+    const sigBuf = Buffer.from(signature);
+    const expBuf = Buffer.from(expectedSignature);
+    if (sigBuf.length !== expBuf.length) return false;
+    return crypto.timingSafeEqual(sigBuf, expBuf);
   }
 
   public async verifyPayment(params: VerifyPaymentParams): Promise<VerifyPaymentResult> {

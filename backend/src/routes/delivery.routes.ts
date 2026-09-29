@@ -168,6 +168,19 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
       updatedAt: FieldValue.serverTimestamp()
     };
     if (status === 'delivered') {
+      const paymentMethod = (orderData.paymentMethod || '').toLowerCase();
+      const isCod = paymentMethod === 'cod' || orderData.isCod === true;
+      if (isCod) {
+        const pStatus = (orderData.paymentStatus || '').toUpperCase();
+        const isPaid = orderData.isPaid === true || pStatus === 'PAID' || pStatus === 'COLLECTED';
+        if (!isPaid) {
+          res.status(400).json({
+            error: 'Cannot mark COD order as delivered before payment is collected and verified. Please collect via Cash or dynamic UPI QR.'
+          });
+          return;
+        }
+      }
+
       updateData.deliveredAt = FieldValue.serverTimestamp();
       if (req.body.deliveryProof) {
         updateData.deliveryProof = req.body.deliveryProof;
