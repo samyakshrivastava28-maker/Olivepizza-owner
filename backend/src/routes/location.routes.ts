@@ -39,19 +39,36 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
     }
 
     const cityMap = new Map<string, {
+      id: string;
       city: string;
+      name: string;
       state: string;
+      country: string;
       center: { lat: number; lng: number };
       deliveryRadiusKm: number;
+      viewbox: number[]; // [minLon, maxLat, maxLon, minLat] for OSM bounding
       activeBranches: number;
       branchNames: string[];
+      branches: Array<{
+        id: string;
+        name: string;
+        lat: number;
+        lng: number;
+        deliveryRadiusKm: number;
+      }>;
+      serviceable: boolean;
     }>();
 
-    // 1. Query franchises collection
+    // 1. Query franchises (branch records) collection
     const franchisesSnap = await adminDb.collection('franchises').get();
     for (const doc of franchisesSnap.docs) {
       const data = doc.data();
-      if (data.isActive === false || data.status === 'DEACTIVATED' || data.status === 'SUSPENDED') {
+      if (
+        data.isActive === false ||
+        data.status === 'DEACTIVATED' ||
+        data.status === 'SUSPENDED' ||
+        data.status === 'PLANNED'
+      ) {
         continue;
       }
 
@@ -61,49 +78,134 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
       const cityKey = rawCity.toLowerCase();
       const lat = Number(data.lat ?? data.coordinates?.lat ?? data.location?.lat);
       const lng = Number(data.lng ?? data.coordinates?.lng ?? data.location?.lng);
-      const radius = Number(data.maxDeliveryRadiusKm || data.deliveryRadiusKm || data.deliveryRadius || 18);
+      const radius = Number(
+        data.maxDeliveryRadiusKm ||
+        data.deliverySettings?.maxDeliveryRadiusKm ||
+        data.deliveryRadiusKm ||
+        data.deliveryRadius ||
+        15
+      );
       const state = data.state || 'Chhattisgarh';
       const branchName = data.name || `Olive Pizza ${rawCity}`;
 
       if (!isNaN(lat) && !isNaN(lng)) {
+        const deltaLat = radius / 110.574;
+        const deltaLng = radius / (111.320 * Math.cos((lat * Math.PI) / 180));
+        const viewbox = [
+          Number((lng - deltaLng).toFixed(6)),
+          Number((lat + deltaLat).toFixed(6)),
+          Number((lng + deltaLng).toFixed(6)),
+          Number((lat - deltaLat).toFixed(6)),
+        ];
+
+        const branchInfo = {
+          id: doc.id,
+          name: branchName,
+          lat,
+          lng,
+          deliveryRadiusKm: radius,
+        };
+
         if (!cityMap.has(cityKey)) {
           cityMap.set(cityKey, {
+            id: `city_${cityKey}`,
             city: rawCity,
+            name: rawCity,
             state,
+            country: 'India',
             center: { lat, lng },
             deliveryRadiusKm: radius,
+            viewbox,
             activeBranches: 1,
             branchNames: [branchName],
+            branches: [branchInfo],
+            serviceable: true,
           });
         } else {
           const existing = cityMap.get(cityKey)!;
           existing.activeBranches += 1;
           existing.branchNames.push(branchName);
+          existing.branches.push(branchInfo);
           existing.deliveryRadiusKm = Math.max(existing.deliveryRadiusKm, radius);
+          existing.viewbox = [
+            Math.min(existing.viewbox[0], viewbox[0]),
+            Math.max(existing.viewbox[1], viewbox[1]),
+            Math.max(existing.viewbox[2], viewbox[2]),
+            Math.min(existing.viewbox[3], viewbox[3]),
+          ];
         }
       }
     }
 
-    // Fallback baseline to ensure core operational locations exist if DB collection is newly provisioned
-    if (cityMap.size === 0) {
-      cityMap.set('rajnandgaon', {
-        city: 'Rajnandgaon',
-        state: 'Chhattisgarh',
-        center: { lat: 21.0810244, lng: 81.0123793 },
-        deliveryRadiusKm: 18,
-        activeBranches: 1,
-        branchNames: ['Olive Pizza — Rajnandgaon (HQ Branch)'],
-      });
-      cityMap.set('durg', {
-        city: 'Durg',
-        state: 'Chhattisgarh',
-        center: { lat: 21.1905, lng: 81.2855 },
-        deliveryRadiusKm: 18,
-        activeBranches: 1,
-        branchNames: ['Olive Pizza — Durg Flagship'],
-      });
+    // 2. Also check franchise_entities collection if franchises had no branches for an active franchise
+    try {
+      const entitiesSnap = await adminDb.collection('franchise_entities').get();
+      for (const eDoc of entitiesSnap.docs) {
+        const eData = eDoc.data();
+        if (
+          eData.isActive === false ||
+          eData.status === 'DEACTIVATED' ||
+          eData.status === 'SUSPENDED' ||
+          eData.status === 'PLANNED'
+        ) {
+          continue;
+        }
+
+        const rawCity = (eData.city || '').trim();
+        if (!rawCity) continue;
+
+        const cityKey = rawCity.toLowerCase();
+        // If this city is not yet in cityMap and has valid coordinates, include it
+        if (!cityMap.has(cityKey)) {
+          const lat = Number(eData.lat ?? eData.coordinates?.lat ?? eData.location?.lat);
+          const lng = Number(eData.lng ?? eData.coordinates?.lng ?? eData.location?.lng);
+          const radius = Number(
+            eData.deliverySettings?.maxDeliveryRadiusKm ||
+            eData.maxDeliveryRadiusKm ||
+            eData.deliveryRadiusKm ||
+            15
+          );
+          const state = eData.state || eData.region || 'Chhattisgarh';
+          const branchName = eData.name || `Olive Pizza ${rawCity}`;
+
+          if (!isNaN(lat) && !isNaN(lng)) {
+            const deltaLat = radius / 110.574;
+            const deltaLng = radius / (111.320 * Math.cos((lat * Math.PI) / 180));
+            const viewbox = [
+              Number((lng - deltaLng).toFixed(6)),
+              Number((lat + deltaLat).toFixed(6)),
+              Number((lng + deltaLng).toFixed(6)),
+              Number((lat - deltaLat).toFixed(6)),
+            ];
+
+            cityMap.set(cityKey, {
+              id: `city_${cityKey}`,
+              city: rawCity,
+              name: rawCity,
+              state,
+              country: 'India',
+              center: { lat, lng },
+              deliveryRadiusKm: radius,
+              viewbox,
+              activeBranches: 1,
+              branchNames: [branchName],
+              branches: [{
+                id: eData.mainBranchId || eDoc.id,
+                name: branchName,
+                lat,
+                lng,
+                deliveryRadiusKm: radius,
+              }],
+              serviceable: true,
+            });
+          }
+        }
+      }
+    } catch (entityErr) {
+      // Non-fatal
     }
 
+    // 100% database-driven: NO hardcoded fallback cities!
     const cities = Array.from(cityMap.values());
     citiesCache.set('serviceable_cities', cities);
 
@@ -120,11 +222,11 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
 
 // ============================================================================
 // 2. GET /api/location/geocode
-// Nominatim-compliant geocoding proxy with strict rate-limiting, caching & attribution
+// Nominatim-compliant geocoding proxy with strict city bounding, rate-limiting & attribution
 // ============================================================================
 router.get('/geocode', publicLimiter, async (req: Request, res: Response): Promise<void> => {
   try {
-    const query = String(req.query.query || '').trim();
+    const query = String(req.query.q || req.query.query || '').trim();
     const city = String(req.query.city || '').trim();
 
     if (!query || query.length < 2) {
@@ -142,42 +244,222 @@ router.get('/geocode', publicLimiter, async (req: Request, res: Response): Promi
     const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
     await throttleNominatim(clientIp);
 
-    // Build scoped search query adhering to OpenStreetMap guidance
-    const searchQuery = city ? `${query}, ${city}, Chhattisgarh, India` : `${query}, India`;
-    const nominatimUrl = 'https://nominatim.openstreetmap.org/search';
+    // Look up city details from cache to retrieve its viewbox, state & center
+    let cityViewbox: number[] | null = null;
+    let cityState = '';
+    let cityCenter: { lat: number; lng: number } | null = null;
+    let cityRadius = 15;
+    const cachedCities = citiesCache.get<any[]>('serviceable_cities');
+    if (cachedCities && city) {
+      const match = cachedCities.find((c: any) => c.city.toLowerCase() === city.toLowerCase());
+      if (match) {
+        cityViewbox = match.viewbox;
+        cityState = match.state || '';
+        cityCenter = match.center;
+        cityRadius = match.deliveryRadiusKm || 15;
+      }
+    }
 
-    const response = await axios.get(nominatimUrl, {
-      params: {
+    let results: any[] = [];
+
+    // 1. Primary: Photon (Fast, autocomplete-optimized OpenStreetMap search with lat/lon bias)
+    try {
+      const photonParams: Record<string, any> = {
+        q: `${query} ${city}`.trim(),
+        limit: 10,
+      };
+      if (cityCenter) {
+        photonParams.lat = cityCenter.lat;
+        photonParams.lon = cityCenter.lng;
+      }
+
+      const photonRes = await axios.get('https://photon.komoot.io/api/', {
+        params: photonParams,
+        timeout: 4000,
+      }).catch(() => null);
+
+      if (photonRes?.data?.features && Array.isArray(photonRes.data.features) && photonRes.data.features.length > 0) {
+        const filteredFeatures = photonRes.data.features.filter((f: any) => {
+          const props = f.properties || {};
+          const coords = f.geometry?.coordinates || [];
+          if (coords.length < 2) return false;
+          const [lon, lat] = coords;
+
+          // If cityCenter is known, ensure location is within reasonable vicinity (max cityRadius + 15km)
+          if (cityCenter) {
+            const dist = CustomerOrderingContextService.haversineDistanceKm(cityCenter.lat, cityCenter.lng, lat, lon);
+            if (dist > (cityRadius + 15)) return false;
+          }
+
+          // Check city or county text if present
+          if (city) {
+            const fCity = (props.city || props.county || props.district || props.locality || '').toLowerCase();
+            if (fCity && !fCity.includes(city.toLowerCase()) && !city.toLowerCase().includes(fCity)) {
+              if (cityCenter) {
+                const dist = CustomerOrderingContextService.haversineDistanceKm(cityCenter.lat, cityCenter.lng, lat, lon);
+                if (dist > cityRadius) return false;
+              }
+            }
+          }
+          return true;
+        });
+
+        if (filteredFeatures.length > 0) {
+          results = await Promise.all(
+            filteredFeatures.slice(0, 8).map(async (f: any) => {
+              const props = f.properties || {};
+              const coords = f.geometry?.coordinates || [0, 0];
+              const lng = coords[0];
+              const lat = coords[1];
+
+              const title = props.name || props.street || query;
+              const subtitleParts = [
+                props.street,
+                props.locality || props.district,
+                props.city || city,
+                props.state || cityState,
+                props.country || 'India',
+              ].filter(Boolean).filter((val, idx, arr) => arr.indexOf(val) === idx);
+              const subtitle = subtitleParts.join(', ');
+              const displayName = `${title}, ${subtitle}`;
+
+              let isServiceable = false;
+              try {
+                const check = await CustomerOrderingContextService.resolveOrderingContext({
+                  customerId: 'guest',
+                  lat,
+                  lng,
+                });
+                isServiceable = check.isServiceable;
+              } catch (e) {}
+
+              return {
+                placeId: String(props.osm_id || `${lat}_${lng}`),
+                title,
+                subtitle,
+                displayName,
+                lat,
+                lng,
+                type: props.osm_value || props.type || 'place',
+                isServiceable,
+                address: {
+                  road: props.street || '',
+                  suburb: props.locality || props.district || '',
+                  city: props.city || city,
+                  state: props.state || cityState || '',
+                  postcode: props.postcode || '',
+                  country: props.country || 'India',
+                },
+              };
+            })
+          );
+        }
+      }
+    } catch (photonErr) {
+      // Fall through to Nominatim
+    }
+
+    // 2. Secondary Fallback: Nominatim
+    if (results.length === 0) {
+      // City-constrained search query
+      const searchQuery = city
+        ? (cityState ? `${query}, ${city}, ${cityState}, India` : `${query}, ${city}, India`)
+        : `${query}, India`;
+
+      const nominatimUrl = 'https://nominatim.openstreetmap.org/search';
+      const params: Record<string, any> = {
         q: searchQuery,
         format: 'json',
         addressdetails: 1,
-        limit: 6,
+        limit: 8,
         countrycodes: 'in',
-      },
-      headers: {
-        'User-Agent': 'OlivePizzaApp/1.0 (contact: olivepizzarjn@gmail.com; platform: customer-web)',
-        'Accept-Language': 'en-IN,en;q=0.9',
-      },
-      timeout: 8000,
-    });
+      };
 
-    const rawList = Array.isArray(response.data) ? response.data : [];
-    const results = rawList.map((item: any) => ({
-      placeId: item.place_id,
-      displayName: item.display_name,
-      lat: parseFloat(item.lat),
-      lng: parseFloat(item.lon),
-      type: item.type,
-      importance: item.importance,
-      address: {
-        road: item.address?.road || item.address?.pedestrian || '',
-        suburb: item.address?.suburb || item.address?.neighbourhood || '',
-        city: item.address?.city || item.address?.town || item.address?.village || city,
-        state: item.address?.state || 'Chhattisgarh',
-        postcode: item.address?.postcode || '',
-        country: item.address?.country || 'India',
-      },
-    }));
+      if (cityViewbox && cityViewbox.length === 4) {
+        params.viewbox = cityViewbox.join(',');
+        params.bounded = 1;
+      }
+
+      let response = await axios.get(nominatimUrl, {
+        params,
+        headers: {
+          'User-Agent': 'OlivePizzaApp/1.0 (contact: olivepizzarjn@gmail.com; platform: customer-web)',
+          'Accept-Language': 'en-IN,en;q=0.9',
+        },
+        timeout: 8000,
+      }).catch(() => null);
+
+      if (!response || !Array.isArray(response.data) || response.data.length === 0) {
+        const fallbackParams: Record<string, any> = {
+          q: city ? `${query}, ${city}` : query,
+          format: 'json',
+          addressdetails: 1,
+          limit: 8,
+          countrycodes: 'in',
+        };
+        if (cityViewbox) {
+          fallbackParams.viewbox = cityViewbox.join(',');
+        }
+        response = await axios.get(nominatimUrl, {
+          params: fallbackParams,
+          headers: {
+            'User-Agent': 'OlivePizzaApp/1.0 (contact: olivepizzarjn@gmail.com; platform: customer-web)',
+            'Accept-Language': 'en-IN,en;q=0.9',
+          },
+          timeout: 8000,
+        }).catch(() => null);
+      }
+
+      const rawList = Array.isArray(response?.data) ? response.data : [];
+
+      results = await Promise.all(
+        rawList.map(async (item: any) => {
+          const lat = parseFloat(item.lat);
+          const lng = parseFloat(item.lon);
+          const addr = item.address || {};
+
+          const title = addr.amenity || addr.shop || addr.building || addr.road || addr.suburb || item.name || query;
+          const subtitle = [
+            addr.suburb || addr.neighbourhood || addr.road,
+            addr.city || addr.town || addr.village || city,
+            addr.state || cityState,
+            addr.country || 'India',
+          ]
+            .filter(Boolean)
+            .filter((val, idx, arr) => arr.indexOf(val) === idx)
+            .join(', ');
+
+          let isServiceable = false;
+          try {
+            const check = await CustomerOrderingContextService.resolveOrderingContext({
+              customerId: 'guest',
+              lat,
+              lng,
+            });
+            isServiceable = check.isServiceable;
+          } catch (e) {}
+
+          return {
+            placeId: String(item.place_id),
+            title,
+            subtitle,
+            displayName: item.display_name,
+            lat,
+            lng,
+            type: item.type,
+            isServiceable,
+            address: {
+              road: addr.road || addr.pedestrian || '',
+              suburb: addr.suburb || addr.neighbourhood || '',
+              city: addr.city || addr.town || addr.village || city,
+              state: addr.state || cityState || '',
+              postcode: addr.postcode || '',
+              country: addr.country || 'India',
+            },
+          };
+        })
+      );
+    }
 
     geocodeCache.set(cacheKey, results);
 
@@ -194,7 +476,7 @@ router.get('/geocode', publicLimiter, async (req: Request, res: Response): Promi
 
 // ============================================================================
 // 3. GET /api/location/reverse-geocode
-// Reverse geocodes map pin coordinates to formatted address string
+// Reverse geocodes map pin coordinates to formatted address string + authoritative serviceability check
 // ============================================================================
 router.get('/reverse-geocode', publicLimiter, async (req: Request, res: Response): Promise<void> => {
   try {
@@ -209,7 +491,12 @@ router.get('/reverse-geocode', publicLimiter, async (req: Request, res: Response
     const roundedKey = `rev_${lat.toFixed(4)}_${lng.toFixed(4)}`;
     const cached = geocodeCache.get<any>(roundedKey);
     if (cached) {
-      res.json({ success: true, location: cached, source: 'cache' });
+      res.json({
+        success: true,
+        location: cached,
+        isServiceable: cached.isServiceable,
+        source: 'cache',
+      });
       return;
     }
 
@@ -233,7 +520,22 @@ router.get('/reverse-geocode', publicLimiter, async (req: Request, res: Response
 
     const data = response.data;
     const addr = data?.address || {};
-    const formattedAddress = data?.display_name || `${addr.road || ''}, ${addr.suburb || ''}, ${addr.city || addr.town || 'Olive Pizza Service Zone'}`.replace(/^,\s*/, '');
+    const formattedAddress =
+      data?.display_name ||
+      `${addr.road || ''}, ${addr.suburb || ''}, ${addr.city || addr.town || ''}`.replace(/^,\s*/, '');
+
+    const resolvedCity = addr.city || addr.town || addr.village || addr.county || addr.state_district || '';
+    const resolvedState = addr.state || '';
+    const resolvedPostcode = addr.postcode || '';
+    const resolvedCountry = addr.country || 'India';
+
+    // Authoritative serviceability check
+    const orderingResolution = await CustomerOrderingContextService.resolveOrderingContext({
+      customerId: (req as any).user?.uid || 'guest',
+      lat,
+      lng,
+      addressLine: formattedAddress,
+    });
 
     const locationResult = {
       displayName: formattedAddress,
@@ -241,10 +543,19 @@ router.get('/reverse-geocode', publicLimiter, async (req: Request, res: Response
       lng,
       road: addr.road || addr.pedestrian || '',
       neighbourhood: addr.neighbourhood || addr.suburb || '',
-      city: addr.city || addr.town || addr.village || 'Rajnandgaon',
-      state: addr.state || 'Chhattisgarh',
-      postcode: addr.postcode || '491441',
-      country: addr.country || 'India',
+      city: resolvedCity,
+      state: resolvedState,
+      postcode: resolvedPostcode,
+      country: resolvedCountry,
+      isServiceable: orderingResolution.isServiceable,
+      resolvedBranchId: orderingResolution.context?.branchId,
+      resolvedFranchiseId: orderingResolution.context?.franchiseId,
+      branchName: orderingResolution.context?.branchName,
+      distanceKm: orderingResolution.context?.distanceKm,
+      deliveryRadiusKm: orderingResolution.context?.deliveryRadiusKm,
+      serviceabilityMessage: orderingResolution.isServiceable
+        ? `Within delivery coverage (${orderingResolution.context?.distanceKm} km from ${orderingResolution.context?.branchName})`
+        : orderingResolution.error || "We currently don't deliver to this location.",
     };
 
     geocodeCache.set(roundedKey, locationResult);
@@ -252,6 +563,7 @@ router.get('/reverse-geocode', publicLimiter, async (req: Request, res: Response
     res.json({
       success: true,
       location: locationResult,
+      isServiceable: orderingResolution.isServiceable,
       attribution: '© OpenStreetMap contributors (ODbL)',
     });
   } catch (error: any) {
@@ -317,7 +629,7 @@ router.post('/save', verifyToken, userLimiter, async (req: AuthRequest, res: Res
       res.status(400).json({
         success: false,
         isServiceable: false,
-        error: orderingResolution.error || "This location is currently outside Olive Pizza's 18km delivery zone.",
+        error: orderingResolution.error || "This location is currently outside Olive Pizza's delivery zone.",
         code: orderingResolution.code || 'OUT_OF_DELIVERY_ZONE',
       });
       return;
@@ -332,7 +644,7 @@ router.post('/save', verifyToken, userLimiter, async (req: AuthRequest, res: Res
       formattedAddress: String(formattedAddress).trim(),
       lat: numLat,
       lng: numLng,
-      city: String(city || orderingResolution.context?.branchName || 'Rajnandgaon').trim(),
+      city: String(city || orderingResolution.context?.branchName || '').trim(),
       street: String(street || '').trim() || null,
       houseNumber: String(houseNumber || '').trim() || null,
       landmark: String(landmark || '').trim() || null,

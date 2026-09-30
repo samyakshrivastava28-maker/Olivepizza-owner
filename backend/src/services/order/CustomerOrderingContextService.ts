@@ -69,14 +69,27 @@ export class CustomerOrderingContextService {
 
     for (const bDoc of branchesSnap.docs) {
       const bData = bDoc.data();
-      if (bData.isActive === false) continue;
+      if (
+        bData.isActive === false ||
+        bData.status === 'DEACTIVATED' ||
+        bData.status === 'SUSPENDED' ||
+        bData.status === 'PLANNED'
+      ) {
+        continue;
+      }
 
       const bLat = Number(bData.lat ?? bData.coordinates?.lat ?? bData.location?.lat);
       const bLng = Number(bData.lng ?? bData.coordinates?.lng ?? bData.location?.lng);
 
       if (!isNaN(bLat) && !isNaN(bLng)) {
         const dist = this.haversineDistanceKm(custLat, custLng, bLat, bLng);
-        const maxRadius = Number(bData.deliveryRadiusKm || bData.maxDeliveryRadiusKm || bData.deliveryRadius || 15);
+        const maxRadius = Number(
+          bData.deliveryRadiusKm ||
+          bData.maxDeliveryRadiusKm ||
+          bData.deliverySettings?.maxDeliveryRadiusKm ||
+          bData.deliveryRadius ||
+          15
+        );
 
         if (dist <= maxRadius && dist < minDistance) {
           minDistance = dist;
@@ -95,7 +108,14 @@ export class CustomerOrderingContextService {
       const entitiesSnap = await adminDb.collection('franchise_entities').get();
       for (const eDoc of entitiesSnap.docs) {
         const eData = eDoc.data();
-        if (eData.isActive === false) continue;
+        if (
+          eData.isActive === false ||
+          eData.status === 'DEACTIVATED' ||
+          eData.status === 'SUSPENDED' ||
+          eData.status === 'PLANNED'
+        ) {
+          continue;
+        }
 
         const eLat = Number(eData.lat ?? eData.coordinates?.lat ?? eData.location?.lat);
         const eLng = Number(eData.lng ?? eData.coordinates?.lng ?? eData.location?.lng);
