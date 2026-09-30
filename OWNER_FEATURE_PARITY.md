@@ -21,7 +21,7 @@ This document tracks feature parity between the existing embedded Owner Panel an
 | 15 | **Notification Diagnostics** | `/owner/notification-diagnostics` | `/src/pages/NotificationDiagnostics.tsx` | `/api/notifications/diagnostics` | ✅ |
 | 16 | **Verification & OTP Metrics** | `/owner/verification-metrics` | `/src/pages/VerificationMetrics.tsx` | `/api/phone/metrics` | ✅ |
 | 17 | **AI Health & Heartbeat Monitor**| `/owner/ai-monitor` | `/src/pages/AIHealthMonitor.tsx` | `/api/heartbeat` | ✅ |
-| 18 | **AI Knowledge Sync (Pinecone)** | `/owner/ai-knowledge` | `/src/pages/AIKnowledge.tsx` | `/api/knowledge` + Pinecone | ✅ |
+| 18 | **AI Knowledge Sync (Cloudflare R2)** | `/owner/ai-knowledge` | `/src/pages/AIKnowledge.tsx` | `/api/knowledge` + Cloudflare R2 | ✅ |
 | 19 | **Security & Audit Logs** | `/owner/security` | `/src/pages/SecurityLogs.tsx` | Firestore `security_logs` | ✅ |
 | 20 | **Version Management & PWA** | `/owner/versions` | `/src/pages/VersionManagement.tsx` | Firestore `app_version` + `/api/version` | ✅ |
 | 21 | **Festival & Calendar Events** | `/owner/events` | `/src/pages/Events.tsx` | Firestore `events` | ✅ |
