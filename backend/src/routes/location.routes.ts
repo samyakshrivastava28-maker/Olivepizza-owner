@@ -38,7 +38,7 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
       return;
     }
 
-    const cityMap = new Map<string, {
+    interface CityInfo {
       id: string;
       city: string;
       name: string;
@@ -56,8 +56,20 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
         lng: number;
         deliveryRadiusKm: number;
       }>;
+      popularLocalities: Array<{
+        id?: string;
+        title: string;
+        subtitle: string;
+        lat: number;
+        lng: number;
+        pincode?: string;
+        type?: string;
+        isServiceable?: boolean;
+      }>;
       serviceable: boolean;
-    }>();
+    }
+
+    const cityMap = new Map<string, CityInfo>();
 
     // 1. Query franchises (branch records) collection
     const franchisesSnap = await adminDb.collection('franchises').get();
@@ -87,6 +99,12 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
       );
       const state = data.state || 'Chhattisgarh';
       const branchName = data.name || `Olive Pizza ${rawCity}`;
+
+      const rawPopular = Array.isArray(data.popularLocalities) && data.popularLocalities.length > 0
+        ? data.popularLocalities
+        : Array.isArray(data.popularLocations) && data.popularLocations.length > 0
+          ? data.popularLocations
+          : [];
 
       if (!isNaN(lat) && !isNaN(lng)) {
         const deltaLat = radius / 110.574;
@@ -119,6 +137,7 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
             activeBranches: 1,
             branchNames: [branchName],
             branches: [branchInfo],
+            popularLocalities: [...rawPopular],
             serviceable: true,
           });
         } else {
@@ -133,6 +152,15 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
             Math.max(existing.viewbox[2], viewbox[2]),
             Math.min(existing.viewbox[3], viewbox[3]),
           ];
+          if (rawPopular.length > 0) {
+            const existingIds = new Set(existing.popularLocalities.map((p) => (p.title || '').toLowerCase()));
+            for (const item of rawPopular) {
+              if (!existingIds.has((item.title || '').toLowerCase())) {
+                existing.popularLocalities.push(item);
+                existingIds.add((item.title || '').toLowerCase());
+              }
+            }
+          }
         }
       }
     }
@@ -207,6 +235,67 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
 
     // 100% database-driven: NO hardcoded fallback cities!
     const cities = Array.from(cityMap.values());
+
+    // Dynamic auto-discovery for any city (current or future) that has no explicit popularLocalities configured
+    await Promise.all(
+      cities.map(async (c) => {
+        if (c.popularLocalities && c.popularLocalities.length > 0) return;
+        try {
+          const photonUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(c.name)}&lat=${c.center.lat}&lon=${c.center.lng}&limit=12`;
+          const resp = await axios.get(photonUrl, { timeout: 3500 });
+          if (resp.data && Array.isArray(resp.data.features) && resp.data.features.length > 0) {
+            const places: any[] = [];
+            const seen = new Set<string>();
+            for (const feat of resp.data.features) {
+              const props = feat.properties || {};
+              const coords = feat.geometry?.coordinates;
+              if (!coords || coords.length < 2) continue;
+              const name = (props.name || '').trim();
+              if (!name || seen.has(name.toLowerCase())) continue;
+              seen.add(name.toLowerCase());
+
+              const subtitleParts = [
+                props.street,
+                props.suburb || props.district,
+                props.city || c.name,
+                props.state || c.state,
+              ].filter(Boolean);
+
+              places.push({
+                id: `dyn_${props.osm_id || Math.random().toString(36).substr(2, 9)}`,
+                title: name,
+                subtitle: subtitleParts.join(', '),
+                lat: coords[1],
+                lng: coords[0],
+                pincode: props.postcode || '',
+                type: props.osm_value || 'locality',
+                isServiceable: true,
+              });
+              if (places.length >= 10) break;
+            }
+            if (places.length > 0) {
+              c.popularLocalities = places;
+              return;
+            }
+          }
+        } catch {
+          // Non-fatal
+        }
+
+        c.popularLocalities = [
+          {
+            id: `center_${c.id}`,
+            title: `${c.name} Center`,
+            subtitle: `${c.name}, ${c.state}, India`,
+            lat: c.center.lat,
+            lng: c.center.lng,
+            type: 'center',
+            isServiceable: true,
+          },
+        ];
+      })
+    );
+
     citiesCache.set('serviceable_cities', cities);
 
     res.json({
@@ -217,6 +306,70 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
   } catch (error: any) {
     console.error('[LocationRoutes] Error fetching serviceable cities:', error);
     res.status(500).json({ success: false, error: 'Failed to retrieve serviceable cities' });
+  }
+});
+
+// ============================================================================
+// 1b. GET /api/location/popular-locations
+// Returns instant popular localities for a selected city or all active cities
+// ============================================================================
+router.get('/popular-locations', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const cityName = String(req.query.city || '').trim().toLowerCase();
+    let cities = citiesCache.get<any[]>('serviceable_cities');
+    if (!cities) {
+      // Trigger internal resolution by querying franchises
+      const franchisesSnap = await adminDb.collection('franchises').get();
+      const cityMap = new Map<string, any>();
+      for (const doc of franchisesSnap.docs) {
+        const data = doc.data();
+        if (
+          data.isActive === false ||
+          data.status === 'DEACTIVATED' ||
+          data.status === 'SUSPENDED' ||
+          data.status === 'PLANNED'
+        ) {
+          continue;
+        }
+        const rawCity = (data.city || '').trim();
+        if (!rawCity) continue;
+        const cityKey = rawCity.toLowerCase();
+        const popular = Array.isArray(data.popularLocalities) ? data.popularLocalities : [];
+        if (!cityMap.has(cityKey)) {
+          cityMap.set(cityKey, {
+            name: rawCity,
+            popularLocalities: popular,
+          });
+        }
+      }
+      cities = Array.from(cityMap.values());
+    }
+
+    if (cityName && cities) {
+      const match = cities.find(
+        (c: any) =>
+          (c.city && c.city.toLowerCase() === cityName) ||
+          (c.name && c.name.toLowerCase() === cityName)
+      );
+      if (match) {
+        res.json({
+          success: true,
+          city: match.name || match.city,
+          localities: match.popularLocalities || [],
+        });
+        return;
+      }
+    }
+
+    res.json({
+      success: true,
+      cities: (cities || []).map((c: any) => ({
+        city: c.name || c.city,
+        localities: c.popularLocalities || [],
+      })),
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: 'Failed to retrieve popular locations' });
   }
 });
 
