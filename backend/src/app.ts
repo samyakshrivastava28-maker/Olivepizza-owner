@@ -289,7 +289,6 @@ app.use('/api/tts', expensiveLimiter);
 
 import emailRoutes from './routes/email.routes.js';
 import googleDriveRoutes from './routes/googleDrive.routes.js';
-import aiKnowledgeRoutes from './routes/aiKnowledge.routes.js';
 import dataManagerRoutes from './routes/dataManager.routes.js';
 import aiIntegrationRoutes from './routes/aiIntegration.routes.js';
 
@@ -307,7 +306,6 @@ import aiImageRoutes from './routes/aiImage.routes.js';
 
 app.use('/ai', aiRoutes);
 app.use('/api/ai', aiRoutes);
-app.use('/api/ai', aiKnowledgeRoutes);
 app.use('/api/ai/image', aiImageRoutes);
 app.use('/ai/image', aiImageRoutes);
 

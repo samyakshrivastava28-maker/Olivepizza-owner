@@ -393,12 +393,10 @@ router.get('/management/status', verifyToken, requireRole(['owner', 'admin']), a
 
 router.get('/management/dashboard', verifyToken, requireRole(['owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const [statusDoc, eventsSnap, alertsSnap, syncQueueSnap, metaSnap] = await Promise.all([
+    const [statusDoc, eventsSnap, alertsSnap] = await Promise.all([
       adminDb.collection('_ai_status_').doc('current').get(),
       adminDb.collection('_ai_events_log_').orderBy('timestamp', 'desc').limit(20).get(),
       adminDb.collection('_ai_alerts_').orderBy('receivedAt', 'desc').limit(10).get(),
-      adminDb.collection('_pinecone_sync_queue_').get(),
-      adminDb.collection('_pinecone_metadata_').count().get(),
     ]);
     const s = statusDoc.exists ? statusDoc.data() : {};
     const secondsSince = (Date.now() - (s?.lastHeartbeatMs || 0)) / 1000;
@@ -406,7 +404,7 @@ router.get('/management/dashboard', verifyToken, requireRole(['owner', 'admin'])
       success: true,
       dashboard: {
         ai: { online: secondsSince < 360, lastHeartbeat: s?.lastHeartbeat, secondsSinceLastBeat: Math.round(secondsSince), version: s?.version, activeUsers: s?.activeUsers || 0, modelStatus: s?.modelStatus || {}, maintenanceMode: s?.maintenanceMode, disabled: s?.disabled },
-        knowledge: { totalVectors: metaSnap.data().count, syncQueueSize: syncQueueSnap.size, failedSyncJobs: syncQueueSnap.docs.filter(d => d.data().retryCount > 0).length },
+        knowledge: { totalVectors: 0, syncQueueSize: 0, failedSyncJobs: 0 },
         recentEvents: eventsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
         recentAlerts: alertsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
       }

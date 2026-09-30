@@ -14,11 +14,13 @@
  *  4. Only if ALL sources fail should AI state data is unavailable.
  */
 
-import { embeddingCache } from './embeddingCache.js';
 import kb, { KBProduct, KBPolicy, KBFaq } from '../KnowledgeBaseService.js';
 import { recommendationEngine } from './RecommendationEngine.js';
 import { staticKB } from './StaticKnowledgeLoader.js';
 import { KnowledgeMemoryStore } from '../knowledge/KnowledgeSyncService.js';
+
+// In-memory query context cache with 5-minute TTL (Zero external vector/embedding dependencies)
+const queryContextCache = new Map<string, { data: Omit<ContextBuildResult, 'cacheHit'>; expiresAt: number }>();
 
 export interface DetailedSearchResult {
   results: Array<{ content: string; score: number; metadata: any }>;
@@ -177,11 +179,11 @@ export class AIContextBuilder {
       };
     }
 
-    // ── 3. Check embedding cache for RESTAURANT queries ──────────────────────
+    // ── 3. Check memory context cache for RESTAURANT queries ──────────────────────
     const cacheKey = queryLower;
-    const cached = embeddingCache.get<Omit<ContextBuildResult, 'cacheHit'>>('context', cacheKey);
-    if (cached) {
-      return { ...cached, cacheHit: true };
+    const cachedEntry = queryContextCache.get(cacheKey);
+    if (cachedEntry && cachedEntry.expiresAt > Date.now()) {
+      return { ...cachedEntry.data, cacheHit: true };
     }
 
     // ── 4. HYBRID KNOWLEDGE ENGINE: Step A — Preloaded Structured Store Context (Pinecone Bypassed) ──
@@ -337,7 +339,7 @@ export class AIContextBuilder {
     };
 
     if (groundingStatus === 'OK') {
-      embeddingCache.set('context', cacheKey, finalResult);
+      queryContextCache.set(cacheKey, { data: finalResult, expiresAt: Date.now() + 300000 });
     }
 
     return { ...finalResult, cacheHit: false };

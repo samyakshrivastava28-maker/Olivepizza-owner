@@ -60,9 +60,9 @@ export default function AIHealthMonitor() {
           <p className="text-[11px] text-slate-500 mt-1">Multi-provider router active</p>
         </div>
         <div className="bg-[#131B2B] border border-slate-800 rounded-2xl p-5">
-          <span className="text-xs font-bold text-slate-400 uppercase">Vector Database (Pinecone)</span>
-          <p className="text-xl font-extrabold text-purple-400 font-mono mt-2">Connected ⚡</p>
-          <p className="text-[11px] text-slate-500 mt-1">Index: olive-pizza</p>
+          <span className="text-xs font-bold text-slate-400 uppercase">Knowledge Base Catalog</span>
+          <p className="text-xl font-extrabold text-purple-400 font-mono mt-2">In-Memory Store ⚡</p>
+          <p className="text-[11px] text-slate-500 mt-1">Firestore Realtime Synced</p>
         </div>
       </div>
     </div>

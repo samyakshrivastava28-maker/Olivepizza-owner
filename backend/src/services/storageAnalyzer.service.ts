@@ -2,7 +2,6 @@ import { pgPool } from '../config/postgres.js';
 import { adminDb, adminAuth } from '../config/firebase.js'; 
 import { v2 as cloudinary } from 'cloudinary';
 import { google } from 'googleapis';
-import { QdrantClient } from '@qdrant/js-client-rest';
 import cron from 'node-cron';
 import NodeCache from 'node-cache';
 
@@ -290,30 +289,13 @@ export class StorageAnalyzerService {
     }
   }
 
-  // --- 5. Qdrant ---
+  // --- 5. Vector Store (Legacy / Disabled) ---
   public async getQdrantUsage(forceRecalculate = false) {
     const cacheKey = 'qdrant_usage';
     if (!forceRecalculate && cache.has(cacheKey)) return cache.get(cacheKey);
-    const startTime = Date.now();
-
-    try {
-      const { pineconeService } = await import('./ai/PineconeService.js');
-      const statusPromise = pineconeService.getStatus();
-      const timeoutPromise = new Promise<any>((_, rej) => setTimeout(() => rej(new Error('timeout')), 2000));
-      const status = await Promise.race([statusPromise, timeoutPromise]).catch(() => ({ ok: true, vectorCount: 92, indexName: 'olive-pizza' }));
-
-      const vectorCount = status.vectorCount || 92;
-      // Approximate: 1024 dims * 4 bytes + ~500 bytes payload = ~4.6KB per vector
-      const totalUsedBytes = vectorCount * 4596;
-
-      const result = { totalUsedBytes, vectorCount, status: status.ok ? 'Healthy' : 'Offline', indexName: status.indexName };
-      cache.set(cacheKey, result);
-      await this.recordSnapshot('pinecone', totalUsedBytes, null, 'Healthy', Date.now() - startTime);
-      return result;
-    } catch (err: any) {
-      const result = { totalUsedBytes: 422832, vectorCount: 92, status: 'Healthy', indexName: 'olive-pizza' };
-      return result;
-    }
+    const result = { totalUsedBytes: 0, vectorCount: 0, status: 'Disabled', indexName: 'None' };
+    cache.set(cacheKey, result);
+    return result;
   }
 
   // --- 6. Email System ---

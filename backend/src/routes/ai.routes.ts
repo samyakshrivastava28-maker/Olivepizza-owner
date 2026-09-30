@@ -8,7 +8,6 @@ import { optionalAuth, AuthRequest } from '../middleware/auth.middleware.js';
 import { detectLanguage } from '../services/ai/languageDetector.js';
 import { conversationMemory } from '../services/ai/conversationMemory.js';
 import { executeBackendTool } from '../services/ai/toolExecutor.js';
-import { embeddingCache } from '../services/ai/embeddingCache.js';
 import { AIFirewallFilter } from '../services/ai/AIFirewallFilter.js';
 
 const router = express.Router();
@@ -588,7 +587,6 @@ router.post('/action', optionalAuth, aiActionLimiter, async (req: AuthRequest, r
 // ─── AI Diagnostics — Expanded (Phase 9) ─────────────────────────────────────
 router.get('/diagnostics', requireAuth, requireRole(['owner', 'admin', 'developer']), async (req: AuthRequest, res) => {
   try {
-    const cacheStats = embeddingCache.getStats();
     const memStats = conversationMemory.getStats();
     const opsStats = aiOperationsStore.getStats();
 
@@ -596,11 +594,9 @@ router.get('/diagnostics', requireAuth, requireRole(['owner', 'admin', 'develope
       success: true,
       knowledgeStore: {
         type: 'LOCAL_KB_CATALOG',
-        dimension: 1024,
         status: 'GREEN',
         connectionStatus: 'CONNECTED',
       },
-      embeddingCache: cacheStats,
       conversationMemory: memStats,
       aiOperations: opsStats,
       providers: {

@@ -311,8 +311,6 @@ router.post('/init-claim', async (req: DevRequest, res: Response) => {
 
 // ── 10. AI Assistant Developer Operations & Diagnostics ────────────────────
 import { aiOperationsStore } from '../services/devOps/AIOperationsService.js';
-import { pineconeService, PINECONE_INDEX_NAME } from '../services/ai/PineconeService.js';
-import { semanticSearch } from '../services/ai/SemanticSearch.js';
 import { generateChatReply } from '../services/ai.service.js';
 import { aiContextBuilder } from '../services/ai/AIContextBuilder.js';
 
@@ -342,40 +340,6 @@ router.get('/ai/stats', async (_req: DevRequest, res: Response) => {
   try {
     const stats = aiOperationsStore.getStats();
     res.json({ success: true, data: stats });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-router.post('/ai/qdrant/search-test', async (req: DevRequest, res: Response) => {
-  try {
-    const { query, topK, minScore } = req.body;
-    if (!query) return res.status(400).json({ error: 'Query parameter is required' });
-    const searchResult = await semanticSearch.searchDetailed(query, {
-      topK: topK ? parseInt(topK, 10) : 5,
-      minScore: minScore ? parseFloat(minScore) : 0.5,
-    });
-    res.json({ success: true, data: searchResult });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-router.post('/ai/qdrant/rebuild', async (req: DevRequest, res: Response) => {
-  try {
-    const { confirm, confirmation } = req.body || {};
-    if (confirm !== 'CONFIRM_REBUILD' && confirmation !== 'CONFIRM_REBUILD') {
-      res.status(400).json({
-        success: false,
-        error: 'Confirmation required: Provide body payload { confirm: "CONFIRM_REBUILD" } to clear and rebuild vector index'
-      });
-      return;
-    }
-
-    await pineconeService.clearAll();
-    const { knowledgeSync } = await import('../services/ai/KnowledgeSync.js');
-    const result = await knowledgeSync.syncAll();
-    res.json({ success: true, message: `Pinecone index ${PINECONE_INDEX_NAME} rebuilt and re-synced.`, result });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

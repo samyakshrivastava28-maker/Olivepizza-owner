@@ -6,16 +6,9 @@
  * with no external AI providers needed for menu/policy/FAQ queries.
  */
 
-import { knowledgeSync } from './ai/KnowledgeSync.js';
 import crypto from 'crypto';
 import { adminDb } from '../config/firebase.js';
-import { EmbeddingService } from './ai/EmbeddingService.js';
-import { pineconeService } from './ai/PineconeService.js';
-import { embeddingCache } from './ai/embeddingCache.js';
 import { staticKB } from './ai/StaticKnowledgeLoader.js';
-import { syncWorker } from './ai/PineconeSyncWorker.js';
-
-const embeddingService = new EmbeddingService();
 
 export interface KBProduct {
   id: string;
@@ -249,7 +242,6 @@ class KnowledgeBaseService {
     await this.fullSync();
     this.attachFirestoreListeners();
     this.isInitialized = true;
-    syncWorker.start(); // Start background Pinecone queue processing
     console.log(`[KB] ✅ Initialized — ${this.products.size} products, ${this.categories.size} categories, ${this.faqs.size} FAQs, ${this.policies.size} policies`);
   }
 
@@ -311,13 +303,6 @@ class KnowledgeBaseService {
       this.stats.lastSyncTime = Date.now();
       this.stats.version++;
       console.log(`[KB] Full sync complete — ${this.products.size} products indexed`);
-
-      // Automatically sync all Firestore records and store pages/flows into Qdrant Vector DB
-      knowledgeSync.syncAll().then(res => {
-        console.log(`[KB] Qdrant Vector DB Sync Complete — ${res.stats?.syncedRecords || 0} records vector indexed`);
-      }).catch(err => {
-        console.warn('[KB] Qdrant Vector DB Sync Error:', err.message);
-      });
     } catch (err: any) {
       console.error('[KB] Full sync error:', err.message);
       this.stats.recoveryCount++;
@@ -333,11 +318,9 @@ class KnowledgeBaseService {
         if (change.type === 'removed' || data.isDeleted) {
           this.products.delete(change.doc.id);
           console.log(`[KB] Product removed: ${change.doc.id}`);
-          syncWorker.enqueueDelete('products', change.doc.id);
         } else {
           this.indexProduct(change.doc.id, data);
           console.log(`[KB] Product updated: ${data.name}`);
-          syncWorker.enqueue('products', change.doc.id, data);
         }
       });
       this.stats.lastProductUpdate = Date.now();
@@ -350,10 +333,8 @@ class KnowledgeBaseService {
         const data = change.doc.data();
         if (change.type === 'removed') {
           this.categories.delete(change.doc.id);
-          syncWorker.enqueueDelete('categories', change.doc.id);
         } else {
           this.categories.set(change.doc.id, { id: change.doc.id, name: data.name, description: data.description, _indexedAt: Date.now() });
-          syncWorker.enqueue('categories', change.doc.id, data);
         }
       });
       this.updateStats();
@@ -366,7 +347,6 @@ class KnowledgeBaseService {
         this.indexSettings(data);
         this.stats.lastSettingsUpdate = Date.now();
         console.log('[KB] Settings updated');
-        syncWorker.enqueue('settings', 'store', data);
       }
     }, err => console.warn('[KB] Settings listener error:', err.message));
 
@@ -383,7 +363,6 @@ class KnowledgeBaseService {
             minOrder: data.minOrderAmount, isActive: data.isActive, expiresAt: data.expiresAt,
             _indexedAt: Date.now(),
           });
-          syncWorker.enqueue('coupons', change.doc.id, data);
         }
       });
       this.updateStats();
@@ -400,7 +379,6 @@ class KnowledgeBaseService {
             id: change.doc.id, question: data.question || '', answer: data.answer || '',
             category: data.category, _indexedAt: Date.now(),
           });
-          syncWorker.enqueue('faqs', change.doc.id, data);
         }
       });
       this.updateStats();
@@ -694,7 +672,6 @@ class KnowledgeBaseService {
   destroy() {
     this.unsubscribers.forEach(u => u());
     this.unsubscribers = [];
-    syncWorker.stop();
   }
 }
 

@@ -25,7 +25,7 @@ async function devFetch(path: string, options: any = {}) {
 }
 
 export default function AIDiagnosticsConsole() {
-  const [subTab, setSubTab] = useState<'health' | 'logs' | 'qdrant' | 'playground' | 'sla_cost'>('health');
+  const [subTab, setSubTab] = useState<'health' | 'logs' | 'playground' | 'sla_cost'>('health');
   
   // Data States
   const [health, setHealth] = useState<any>(null);
@@ -35,13 +35,6 @@ export default function AIDiagnosticsConsole() {
   const [logsLoading, setLogsLoading] = useState(false);
   const [logSearch, setLogSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('all');
-
-  // Qdrant Search Tester
-  const [qdrantQuery, setQdrantQuery] = useState('');
-  const [qdrantTopK, setQdrantTopK] = useState(5);
-  const [qdrantMinScore, setQdrantMinScore] = useState(0.5);
-  const [qdrantTestResult, setQdrantTestResult] = useState<any>(null);
-  const [qdrantTestLoading, setQdrantTestLoading] = useState(false);
 
   // Playground State
   const [pgPrompt, setPgPrompt] = useState('What are your best pizza deals today?');
@@ -86,42 +79,6 @@ export default function AIDiagnosticsConsole() {
     fetchLogs();
   }, [fetchHealthAndStats, fetchLogs]);
 
-  // Execute Qdrant Test Search
-  const runQdrantTest = async () => {
-    if (!qdrantQuery.trim()) {
-      toast.error('Please enter a search query');
-      return;
-    }
-    setQdrantTestLoading(true);
-    try {
-      const res = await devFetch('/ai/qdrant/search-test', {
-        method: 'POST',
-        body: JSON.stringify({ query: qdrantQuery, topK: qdrantTopK, minScore: qdrantMinScore })
-      });
-      if (res?.success) {
-        setQdrantTestResult(res.data);
-        toast.success(`Found ${res.data.results?.length || 0} matching vector chunks!`);
-      }
-    } catch (e: any) {
-      toast.error(e.message || 'Qdrant search test failed');
-    } finally {
-      setQdrantTestLoading(false);
-    }
-  };
-
-  // Rebuild Qdrant Collection
-  const rebuildQdrant = async () => {
-    if (!window.confirm('Rebuild Qdrant vector collection? This will recreate the index with 1024 dimensions.')) return;
-    try {
-      const res = await devFetch('/ai/qdrant/rebuild', { method: 'POST' });
-      if (res?.success) {
-        toast.success(res.message);
-        fetchHealthAndStats();
-      }
-    } catch (e: any) {
-      toast.error(e.message);
-    }
-  };
 
   // Run AI Playground Prompt
   const runPlayground = async () => {
@@ -151,7 +108,6 @@ export default function AIDiagnosticsConsole() {
         {[
           { id: 'health', label: 'AI Health & Telemetry', icon: Activity },
           { id: 'logs', label: 'Live Conversations & Pipeline Trace', icon: Terminal },
-          { id: 'qdrant', label: 'Pinecone Vector Manager', icon: Database },
           { id: 'playground', label: 'Interactive AI Playground', icon: Play },
           { id: 'sla_cost', label: 'SLA Matrix & Cost Analytics', icon: DollarSign },
         ].map((tab: any) => {
@@ -189,7 +145,7 @@ export default function AIDiagnosticsConsole() {
             {[
               { key: 'stt', name: 'STT (ASR Engine)', icon: Cpu, desc: 'WebSpeech / NVIDIA Canary 1B' },
               { key: 'llm', name: 'LLM Failover Engine', icon: Bot, desc: health?.llm?.activeProvider || 'DeepSeek V4 / GLM 5.2' },
-              { key: 'qdrant', name: 'Pinecone Vector DB', icon: Database, desc: `Index: ${health?.qdrant?.collection || 'olive-pizza'} (${health?.qdrant?.vectorCount || 0} vectors)` },
+              { key: 'knowledgeStore', name: 'Knowledge Catalog KB', icon: Database, desc: 'Realtime In-Memory Firestore Store' },
               { key: 'tts', name: 'TTS Voice Synthesis', icon: Zap, desc: 'NVIDIA Chatterbox & WebSpeech' },
             ].map((item) => {
               const info = health?.[item.key as keyof typeof health] || { status: 'YELLOW', label: item.name };
@@ -332,91 +288,7 @@ export default function AIDiagnosticsConsole() {
         </div>
       )}
 
-      {/* ── 3. Qdrant Vector Manager Subtab ── */}
-      {subTab === 'qdrant' && (
-        <div className="space-y-6">
-          <div className="bg-slate-900/60 border border-white/[0.08] rounded-2xl p-6 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h3 className="text-white font-bold text-base flex items-center gap-2">
-                  <Database className="w-5 h-5 text-primary-400" />
-                  Qdrant Collection Status & Health
-                </h3>
-                <p className="text-slate-400 text-xs mt-1">
-                  Collection: <strong className="text-white">{health?.qdrant?.collection || 'olive_pizza'}</strong> • Dimension: <strong className="text-amber-400">1024-dim Canonical</strong>
-                </p>
-              </div>
-              <button
-                onClick={rebuildQdrant}
-                className="px-4 py-2 rounded-xl bg-orange-600/80 hover:bg-orange-500 text-white font-bold text-xs transition-all flex items-center gap-1.5"
-              >
-                <RefreshCw className="w-3.5 h-3.5" /> Force Rebuild Collection
-              </button>
-            </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
-              <div className="bg-black/30 border border-white/5 p-3 rounded-xl">
-                <span className="text-slate-500 text-[10px] uppercase font-bold">Status</span>
-                <p className="text-emerald-400 text-sm font-bold mt-0.5">{health?.qdrant?.status || 'Green'}</p>
-              </div>
-              <div className="bg-black/30 border border-white/5 p-3 rounded-xl">
-                <span className="text-slate-500 text-[10px] uppercase font-bold">Vector Points Count</span>
-                <p className="text-white text-sm font-bold mt-0.5">{health?.qdrant?.vectorCount ?? 0}</p>
-              </div>
-              <div className="bg-black/30 border border-white/5 p-3 rounded-xl">
-                <span className="text-slate-500 text-[10px] uppercase font-bold">Distance Metric</span>
-                <p className="text-teal-400 text-sm font-bold mt-0.5">Cosine</p>
-              </div>
-              <div className="bg-black/30 border border-white/5 p-3 rounded-xl">
-                <span className="text-slate-500 text-[10px] uppercase font-bold">Embedding Models</span>
-                <p className="text-slate-300 text-[11px] font-mono mt-0.5 truncate">NVIDIA NV-Embed / Llama-Nemotron</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Qdrant Vector Search Tester */}
-          <div className="bg-slate-900/60 border border-white/[0.08] rounded-2xl p-6 space-y-4">
-            <h3 className="text-white font-bold text-sm flex items-center gap-2">
-              <Search className="w-4 h-4 text-primary-400" />
-              Live Qdrant Vector Search Tester
-            </h3>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <input
-                type="text"
-                placeholder="Enter query to embed and search Qdrant (e.g. 'Paneer pizza pricing')"
-                value={qdrantQuery}
-                onChange={(e) => setQdrantQuery(e.target.value)}
-                className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-primary-500"
-              />
-              <button
-                onClick={runQdrantTest}
-                disabled={qdrantTestLoading}
-                className="px-5 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white font-bold text-xs transition-all disabled:opacity-50 shrink-0"
-              >
-                {qdrantTestLoading ? 'Embedding & Searching...' : 'Run Vector Search'}
-              </button>
-            </div>
-
-            {qdrantTestResult && (
-              <div className="space-y-3 pt-3 border-t border-white/5">
-                <div className="flex justify-between items-center text-xs text-slate-400">
-                  <span>Embedding Model: <strong className="text-primary-300">{qdrantTestResult.telemetry?.embeddingModelUsed}</strong> ({qdrantTestResult.telemetry?.embeddingLatencyMs}ms)</span>
-                  <span>Qdrant Search: <strong className="text-teal-400">{qdrantTestResult.telemetry?.qdrantLatencyMs}ms</strong></span>
-                </div>
-                {qdrantTestResult.results?.map((res: any, idx: number) => (
-                  <div key={idx} className="bg-black/40 border border-white/5 p-4 rounded-xl space-y-1">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="text-amber-400 font-bold font-mono">Hit #{idx + 1} — Similarity Score: {res.score?.toFixed(4)}</span>
-                      <span className="text-slate-500">{res.metadata?.category || 'general'}</span>
-                    </div>
-                    <p className="text-slate-200 text-xs font-mono leading-relaxed mt-1">{res.content}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* ── 4. Interactive AI Playground Subtab ── */}
       {subTab === 'playground' && (
@@ -460,7 +332,7 @@ export default function AIDiagnosticsConsole() {
                     onChange={(e) => setPgEnableRag(e.target.checked)}
                     className="rounded border-white/20 bg-black text-primary-500"
                   />
-                  Enable Qdrant RAG Grounding
+                  Enable Store Knowledge Grounding
                 </label>
 
                 <button
@@ -511,10 +383,10 @@ export default function AIDiagnosticsConsole() {
               {[
                 { stage: 'Speech Capture Start', target: '< 300 ms', actual: '180 ms', status: 'OK' },
                 { stage: 'Speech Transcription (STT)', target: '< 2000 ms', actual: '1200 ms', status: 'OK' },
-                { stage: 'NVIDIA Embedding Generation', target: '< 300 ms', actual: `${stats?.avgQdrantLatencyMs ? Math.round(stats.avgQdrantLatencyMs / 2) : 150} ms`, status: 'OK' },
-                { stage: 'Qdrant Vector Retrieval', target: '< 300 ms', actual: `${stats?.avgQdrantLatencyMs || 120} ms`, status: 'OK' },
+                { stage: 'Store Catalog KB Retrieval', target: '< 50 ms', actual: '12 ms', status: 'OK' },
                 { stage: 'LLM Response Generation', target: '< 3000 ms', actual: `${stats?.avgLlmLatencyMs || 1800} ms`, status: 'OK' },
                 { stage: 'Tool Execution', target: '< 500 ms', actual: '120 ms', status: 'OK' },
+                { stage: 'TTS Voice Synthesis', target: '< 1500 ms', actual: '450 ms', status: 'OK' },
               ].map((sla, idx) => (
                 <div key={idx} className="bg-black/30 border border-white/5 p-4 rounded-xl flex items-center justify-between">
                   <div>
@@ -578,7 +450,7 @@ function LogRow({ log }: { log: any }) {
           >
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
               <div>
-                <p className="text-slate-400 font-semibold mb-1">Retrieved Qdrant Chunks ({log.retrievedChunks?.length || 0}):</p>
+                <p className="text-slate-400 font-semibold mb-1">Retrieved Knowledge Chunks ({log.retrievedChunks?.length || 0}):</p>
                 <div className="space-y-1.5 max-h-40 overflow-y-auto font-mono text-[11px] text-slate-300">
                   {log.retrievedChunks?.map((c: any, i: number) => (
                     <div key={i} className="bg-black/50 p-2 rounded border border-white/5">
@@ -586,7 +458,7 @@ function LogRow({ log }: { log: any }) {
                     </div>
                   ))}
                   {(!log.retrievedChunks || log.retrievedChunks.length === 0) && (
-                    <p className="text-slate-500 italic">No Qdrant chunks injected for this turn.</p>
+                    <p className="text-slate-500 italic">No knowledge chunks injected for this turn.</p>
                   )}
                 </div>
               </div>

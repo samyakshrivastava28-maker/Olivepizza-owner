@@ -11,7 +11,6 @@
  *  7. Pinecone Vector Index & Document Manager
  */
 
-import { pineconeService, PINECONE_INDEX_NAME } from '../ai/PineconeService.js';
 import { aiProviderStats } from '../ai.service.js';
 
 export interface SMSLog {
@@ -210,15 +209,6 @@ class AIOperationsStore {
   }
 
   public async getHealth() {
-    let pineconeOnline = false;
-    let pineconeDetails: any = null;
-    try {
-      pineconeDetails = await pineconeService.getStatus();
-      pineconeOnline = pineconeDetails.ok && (pineconeDetails.vectorCount ?? 0) >= 0;
-    } catch {
-      pineconeOnline = false;
-    }
-
     const llmOnline = aiProviderStats.nvidia.ok || aiProviderStats.openrouter.ok || aiProviderStats.gemini.ok || aiProviderStats.activeProvider !== 'none';
     const sttOnline = true; // Whisper / Canary route active
     const ttsOnline = true; // Multilingual TTS / WebSpeech active
@@ -227,7 +217,7 @@ class AIOperationsStore {
     return {
       stt: { status: sttOnline ? 'GREEN' : 'RED', label: 'ASR Transcription Engine (Canary/Whisper)' },
       llm: { status: llmOnline ? 'GREEN' : 'YELLOW', label: 'LLM Multi-Provider Failover Engine', activeProvider: aiProviderStats.activeProvider },
-      pinecone: { status: pineconeOnline ? 'GREEN' : 'RED', label: 'Pinecone Vector Database', indexName: PINECONE_INDEX_NAME, ...pineconeDetails },
+      knowledgeStore: { status: 'GREEN', label: 'Local Store Knowledge Engine (Firestore Realtime Cache)' },
       tts: { status: ttsOnline ? 'GREEN' : 'RED', label: 'NVIDIA Chatterbox & WebSpeech TTS' },
       sms: { status: firebaseAuthOnline ? 'GREEN' : 'YELLOW', label: 'Firebase Phone Auth & SMS Gateway', configured: firebaseAuthOnline },
       imageGen: { status: 'GREEN', label: 'AI Image Engine (FLUX / Pollinations / Cloudinary)' }

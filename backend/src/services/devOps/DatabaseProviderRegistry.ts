@@ -18,7 +18,6 @@
 import { adminDb } from '../../config/firebase.js';
 import { pgPool } from '../../config/postgres.js';
 import { CloudflareR2Service } from '../storage/CloudflareR2Service.js';
-import { pineconeService } from '../ai/PineconeService.js';
 import { v2 as cloudinary } from 'cloudinary';
 import { SSRFValidator } from './SSRFValidator.js';
 
@@ -1204,67 +1203,7 @@ export class DatabaseProviderRegistry {
       canAutoDetect: true,
     });
 
-    // ── 15. Pinecone Vector DB ──────────────────────────────────────────────
-    this.register({
-      id: 'pinecone_vector',
-      name: 'Pinecone Vector DB',
-      category: 'vector',
-      tier: 'free_tier',
-      description: 'High-speed managed vector search index powering Olive Pizza AI semantic retrieval.',
-      whatItIs: 'Managed vector database purpose-built for fast similarity search and RAG knowledge retrieval at scale.',
-      whatOlivePizzaNeeds: {
-        summary: 'Requires Pinecone API Key, Index Name, and optional Cloud Environment.',
-        requiredItems: ['Pinecone API Key', 'Index Name (e.g. olive-pizza)'],
-        optionalItems: ['Cloud Environment / Host Override'],
-        monitoringPermissions: ['DescribeIndex and DescribeIndexStats API permissions'],
-        dataPermissions: ['Upsert, Query, and Delete vector record operations'],
-      },
-      documentation: {
-        whereToFindCredentials: [
-          'Pinecone Console → API Keys → Create API Key',
-          'Pinecone Console → Indexes → Select or Create Index (e.g. Dimension: 1024 / Metric: Cosine)',
-        ],
-        permissionsRequired: ['Pinecone API Key with Data Plane & Control Plane access'],
-        howConnectionIsTested: 'Calls Pinecone describeIndexStats to obtain vector count, dimension, and latency.',
-        consoleUrl: 'https://app.pinecone.io/',
-      },
-      sections: [
-        {
-          id: 'pinecone_config',
-          title: 'Pinecone Index Configuration',
-          fields: [
-            {
-              key: 'apiKey',
-              label: 'Pinecone API Key',
-              type: 'password',
-              placeholder: 'pcsk_••••••••',
-              required: true,
-              isSecret: true,
-              envMapping: 'PINECONE_API_KEY',
-            },
-            {
-              key: 'indexName',
-              label: 'Index Name',
-              type: 'text',
-              placeholder: 'olive-pizza',
-              defaultValue: 'olive-pizza',
-              required: true,
-              isSecret: false,
-              envMapping: 'PINECONE_INDEX_NAME',
-            },
-          ],
-        },
-      ],
-      capabilities: ['health', 'indexes', 'api', 'metrics'],
-      availableRoles: ['vector_embeddings'],
-      defaultRole: 'vector_embeddings',
-      requiresAuth: true,
-      authTypes: ['api_key'],
-      healthEndpointSupported: true,
-      metricSource: 'Pinecone Index Describe API',
-      isPreconfigured: true,
-      canAutoDetect: true,
-    });
+
 
     // ── 16. Custom / Additional Provider ────────────────────────────────────
     this.register({
@@ -1453,28 +1392,6 @@ export class DatabaseProviderRegistry {
       };
     }
 
-    if (providerId === 'pinecone_vector') {
-      try {
-        const status = await pineconeService.getStatus();
-        return {
-          success: true,
-          discovered: {
-            indexName: credentials.indexName || 'olive-pizza',
-            vectorCount: status.vectorCount ?? 'Not available from provider',
-            dimension: 1024,
-            metric: 'cosine',
-            detectedCapabilities: provider.capabilities,
-          },
-          message: 'Pinecone vector index configuration verified.',
-        };
-      } catch {
-        return {
-          success: true,
-          discovered: { indexName: credentials.indexName || 'olive-pizza' },
-          message: 'Pinecone index metadata loaded.',
-        };
-      }
-    }
 
     return {
       success: true,
@@ -1757,43 +1674,7 @@ export class DatabaseProviderRegistry {
       }
     }
 
-    // ── 6. Pinecone ─────────────────────────────────────────────────────────
-    if (providerId === 'pinecone_vector') {
-      try {
-        const status = await pineconeService.getStatus();
-        const latencyMs = Date.now() - start;
-        return {
-          status: status.ok ? 'HEALTHY' : 'UNREACHABLE',
-          latencyMs: Math.max(latencyMs, 50),
-          message: status.ok ? 'Connected to Pinecone Vector Index.' : (status.error || 'Connection failed'),
-          detectedCapabilities: status.ok ? provider.capabilities : [],
-          metricSource: provider.metricSource,
-          breakdown: {
-            network: true,
-            authentication: status.ok,
-            providerIdentity: true,
-            databaseAvailability: status.ok,
-            permissions: status.ok,
-          },
-          details: { vectorCount: status.vectorCount ?? 'Not available from provider' },
-        };
-      } catch (err: any) {
-        return {
-          status: 'UNREACHABLE',
-          latencyMs: Date.now() - start,
-          message: `Pinecone vector test failed: ${err.message}`,
-          detectedCapabilities: [],
-          metricSource: provider.metricSource,
-          breakdown: {
-            network: false,
-            authentication: false,
-            providerIdentity: true,
-            databaseAvailability: false,
-            permissions: false,
-          },
-        };
-      }
-    }
+
 
     // ── 7. Generic HTTP / REST / Database Endpoints ─────────────────────────
     if (targetEndpoint && (targetEndpoint.startsWith('http://') || targetEndpoint.startsWith('https://'))) {
