@@ -69,111 +69,182 @@ export class ApiSecurityMiddleware {
    * Defense-in-depth Parameter Tampering Filter.
    * Strips or rejects client-injected role, isAdmin, permissions, franchiseId, and branchId.
    */
+  /**
+   * Core parameter tampering validation and sanitization.
+   * Returns true if request should proceed; returns false if response was terminated (e.g. 403 Forbidden).
+   */
+  public static validateAndSanitize(req: AuthRequest, res: Response): boolean {
+    const user = req.user;
+    if (!user) {
+      return true;
+    }
+
+    const isGlobalOwner = Boolean(user.scope?.isGlobalOwner);
+
+    // 1. Check Body for Privilege Escalation attempts & IDOR tampering
+    if (req.body && typeof req.body === 'object') {
+      const sensitiveKeys = ['role', 'isAdmin', 'isOwner', 'permissions', 'customClaims'];
+      for (const key of sensitiveKeys) {
+        if (req.body[key] !== undefined && !isGlobalOwner) {
+          SecurityAuditService.logSecurityEvent({
+            type: 'PRIVILEGE_ESCALATION_ATTEMPT',
+            action: `injected_${key}_in_body`,
+            route: req.originalUrl,
+            method: req.method,
+            ip: req.ip,
+            uid: user.uid,
+            details: { injectedField: key, value: req.body[key] }
+          });
+
+          // Strip the dangerous property
+          delete req.body[key];
+        }
+      }
+
+      // Customer IDOR / BOLA Prevention: Never trust client-supplied userId/customerId in body over verified token UID
+      if (user.role === 'customer') {
+        if (req.body.userId && req.body.userId !== user.uid) {
+          SecurityAuditService.logSecurityEvent({
+            type: 'IDOR_ATTEMPT',
+            action: 'injected_foreign_userId_in_body',
+            route: req.originalUrl,
+            method: req.method,
+            ip: req.ip,
+            uid: user.uid,
+            details: { attemptedUserId: req.body.userId, verifiedUid: user.uid }
+          });
+          req.body.userId = user.uid; // Enforce server-side authoritative identity
+        }
+        if (req.body.customerId && req.body.customerId !== user.uid) {
+          SecurityAuditService.logSecurityEvent({
+            type: 'IDOR_ATTEMPT',
+            action: 'injected_foreign_customerId_in_body',
+            route: req.originalUrl,
+            method: req.method,
+            ip: req.ip,
+            uid: user.uid,
+            details: { attemptedCustomerId: req.body.customerId, verifiedUid: user.uid }
+          });
+          req.body.customerId = user.uid;
+        }
+      }
+
+      // Cross-Franchise Spoofing Defense
+      if (req.body.franchiseId && !isGlobalOwner && user.role !== 'customer') {
+        if (user.franchiseId && req.body.franchiseId !== user.franchiseId) {
+          SecurityAuditService.logSecurityEvent({
+            type: 'PARAMETER_TAMPERING_ATTEMPT',
+            action: 'injected_foreign_franchise_id',
+            route: req.originalUrl,
+            method: req.method,
+            ip: req.ip,
+            uid: user.uid,
+            franchiseId: user.franchiseId,
+            details: { attemptedFranchiseId: req.body.franchiseId }
+          });
+
+          res.status(403).json({
+            success: false,
+            error: 'Forbidden: You cannot specify a franchiseId outside your assigned franchise scope',
+            code: 'FORBIDDEN_FRANCHISE_TAMPERING'
+          });
+          return false;
+        }
+      }
+
+      // Cross-Branch Spoofing Defense for branch-scoped staff
+      if (req.body.branchId && user.scope?.isBranchScoped) {
+        const authorizedBranches = user.branchIds || (user.branchId ? [user.branchId] : []);
+        if (!authorizedBranches.includes(req.body.branchId)) {
+          SecurityAuditService.logSecurityEvent({
+            type: 'PARAMETER_TAMPERING_ATTEMPT',
+            action: 'injected_foreign_branch_id',
+            route: req.originalUrl,
+            method: req.method,
+            ip: req.ip,
+            uid: user.uid,
+            branchId: user.branchId,
+            details: { attemptedBranchId: req.body.branchId }
+          });
+
+          res.status(403).json({
+            success: false,
+            error: 'Forbidden: You cannot perform operations on a branch outside your authorized scope',
+            code: 'FORBIDDEN_BRANCH_TAMPERING'
+          });
+          return false;
+        }
+      }
+    }
+
+    // 2. Check Query Params for Cross-Scope Spoofing & Customer IDOR
+    if (req.query && typeof req.query === 'object') {
+      if (user.role === 'customer') {
+        if (req.query.userId && req.query.userId !== user.uid) {
+          req.query.userId = user.uid;
+        }
+        if (req.query.customerId && req.query.customerId !== user.uid) {
+          req.query.customerId = user.uid;
+        }
+      }
+
+      if (req.query.franchiseId && !isGlobalOwner && user.role !== 'customer') {
+        if (user.franchiseId && req.query.franchiseId !== user.franchiseId) {
+          res.status(403).json({
+            success: false,
+            error: 'Forbidden: Query franchiseId outside assigned scope',
+            code: 'FORBIDDEN_FRANCHISE_TAMPERING'
+          });
+          return false;
+        }
+      }
+
+      if (req.query.branchId && user.scope?.isBranchScoped) {
+        const authorizedBranches = user.branchIds || (user.branchId ? [user.branchId] : []);
+        if (!authorizedBranches.includes(req.query.branchId as string)) {
+          res.status(403).json({
+            success: false,
+            error: 'Forbidden: Query branchId outside assigned scope',
+            code: 'FORBIDDEN_BRANCH_TAMPERING'
+          });
+          return false;
+        }
+      }
+    }
+
+    // 3. Check Route Params for Scope Tampering
+    if (req.params && typeof req.params === 'object') {
+      if (req.params.franchiseId && !isGlobalOwner && user.role !== 'customer') {
+        if (user.franchiseId && req.params.franchiseId !== user.franchiseId) {
+          res.status(403).json({
+            success: false,
+            error: 'Forbidden: Route parameter franchiseId outside assigned scope',
+            code: 'FORBIDDEN_FRANCHISE_TAMPERING'
+          });
+          return false;
+        }
+      }
+
+      if (req.params.branchId && user.scope?.isBranchScoped) {
+        const authorizedBranches = user.branchIds || (user.branchId ? [user.branchId] : []);
+        if (!authorizedBranches.includes(req.params.branchId as string)) {
+          res.status(403).json({
+            success: false,
+            error: 'Forbidden: Route parameter branchId outside assigned scope',
+            code: 'FORBIDDEN_BRANCH_TAMPERING'
+          });
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
   public static rejectParameterTampering() {
     return (req: AuthRequest, res: Response, next: NextFunction): void => {
-      const user = req.user;
-      if (!user) {
-        next();
-        return;
-      }
-
-      const isGlobalOwner = Boolean(user.scope?.isGlobalOwner);
-
-      // Check Body for Privilege Escalation attempts
-      if (req.body && typeof req.body === 'object') {
-        const sensitiveKeys = ['role', 'isAdmin', 'isOwner', 'permissions'];
-        for (const key of sensitiveKeys) {
-          if (req.body[key] !== undefined && !isGlobalOwner) {
-            SecurityAuditService.logSecurityEvent({
-              type: 'PRIVILEGE_ESCALATION_ATTEMPT',
-              action: `injected_${key}_in_body`,
-              route: req.originalUrl,
-              method: req.method,
-              ip: req.ip,
-              uid: user.uid,
-              details: { injectedField: key, value: req.body[key] }
-            });
-
-            // Strip the dangerous property
-            delete req.body[key];
-          }
-        }
-
-        // Cross-Franchise Spoofing Defense
-        if (req.body.franchiseId && !isGlobalOwner && user.role !== 'customer') {
-          if (user.franchiseId && req.body.franchiseId !== user.franchiseId) {
-            SecurityAuditService.logSecurityEvent({
-              type: 'PARAMETER_TAMPERING_ATTEMPT',
-              action: 'injected_foreign_franchise_id',
-              route: req.originalUrl,
-              method: req.method,
-              ip: req.ip,
-              uid: user.uid,
-              franchiseId: user.franchiseId,
-              details: { attemptedFranchiseId: req.body.franchiseId }
-            });
-
-            res.status(403).json({
-              success: false,
-              error: 'Forbidden: You cannot specify a franchiseId outside your assigned franchise scope',
-              code: 'FORBIDDEN_FRANCHISE_TAMPERING'
-            });
-            return;
-          }
-        }
-
-        // Cross-Branch Spoofing Defense for branch-scoped staff
-        if (req.body.branchId && user.scope?.isBranchScoped) {
-          const authorizedBranches = user.branchIds || (user.branchId ? [user.branchId] : []);
-          if (!authorizedBranches.includes(req.body.branchId)) {
-            SecurityAuditService.logSecurityEvent({
-              type: 'PARAMETER_TAMPERING_ATTEMPT',
-              action: 'injected_foreign_branch_id',
-              route: req.originalUrl,
-              method: req.method,
-              ip: req.ip,
-              uid: user.uid,
-              branchId: user.branchId,
-              details: { attemptedBranchId: req.body.branchId }
-            });
-
-            res.status(403).json({
-              success: false,
-              error: 'Forbidden: You cannot perform operations on a branch outside your authorized scope',
-              code: 'FORBIDDEN_BRANCH_TAMPERING'
-            });
-            return;
-          }
-        }
-      }
-
-      // Check Query Params for Cross-Scope Spoofing
-      if (req.query && typeof req.query === 'object') {
-        if (req.query.franchiseId && !isGlobalOwner && user.role !== 'customer') {
-          if (user.franchiseId && req.query.franchiseId !== user.franchiseId) {
-            res.status(403).json({
-              success: false,
-              error: 'Forbidden: Query franchiseId outside assigned scope',
-              code: 'FORBIDDEN_FRANCHISE_TAMPERING'
-            });
-            return;
-          }
-        }
-
-        if (req.query.branchId && user.scope?.isBranchScoped) {
-          const authorizedBranches = user.branchIds || (user.branchId ? [user.branchId] : []);
-          if (!authorizedBranches.includes(req.query.branchId as string)) {
-            res.status(403).json({
-              success: false,
-              error: 'Forbidden: Query branchId outside assigned scope',
-              code: 'FORBIDDEN_BRANCH_TAMPERING'
-            });
-            return;
-          }
-        }
-      }
-
-      next();
+      const ok = ApiSecurityMiddleware.validateAndSanitize(req, res);
+      if (ok) next();
     };
   }
 

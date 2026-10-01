@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import UniversalMap3D, { LatLng } from './UniversalMap3D';
+import { fetchApi } from '../../lib/config';
 
 interface LocationPicker3DProps {
   initialCenter?: LatLng;
@@ -30,9 +31,9 @@ export default function LocationPicker3D({ initialCenter, onChange, className }:
   const performGeocode = async (loc: LatLng) => {
     setIsGeocoding(true);
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${loc.lat}&lon=${loc.lng}`);
+      const res = await fetchApi(`/api/location/reverse-geocode?lat=${loc.lat}&lng=${loc.lng}`);
       const data = await res.json();
-      const address = data?.display_name || '';
+      const address = data?.location?.displayName || data?.display_name || '';
       onChange?.({ lat: loc.lat, lng: loc.lng, address });
     } catch (err) {
       onChange?.({ lat: loc.lat, lng: loc.lng, address: '' });

@@ -17,6 +17,7 @@
 
 import { Capacitor } from '@capacitor/core';
 import { Geolocation, type Position } from '@capacitor/geolocation';
+import { fetchApi } from './config';
 
 export interface LocationData {
   lat: number;
@@ -289,18 +290,19 @@ export class LocationManager {
 
   private static async _reverseGeocode(lat: number, lng: number, accuracy?: number): Promise<LocationData> {
     try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`,
+      const response = await fetchApi(
+        `/api/location/reverse-geocode?lat=${lat}&lng=${lng}`,
         { signal: AbortSignal.timeout(5000) }
       );
       if (!response.ok) throw new Error('Geocoding failed');
       const data = await response.json();
+      const loc = data?.location || data;
       return {
         lat,
         lng,
-        fullAddress: data.display_name || 'Current Location',
-        city: data.address?.city || data.address?.town || data.address?.village || '',
-        pincode: data.address?.postcode || '',
+        fullAddress: loc.displayName || loc.display_name || 'Current Location',
+        city: loc.city || loc.road || loc.addressDetails?.city || loc.addressDetails?.town || '',
+        pincode: loc.postcode || loc.addressDetails?.postcode || '',
         accuracy,
       };
     } catch {

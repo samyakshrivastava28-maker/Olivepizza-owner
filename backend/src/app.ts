@@ -201,7 +201,6 @@ app.use(cors({
 // Allow up to 50MB JSON Body Payload for high-resolution AI/pasted image uploads
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(ApiSecurityMiddleware.rejectParameterTampering());
 
 // API Performance & Correlation Tracker
 app.use((req, res, next) => {

@@ -53,7 +53,15 @@ export class MultiProjectSecurityScanner {
     const scanFilesRecursively = (dir: string, fileList: string[] = []): string[] => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'dist' || entry.name === 'build') {
+        if (
+          entry.name === 'node_modules' ||
+          entry.name === '.git' ||
+          entry.name === 'dist' ||
+          entry.name === 'build' ||
+          entry.name === 'android' ||
+          entry.name === 'ios' ||
+          entry.name === '.vite'
+        ) {
           continue;
         }
         const fullPath = path.join(dir, entry.name);
@@ -143,15 +151,15 @@ export class MultiProjectSecurityScanner {
         }
       }
     } else {
-      // Frontend Security Audit: Check for direct third-party calls or exposed secret keys
+      // Frontend Security Audit: Check for direct third-party geocoding calls or exposed secret keys
       for (const file of files) {
         const content = fs.readFileSync(file, 'utf-8');
-        if (content.includes('https://nominatim.openstreetmap.org/search')) {
+        if (content.includes('nominatim.openstreetmap.org')) {
           result.dataExposureRisks++;
-          result.findings.push(`[Nominatim Public Search Found] ${path.basename(file)}`);
+          result.findings.push(`[STATIC CHECK FAIL] Direct Client Nominatim Call Found: ${path.basename(file)}`);
         }
         if (content.includes('https://photon.komoot.io/api') && !file.includes('node_modules')) {
-          result.findings.push(`[Direct Third-Party Photon Call] ${path.basename(file)}`);
+          result.findings.push(`[STATIC CHECK NOTICE] Direct Third-Party Photon Call: ${path.basename(file)}`);
         }
       }
     }
@@ -165,7 +173,8 @@ export class MultiProjectSecurityScanner {
 
   public static runAudit() {
     console.log('========================================================================');
-    console.log('         OLIVE PIZZA — MULTI-PROJECT UNIFIED API SECURITY AUDIT         ');
+    console.log('         OLIVE PIZZA — MULTI-PROJECT STATIC API SECURITY SCANNER        ');
+    console.log('         [STATIC CODEBASE & AST PATTERN MATCHING AUDIT]                 ');
     console.log('========================================================================\n');
 
     const projects = [
@@ -185,24 +194,25 @@ export class MultiProjectSecurityScanner {
 
       console.log(`PROJECT: ${res.projectName}`);
       console.log(`  Source Path: ${res.repoPath}`);
-      console.log(`  Files Scanned: ${res.filesScanned}`);
+      console.log(`  [STATIC CHECK] Files Scanned: ${res.filesScanned}`);
       if (proj.isBackend) {
-        console.log(`  Routes Scanned: ${res.routesScanned}`);
-        console.log(`  Authentication Coverage: ${res.authCoverage}%`);
-        console.log(`  Auth Failures: ${res.authFailures}`);
-        console.log(`  Authorization Failures: ${res.authorizationFailures}`);
-        console.log(`  IDOR Risks: ${res.idorRisks}`);
-        console.log(`  Data Exposure Risks: ${res.dataExposureRisks}`);
-        console.log(`  Parameter Tampering Defense: ${res.tamperingProtectionActive ? 'ACTIVE' : 'INACTIVE'}`);
+        console.log(`  [STATIC CHECK] Routes Scanned: ${res.routesScanned}`);
+        console.log(`  [STATIC CHECK] Authentication Middleware Coverage: ${res.authCoverage}%`);
+        console.log(`  [STATIC CHECK] Unauthenticated Route Count: ${res.authFailures}`);
+        console.log(`  [STATIC CHECK] IDOR Risk Pattern Matches: ${res.idorRisks}`);
+        console.log(`  [STATIC CHECK] Raw DB Document Returns: ${res.dataExposureRisks}`);
+        console.log(`  [STATIC CHECK] Parameter Tampering Defense Hook: ${res.tamperingProtectionActive ? 'INSTANTIATED' : 'MISSING'}`);
+        console.log(`  [REQUIRES_RUNTIME_TEST] Dynamic Token Verification, IDOR 403 Enforcement & Provider Aggregation:`);
+        console.log(`    → Validated via backend/tests/security_test_suite.ts`);
       } else {
-        console.log(`  Client Security Boundary: ENFORCED VIA CENTRAL BACKEND`);
-        console.log(`  Data Exposure Risks: ${res.dataExposureRisks}`);
+        console.log(`  [STATIC CHECK] Direct Nominatim Violations: ${res.dataExposureRisks}`);
+        console.log(`  [STATIC CHECK] Client Architecture: Single Central Backend Routing`);
       }
       if (res.findings.length > 0) {
         console.log(`  Findings/Notices:`);
         res.findings.slice(0, 5).forEach((f) => console.log(`    - ${f}`));
       } else {
-        console.log(`  Status: PASS (0 Critical Findings)`);
+        console.log(`  Status: [STATIC CHECK PASS] (0 Critical Static Findings)`);
       }
       console.log('------------------------------------------------------------------------');
     }

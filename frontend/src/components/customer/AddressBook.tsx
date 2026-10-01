@@ -7,6 +7,7 @@ import PizzaLoader from '../ui/PizzaLoader';
 import toast from 'react-hot-toast';
 import { LocationManager, LocationData } from '../../lib/permissions';
 import { useAuthStore } from '../../lib/store';
+import { fetchApi } from '../../lib/config';
 
 // Reuse Leaflet map from SetupLocation but dynamically import to save bundle
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents } from 'react-leaflet';
@@ -79,15 +80,16 @@ export default function AddressBook() {
 
   const reverseGeocode = async (lat: number, lng: number) => {
     try {
-      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`);
+      const res = await fetchApi(`/api/location/reverse-geocode?lat=${lat}&lng=${lng}`);
       const data = await res.json();
-      if (data && data.address) {
-        const foundCity = data.address.city || data.address.town || data.address.village || "";
-        const foundPincode = data.address.postcode || "";
+      const loc = data?.location || data;
+      if (loc) {
+        const foundCity = loc.city || loc.addressDetails?.city || loc.addressDetails?.town || loc.addressDetails?.village || "";
+        const foundPincode = loc.postcode || loc.addressDetails?.postcode || "";
         
         setNewAddress(prev => ({
           ...prev,
-          addressLine: data.display_name,
+          addressLine: loc.displayName || loc.display_name || prev.addressLine,
           city: foundCity || 'Rajnandgaon',
           pincode: foundPincode
         }));

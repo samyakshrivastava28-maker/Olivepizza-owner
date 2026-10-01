@@ -4,6 +4,8 @@
  * parameter tampering, data minimization, and parallel location search.
  */
 
+import fs from 'fs';
+import path from 'path';
 import { MultiProviderGeocodeService } from '../src/services/location/MultiProviderGeocodeService.js';
 import { CustomerOrderingContextService } from '../src/services/order/CustomerOrderingContextService.js';
 import {
@@ -306,6 +308,146 @@ export async function runSecurityTestSuite(): Promise<TestResult[]> {
 
     if (!blocked) {
       throw new Error('Deleted franchise was not blocked!');
+    }
+  });
+
+  // Test 10: Zero Direct Client Nominatim Calls in Any Frontend Repo
+  await runTest('Static Integrity: Zero Direct Nominatim Calls in Any Client Project', () => {
+    const frontendDirs = [
+      'c:\\Users\\RYZEN\\Downloads\\olive-pizza\\frontend\\src',
+      'c:\\Users\\RYZEN\\Downloads\\olive-pizza-owner\\frontend\\src',
+      'c:\\Users\\RYZEN\\Downloads\\Olive Pizza restaurant manager\\src',
+      'c:\\Users\\RYZEN\\Downloads\\olive-pizza-delivery\\src',
+      'c:\\Users\\RYZEN\\Downloads\\olive-pizza-pos\\src',
+      'c:\\Users\\RYZEN\\Downloads\\olive-pizza-franchise\\src'
+    ];
+
+    const violations: string[] = [];
+
+    const scan = (dir: string) => {
+      if (!fs.existsSync(dir)) return;
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory() && e.name !== 'node_modules') scan(full);
+        else if (e.isFile() && (e.name.endsWith('.ts') || e.name.endsWith('.tsx') || e.name.endsWith('.js') || e.name.endsWith('.jsx'))) {
+          const content = fs.readFileSync(full, 'utf-8');
+          if (content.includes('nominatim.openstreetmap.org')) {
+            violations.push(full);
+          }
+        }
+      }
+    };
+
+    frontendDirs.forEach(scan);
+
+    if (violations.length > 0) {
+      throw new Error(`Direct Nominatim calls detected in frontend files:\n${violations.join('\n')}`);
+    }
+  });
+
+  // Test 11: Parameter Tampering — Customer Injected userId Forced to Auth UID
+  await runTest('Parameter Tampering: Injected Foreign userId in Body/Query Overwritten with Auth UID', () => {
+    const fakeCustomerReq: any = {
+      user: {
+        uid: 'cust_real_123',
+        role: 'customer',
+        scope: { isGlobalOwner: false }
+      },
+      body: {
+        userId: 'cust_victim_456',
+        customerId: 'cust_victim_456',
+        item: 'Pizza'
+      },
+      query: {
+        userId: 'cust_victim_456'
+      },
+      params: {}
+    };
+
+    const fakeRes: any = {
+      status: (code: number) => ({ json: (d: any) => ({ code, d }) })
+    };
+
+    const ok = ApiSecurityMiddleware.validateAndSanitize(fakeCustomerReq, fakeRes);
+    if (!ok) throw new Error('Expected validateAndSanitize to pass for customer');
+    if (fakeCustomerReq.body.userId !== 'cust_real_123') {
+      throw new Error(`Expected body.userId to be overridden to cust_real_123, got ${fakeCustomerReq.body.userId}`);
+    }
+    if (fakeCustomerReq.body.customerId !== 'cust_real_123') {
+      throw new Error(`Expected body.customerId to be overridden to cust_real_123, got ${fakeCustomerReq.body.customerId}`);
+    }
+    if (fakeCustomerReq.query.userId !== 'cust_real_123') {
+      throw new Error(`Expected query.userId to be overridden to cust_real_123, got ${fakeCustomerReq.query.userId}`);
+    }
+  });
+
+  // Test 12: Route Parameter Scope Tampering — Foreign :branchId Returns 403
+  await runTest('Scope Tampering: Staff Route Parameter :branchId Mismatch Returns 403', () => {
+    const fakeStaffReq: any = {
+      user: {
+        uid: 'staff_888',
+        role: 'restaurant_manager',
+        branchId: 'branch_allowed',
+        branchIds: ['branch_allowed'],
+        scope: { isBranchScoped: true, isGlobalOwner: false }
+      },
+      body: {},
+      query: {},
+      params: {
+        branchId: 'branch_forbidden'
+      }
+    };
+
+    let statusCode = 0;
+    let responseData: any = null;
+    const fakeRes: any = {
+      status: (code: number) => {
+        statusCode = code;
+        return {
+          json: (d: any) => { responseData = d; }
+        };
+      }
+    };
+
+    const ok = ApiSecurityMiddleware.validateAndSanitize(fakeStaffReq, fakeRes);
+    if (ok) throw new Error('Expected validateAndSanitize to return false on branch mismatch');
+    if (statusCode !== 403 || responseData?.code !== 'FORBIDDEN_BRANCH_TAMPERING') {
+      throw new Error(`Expected 403 FORBIDDEN_BRANCH_TAMPERING, got status ${statusCode}`);
+    }
+  });
+
+  // Test 13: Scope Tampering: Foreign :franchiseId Mismatch Returns 403
+  await runTest('Scope Tampering: Staff Route Parameter :franchiseId Mismatch Returns 403', () => {
+    const fakeStaffReq: any = {
+      user: {
+        uid: 'staff_999',
+        role: 'franchise_manager',
+        franchiseId: 'fra_allowed',
+        scope: { isGlobalOwner: false }
+      },
+      body: {},
+      query: {},
+      params: {
+        franchiseId: 'fra_forbidden'
+      }
+    };
+
+    let statusCode = 0;
+    let responseData: any = null;
+    const fakeRes: any = {
+      status: (code: number) => {
+        statusCode = code;
+        return {
+          json: (d: any) => { responseData = d; }
+        };
+      }
+    };
+
+    const ok = ApiSecurityMiddleware.validateAndSanitize(fakeStaffReq, fakeRes);
+    if (ok) throw new Error('Expected validateAndSanitize to return false on franchise mismatch');
+    if (statusCode !== 403 || responseData?.code !== 'FORBIDDEN_FRANCHISE_TAMPERING') {
+      throw new Error(`Expected 403 FORBIDDEN_FRANCHISE_TAMPERING, got status ${statusCode}`);
     }
   });
 

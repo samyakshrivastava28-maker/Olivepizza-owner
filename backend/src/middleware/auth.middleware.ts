@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { adminAuth, adminDb } from '../config/firebase.js';
 import { FranchiseScopeService, ScopeContext } from '../services/franchise/FranchiseScopeService.js';
+import { ApiSecurityMiddleware } from '../security/ApiSecurityMiddleware.js';
 
 export async function logSecurityEventServer(params: {
   action: string;
@@ -184,6 +185,10 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
       scope
     };
     
+    // Immediately execute parameter tampering & privilege escalation defenses upon authentication
+    const passed = ApiSecurityMiddleware.validateAndSanitize(req, res);
+    if (!passed) return;
+
     next();
   } catch (error: any) {
     console.error('Token verification error:', error);

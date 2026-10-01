@@ -4,6 +4,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { Search, MapPin, Navigation, Loader2 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { fetchApi } from '../../lib/config';
 
 // Fix for default Leaflet icon in React
 const customIcon = L.divIcon({
@@ -60,22 +61,16 @@ export const FranchiseLocationPicker: React.FC<LocationPickerProps> = ({
 
     setIsSearching(true);
     try {
-      // Free OpenStreetMap Nominatim Geocoding API (India bounded)
-      const url = 'https://nominatim.openstreetmap.org/search?format=json&q=' + encodeURIComponent(searchQuery.trim()) + '&countrycodes=in&limit=1';
-      const res = await fetch(url, {
-        headers: {
-          'Accept-Language': 'en'
-        }
-      });
+      const res = await fetchApi('/api/location/search-parallel?q=' + encodeURIComponent(searchQuery.trim()) + '&limit=1');
       const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
-        const item = data[0];
-        const newLat = parseFloat(item.lat);
-        const newLng = parseFloat(item.lon);
-        onChange(newLat, newLng, item.display_name);
-        toast.success('Found: ' + item.display_name.split(',').slice(0, 2).join(','));
+      if (data && Array.isArray(data.results) && data.results.length > 0) {
+        const item = data.results[0];
+        const newLat = Number(item.latitude);
+        const newLng = Number(item.longitude);
+        onChange(newLat, newLng, item.formattedAddress || item.name);
+        toast.success('Found: ' + (item.name || item.formattedAddress.split(',')[0]));
       } else {
-        toast.error('Location not found in OpenStreetMap. Try specifying city or landmark.');
+        toast.error('Location not found. Try specifying city or landmark.');
       }
     } catch (err: any) {
       toast.error('Failed to search location: ' + err.message);
