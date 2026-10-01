@@ -4,6 +4,7 @@ import NodeCache from 'node-cache';
 import { adminDb } from '../config/firebase.js';
 import { verifyToken, AuthRequest } from '../middleware/auth.middleware.js';
 import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
+import { MultiProviderGeocodeService } from '../services/location/MultiProviderGeocodeService.js';
 import { publicLimiter, userLimiter } from '../config/security.config.js';
 
 const router = Router();
@@ -75,11 +76,13 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
     const franchisesSnap = await adminDb.collection('franchises').get();
     for (const doc of franchisesSnap.docs) {
       const data = doc.data();
+      const statusLower = String(data.status || '').toLowerCase();
       if (
         data.isActive === false ||
-        data.status === 'DEACTIVATED' ||
-        data.status === 'SUSPENDED' ||
-        data.status === 'PLANNED'
+        statusLower === 'deleted' ||
+        statusLower === 'deactivated' ||
+        statusLower === 'suspended' ||
+        statusLower === 'planned'
       ) {
         continue;
       }
@@ -170,11 +173,13 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
       const entitiesSnap = await adminDb.collection('franchise_entities').get();
       for (const eDoc of entitiesSnap.docs) {
         const eData = eDoc.data();
+        const eStatusLower = String(eData.status || '').toLowerCase();
         if (
           eData.isActive === false ||
-          eData.status === 'DEACTIVATED' ||
-          eData.status === 'SUSPENDED' ||
-          eData.status === 'PLANNED'
+          eStatusLower === 'deleted' ||
+          eStatusLower === 'deactivated' ||
+          eStatusLower === 'suspended' ||
+          eStatusLower === 'planned'
         ) {
           continue;
         }
@@ -323,11 +328,13 @@ router.get('/popular-locations', async (req: Request, res: Response): Promise<vo
       const cityMap = new Map<string, any>();
       for (const doc of franchisesSnap.docs) {
         const data = doc.data();
+        const dataStatus = String(data.status || '').toLowerCase();
         if (
           data.isActive === false ||
-          data.status === 'DEACTIVATED' ||
-          data.status === 'SUSPENDED' ||
-          data.status === 'PLANNED'
+          dataStatus === 'deleted' ||
+          dataStatus === 'deactivated' ||
+          dataStatus === 'suspended' ||
+          dataStatus === 'planned'
         ) {
           continue;
         }
@@ -374,252 +381,91 @@ router.get('/popular-locations', async (req: Request, res: Response): Promise<vo
 });
 
 // ============================================================================
-// 2. GET /api/location/geocode
-// Nominatim-compliant geocoding proxy with strict city bounding, rate-limiting & attribution
+// 2. GET /api/location/search-parallel
+// Multi-provider parallel geocoding (Mapbox, Geoapify, Photon, Nominatim, Mappls)
 // ============================================================================
-router.get('/geocode', publicLimiter, async (req: Request, res: Response): Promise<void> => {
+router.get('/search-parallel', publicLimiter, async (req: Request, res: Response): Promise<void> => {
   try {
     const query = String(req.query.q || req.query.query || '').trim();
     const city = String(req.query.city || '').trim();
+    const lat = req.query.lat != null ? parseFloat(String(req.query.lat)) : undefined;
+    const lng = req.query.lng != null ? parseFloat(String(req.query.lng)) : undefined;
+    const limit = req.query.limit != null ? parseInt(String(req.query.limit), 10) : 10;
 
     if (!query || query.length < 2) {
       res.status(400).json({ success: false, error: 'Search query must be at least 2 characters.' });
       return;
     }
 
-    const cacheKey = `geo_${city.toLowerCase()}_${query.toLowerCase()}`;
-    const cached = geocodeCache.get<any[]>(cacheKey);
-    if (cached) {
-      res.json({ success: true, results: cached, source: 'cache' });
+    const response = await MultiProviderGeocodeService.searchParallel({
+      query,
+      city,
+      lat: isNaN(lat!) ? undefined : lat,
+      lng: isNaN(lng!) ? undefined : lng,
+      limit,
+    });
+
+    res.json(response);
+  } catch (error: any) {
+    console.error('[LocationRoutes] Parallel search error:', error?.message);
+    res.status(500).json({ success: false, error: 'Parallel location search failed.' });
+  }
+});
+
+// ============================================================================
+// 2b. GET /api/location/geocode
+// Authoritative parallel multi-provider search with backward-compatible format
+// ============================================================================
+router.get('/geocode', publicLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const query = String(req.query.q || req.query.query || '').trim();
+    const city = String(req.query.city || '').trim();
+    const lat = req.query.lat != null ? parseFloat(String(req.query.lat)) : undefined;
+    const lng = req.query.lng != null ? parseFloat(String(req.query.lng)) : undefined;
+
+    if (!query || query.length < 2) {
+      res.status(400).json({ success: false, error: 'Search query must be at least 2 characters.' });
       return;
     }
 
-    const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
-    await throttleNominatim(clientIp);
+    const parallelResponse = await MultiProviderGeocodeService.searchParallel({
+      query,
+      city,
+      lat: isNaN(lat!) ? undefined : lat,
+      lng: isNaN(lng!) ? undefined : lng,
+      limit: 10,
+    });
 
-    // Look up city details from cache to retrieve its viewbox, state & center
-    let cityViewbox: number[] | null = null;
-    let cityState = '';
-    let cityCenter: { lat: number; lng: number } | null = null;
-    let cityRadius = 15;
-    const cachedCities = citiesCache.get<any[]>('serviceable_cities');
-    if (cachedCities && city) {
-      const match = cachedCities.find((c: any) => c.city.toLowerCase() === city.toLowerCase());
-      if (match) {
-        cityViewbox = match.viewbox;
-        cityState = match.state || '';
-        cityCenter = match.center;
-        cityRadius = match.deliveryRadiusKm || 15;
-      }
-    }
-
-    let results: any[] = [];
-
-    // 1. Primary: Photon (Fast, autocomplete-optimized OpenStreetMap search with lat/lon bias)
-    try {
-      const photonParams: Record<string, any> = {
-        q: `${query} ${city}`.trim(),
-        limit: 10,
-      };
-      if (cityCenter) {
-        photonParams.lat = cityCenter.lat;
-        photonParams.lon = cityCenter.lng;
-      }
-
-      const photonRes = await axios.get('https://photon.komoot.io/api/', {
-        params: photonParams,
-        timeout: 4000,
-      }).catch(() => null);
-
-      if (photonRes?.data?.features && Array.isArray(photonRes.data.features) && photonRes.data.features.length > 0) {
-        const filteredFeatures = photonRes.data.features.filter((f: any) => {
-          const props = f.properties || {};
-          const coords = f.geometry?.coordinates || [];
-          if (coords.length < 2) return false;
-          const [lon, lat] = coords;
-
-          // If cityCenter is known, ensure location is within reasonable vicinity (max cityRadius + 15km)
-          if (cityCenter) {
-            const dist = CustomerOrderingContextService.haversineDistanceKm(cityCenter.lat, cityCenter.lng, lat, lon);
-            if (dist > (cityRadius + 15)) return false;
-          }
-
-          // Check city or county text if present
-          if (city) {
-            const fCity = (props.city || props.county || props.district || props.locality || '').toLowerCase();
-            if (fCity && !fCity.includes(city.toLowerCase()) && !city.toLowerCase().includes(fCity)) {
-              if (cityCenter) {
-                const dist = CustomerOrderingContextService.haversineDistanceKm(cityCenter.lat, cityCenter.lng, lat, lon);
-                if (dist > cityRadius) return false;
-              }
-            }
-          }
-          return true;
-        });
-
-        if (filteredFeatures.length > 0) {
-          results = await Promise.all(
-            filteredFeatures.slice(0, 8).map(async (f: any) => {
-              const props = f.properties || {};
-              const coords = f.geometry?.coordinates || [0, 0];
-              const lng = coords[0];
-              const lat = coords[1];
-
-              const title = props.name || props.street || query;
-              const subtitleParts = [
-                props.street,
-                props.locality || props.district,
-                props.city || city,
-                props.state || cityState,
-                props.country || 'India',
-              ].filter(Boolean).filter((val, idx, arr) => arr.indexOf(val) === idx);
-              const subtitle = subtitleParts.join(', ');
-              const displayName = `${title}, ${subtitle}`;
-
-              let isServiceable = false;
-              try {
-                const check = await CustomerOrderingContextService.resolveOrderingContext({
-                  customerId: 'guest',
-                  lat,
-                  lng,
-                });
-                isServiceable = check.isServiceable;
-              } catch (e) {}
-
-              return {
-                placeId: String(props.osm_id || `${lat}_${lng}`),
-                title,
-                subtitle,
-                displayName,
-                lat,
-                lng,
-                type: props.osm_value || props.type || 'place',
-                isServiceable,
-                address: {
-                  road: props.street || '',
-                  suburb: props.locality || props.district || '',
-                  city: props.city || city,
-                  state: props.state || cityState || '',
-                  postcode: props.postcode || '',
-                  country: props.country || 'India',
-                },
-              };
-            })
-          );
-        }
-      }
-    } catch (photonErr) {
-      // Fall through to Nominatim
-    }
-
-    // 2. Secondary Fallback: Nominatim
-    if (results.length === 0) {
-      // City-constrained search query
-      const searchQuery = city
-        ? (cityState ? `${query}, ${city}, ${cityState}, India` : `${query}, ${city}, India`)
-        : `${query}, India`;
-
-      const nominatimUrl = 'https://nominatim.openstreetmap.org/search';
-      const params: Record<string, any> = {
-        q: searchQuery,
-        format: 'json',
-        addressdetails: 1,
-        limit: 8,
-        countrycodes: 'in',
-      };
-
-      if (cityViewbox && cityViewbox.length === 4) {
-        params.viewbox = cityViewbox.join(',');
-        params.bounded = 1;
-      }
-
-      let response = await axios.get(nominatimUrl, {
-        params,
-        headers: {
-          'User-Agent': 'OlivePizzaApp/1.0 (contact: olivepizzarjn@gmail.com; platform: customer-web)',
-          'Accept-Language': 'en-IN,en;q=0.9',
-        },
-        timeout: 8000,
-      }).catch(() => null);
-
-      if (!response || !Array.isArray(response.data) || response.data.length === 0) {
-        const fallbackParams: Record<string, any> = {
-          q: city ? `${query}, ${city}` : query,
-          format: 'json',
-          addressdetails: 1,
-          limit: 8,
-          countrycodes: 'in',
-        };
-        if (cityViewbox) {
-          fallbackParams.viewbox = cityViewbox.join(',');
-        }
-        response = await axios.get(nominatimUrl, {
-          params: fallbackParams,
-          headers: {
-            'User-Agent': 'OlivePizzaApp/1.0 (contact: olivepizzarjn@gmail.com; platform: customer-web)',
-            'Accept-Language': 'en-IN,en;q=0.9',
-          },
-          timeout: 8000,
-        }).catch(() => null);
-      }
-
-      const rawList = Array.isArray(response?.data) ? response.data : [];
-
-      results = await Promise.all(
-        rawList.map(async (item: any) => {
-          const lat = parseFloat(item.lat);
-          const lng = parseFloat(item.lon);
-          const addr = item.address || {};
-
-          const title = addr.amenity || addr.shop || addr.building || addr.road || addr.suburb || item.name || query;
-          const subtitle = [
-            addr.suburb || addr.neighbourhood || addr.road,
-            addr.city || addr.town || addr.village || city,
-            addr.state || cityState,
-            addr.country || 'India',
-          ]
-            .filter(Boolean)
-            .filter((val, idx, arr) => arr.indexOf(val) === idx)
-            .join(', ');
-
-          let isServiceable = false;
-          try {
-            const check = await CustomerOrderingContextService.resolveOrderingContext({
-              customerId: 'guest',
-              lat,
-              lng,
-            });
-            isServiceable = check.isServiceable;
-          } catch (e) {}
-
-          return {
-            placeId: String(item.place_id),
-            title,
-            subtitle,
-            displayName: item.display_name,
-            lat,
-            lng,
-            type: item.type,
-            isServiceable,
-            address: {
-              road: addr.road || addr.pedestrian || '',
-              suburb: addr.suburb || addr.neighbourhood || '',
-              city: addr.city || addr.town || addr.village || city,
-              state: addr.state || cityState || '',
-              postcode: addr.postcode || '',
-              country: addr.country || 'India',
-            },
-          };
-        })
-      );
-    }
-
-    geocodeCache.set(cacheKey, results);
+    // Format for full compatibility while providing rich multi-provider data
+    const formattedResults = parallelResponse.results.map((r) => ({
+      placeId: r.id,
+      title: r.name,
+      subtitle: r.formattedAddress.replace(r.name, '').replace(/^,\s*/, '') || r.formattedAddress,
+      displayName: r.formattedAddress,
+      lat: r.latitude,
+      lng: r.longitude,
+      type: r.type || 'place',
+      isServiceable: r.isServiceable ?? false,
+      serviceabilityMessage: r.serviceabilityMessage,
+      matchedProviders: r.matchedProviders,
+      providerCount: r.providerCount,
+      relevance: r.relevance,
+      address: r.address || {
+        road: '',
+        suburb: r.district || '',
+        city: r.city || city,
+        state: r.state || '',
+        postcode: r.pincode || '',
+        country: r.country || 'India',
+      },
+    }));
 
     res.json({
       success: true,
-      results,
-      attribution: '© OpenStreetMap contributors (ODbL)',
+      results: formattedResults,
+      providersQueried: parallelResponse.providersQueried,
+      activeProviders: parallelResponse.activeProviders,
+      attribution: 'Multi-Provider Search (Mapbox, Geoapify, OpenStreetMap, Nominatim, Mappls)',
     });
   } catch (error: any) {
     console.error('[LocationRoutes] Geocode proxy error:', error?.message);

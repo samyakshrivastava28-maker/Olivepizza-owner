@@ -69,11 +69,13 @@ export class CustomerOrderingContextService {
 
     for (const bDoc of branchesSnap.docs) {
       const bData = bDoc.data();
+      const bStatus = String(bData.status || '').toLowerCase();
       if (
         bData.isActive === false ||
-        bData.status === 'DEACTIVATED' ||
-        bData.status === 'SUSPENDED' ||
-        bData.status === 'PLANNED'
+        bStatus === 'deleted' ||
+        bStatus === 'deactivated' ||
+        bStatus === 'suspended' ||
+        bStatus === 'planned'
       ) {
         continue;
       }
@@ -108,11 +110,13 @@ export class CustomerOrderingContextService {
       const entitiesSnap = await adminDb.collection('franchise_entities').get();
       for (const eDoc of entitiesSnap.docs) {
         const eData = eDoc.data();
+        const eStatus = String(eData.status || '').toLowerCase();
         if (
           eData.isActive === false ||
-          eData.status === 'DEACTIVATED' ||
-          eData.status === 'SUSPENDED' ||
-          eData.status === 'PLANNED'
+          eStatus === 'deleted' ||
+          eStatus === 'deactivated' ||
+          eStatus === 'suspended' ||
+          eStatus === 'planned'
         ) {
           continue;
         }
