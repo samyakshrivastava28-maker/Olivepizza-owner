@@ -28,27 +28,55 @@ const requireOwnerOrAdmin = (req: AuthRequest, res: Response, next: any) => {
 };
 
 /**
- * GET /api/reports/pdf/:id
- * Streams the PDF report directly (from Cloudflare R2 or local disk storage).
- * STRICT SECURITY: Requires authentication and scope authorization.
+ * Handles PDF streaming (View inline or Download attachment).
+ * STRICT SECURITY: Validates HMAC signed link OR user scope authorization.
  */
-router.get('/pdf/:id', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+async function handleStreamPdf(req: AuthRequest, res: Response, forceDownload?: boolean): Promise<void> {
   try {
-    if (!req.user) {
-      res.status(401).json({ error: 'Unauthorized: Authentication required.' });
-      return;
+    const { id } = req.params;
+    const download = forceDownload ?? (req.query.download === 'true');
+
+    // 1. Signature Check (HMAC deep links from owner emails)
+    const sig = req.query.sig as string;
+    const trackingSecret = process.env.TRACKING_TOKEN_SECRET || 'olive-tracking-hmac-secret-change-in-prod-32chars';
+    const expectedSig = crypto.createHmac('sha256', trackingSecret).update(id).digest('hex');
+    const isSignedLink = Boolean(sig && sig === expectedSig);
+
+    if (!isSignedLink) {
+      // Must authenticate via token
+      let user = req.user;
+      if (!user) {
+        const authHeader = req.headers.authorization;
+        const token = authHeader?.startsWith('Bearer ') ? authHeader.split('Bearer ')[1] : (req.query.token as string);
+        if (token) {
+          try {
+            const { adminAuth } = await import('../config/firebase.js');
+            const decoded: any = await adminAuth.verifyIdToken(token);
+            user = {
+              uid: decoded.uid,
+              email: decoded.email,
+              role: decoded.role || 'customer'
+            };
+          } catch (_) {}
+        }
+      }
+
+      if (!user) {
+        res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+        return;
+      }
+      req.user = user;
     }
 
-    const { id } = req.params;
-    const download = req.query.download === 'true';
-
-    // 1. Check Firestore metadata & PostgreSQL canonical snapshots
+    // 2. Check Firestore metadata & PostgreSQL canonical snapshots
     const docSnap = await adminDb.collection('monthly_reports').doc(id).get();
     let cloudflarePath = `reports/${id}.pdf`;
-    let monthName = 'Executive';
+    let monthName = 'September';
     let yearNum = new Date().getFullYear();
     let franchiseId: string | null = null;
     let branchId: string | null = null;
+    let branchName = 'Olive Pizza';
+    let franchiseName = 'Olive Pizza';
     let scopeLevel: 'GLOBAL' | 'FRANCHISE' | 'RESTAURANT' = 'GLOBAL';
 
     if (docSnap.exists) {
@@ -58,6 +86,8 @@ router.get('/pdf/:id', verifyToken, async (req: AuthRequest, res: Response): Pro
       yearNum = data.year || yearNum;
       franchiseId = data.franchiseId || null;
       branchId = data.branchId || data.restaurantId || null;
+      branchName = data.branchName || branchName;
+      franchiseName = data.franchiseName || franchiseName;
       scopeLevel = data.accessScope || (branchId ? 'RESTAURANT' : franchiseId ? 'FRANCHISE' : 'GLOBAL');
     } else {
       const pgSnap = await query(
@@ -78,37 +108,39 @@ router.get('/pdf/:id', verifyToken, async (req: AuthRequest, res: Response): Pro
       }
     }
 
-    // 2. Authoritative Server-Side Scope Authorization Check
-    const scope: ReportScope = {
-      level: scopeLevel,
-      franchiseId,
-      restaurantId: branchId,
-      periodMonth: monthName,
-      periodYear: yearNum
-    };
+    // 3. Authoritative Scope Authorization Check (if not signed link)
+    if (!isSignedLink && req.user) {
+      const scope: ReportScope = {
+        level: scopeLevel,
+        franchiseId,
+        restaurantId: branchId,
+        periodMonth: monthName,
+        periodYear: yearNum
+      };
 
-    const authResult = MonthlyReportNotificationService.isUserAuthorizedForReport(req.user, scope);
-    if (!authResult.authorized) {
-      res.status(403).json({ error: authResult.reason || 'Forbidden: Access to this internal report is restricted.' });
-      return;
+      const authResult = MonthlyReportNotificationService.isUserAuthorizedForReport(req.user, scope);
+      if (!authResult.authorized) {
+        res.status(403).json({ error: authResult.reason || 'Forbidden: Access to this internal report is restricted.' });
+        return;
+      }
     }
 
-    // 3. Fetch Buffer
+    // 4. Fetch Buffer from Cloudflare R2 / local mock
     let buffer = await CloudflareR2Service.getBuffer(cloudflarePath);
 
-    // 3. If buffer not found, generate on the fly from PostgreSQL
+    // 5. If buffer not found, generate on the fly from PostgreSQL
     if (!buffer) {
       buffer = await MonthlyPdfReportService.generateMonthlyReportBuffer({
         monthName,
         year: yearNum,
-        branchId: 'main_branch',
-        branchName: 'Olive Pizza — Rajnandgaon HQ',
-        franchiseId: 'fra_primary',
-        franchiseName: 'Olive Pizza'
+        branchId: branchId || 'main_branch',
+        branchName: branchName || 'Olive Pizza — Rajnandgaon HQ',
+        franchiseId: franchiseId || 'fra_rajnandgaon',
+        franchiseName: franchiseName || 'Olive Pizza Rajnandgaon'
       });
     }
 
-    const filename = `Olive-Pizza-Report-${monthName}-${yearNum}.pdf`;
+    const filename = `Olive-Pizza-Report-${branchId || 'HQ'}-${monthName}-${yearNum}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     if (download) {
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -121,7 +153,12 @@ router.get('/pdf/:id', verifyToken, async (req: AuthRequest, res: Response): Pro
     console.error(`[Report PDF Route Error]:`, err.message);
     res.status(500).json({ error: 'Failed to retrieve report PDF' });
   }
-});
+}
+
+// PDF Streaming Endpoints
+router.get('/pdf/:id', (req: AuthRequest, res: Response) => handleStreamPdf(req, res));
+router.get('/monthly/:id/view', (req: AuthRequest, res: Response) => handleStreamPdf(req, res, false));
+router.get('/monthly/:id/download', (req: AuthRequest, res: Response) => handleStreamPdf(req, res, true));
 
 /**
  * POST /api/reports/google-sheet/set-id
@@ -173,7 +210,7 @@ router.post('/google-sheet/sync', verifyToken, requireOwnerOrAdmin, async (_req:
 });
 
 /**
- * GET /api/reports/monthly
+ * GET /api/reports/monthly & GET /api/reports/list
  * Lists monthly reports stored in Cloudflare R2 and Firestore.
  * Scoped by role:
  *  - Owner/Admin: Overall reports & all franchise reports
@@ -181,7 +218,7 @@ router.post('/google-sheet/sync', verifyToken, requireOwnerOrAdmin, async (_req:
  *  - Restaurant Manager: Only authorized restaurant branch reports
  *  - Customer/Delivery: 403 Forbidden
  */
-router.get('/monthly', verifyToken, async (req: AuthRequest, res: Response) => {
+async function handleListMonthlyReports(req: AuthRequest, res: Response): Promise<void> {
   try {
     const user = req.user;
     if (!user) {
@@ -234,7 +271,10 @@ router.get('/monthly', verifyToken, async (req: AuthRequest, res: Response) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
-});
+}
+
+router.get('/monthly', verifyToken, handleListMonthlyReports);
+router.get('/list', verifyToken, handleListMonthlyReports);
 
 /**
  * POST /api/reports/generate-monthly
@@ -284,14 +324,20 @@ router.post('/generate-monthly', verifyToken, requireOwnerOrAdmin, async (req: A
       franchiseName
     });
 
-    const reportKey = `${franchiseId}_${branchId}_${year}_${month.toLowerCase()}`;
-    let cloudflarePath = `reports/${year}/${reportKey}.pdf`;
-    let pdfUrl = `https://reports.olivepizza.in/monthly/${reportKey}.pdf`;
+    const monthNum = String(new Date(`${month} 1, ${year}`).getMonth() + 1).padStart(2, '0');
+    const reportKey = `${franchiseId}_${branchId}_${year}_${monthNum}`;
+    let cloudflarePath = `reports/${year}/olive-pizza/${franchiseId}/${branchId}/monthly/${year}-${monthNum}.pdf`;
+    let pdfUrl = `/api/reports/monthly/${reportKey}/download`;
+    let viewUrl = `/api/reports/monthly/${reportKey}/view`;
+    let downloadUrl = `/api/reports/monthly/${reportKey}/download`;
 
     try {
-      const uploadRes = await CloudflareReportService.uploadPdfReport(year, month, pdfBuffer);
+      const uploadRes = await CloudflareReportService.uploadPdfReport(year, month, pdfBuffer, franchiseId, branchId);
       cloudflarePath = uploadRes.cloudflarePath;
-      pdfUrl = uploadRes.publicUrl || pdfUrl;
+      const urls = await CloudflareReportService.getReportUrls(cloudflarePath, reportKey);
+      pdfUrl = uploadRes.publicUrl || urls.downloadUrl;
+      viewUrl = urls.viewUrl;
+      downloadUrl = urls.downloadUrl;
     } catch (err: any) {
       console.warn('[MonthlyReport] Cloudflare upload notice:', err.message);
     }
@@ -357,8 +403,13 @@ router.post('/generate-monthly', verifyToken, requireOwnerOrAdmin, async (req: A
       revenue: summary.grossSales,
       orders: summary.totalBills,
       cloudflarePath,
-      reportUrl: pdfUrl,
-      downloadUrl: pdfUrl,
+      reportUrl: viewUrl,
+      viewUrl,
+      downloadUrl,
+      period: `${month} ${year}`,
+      branchName,
+      franchiseName,
+      averageOrderValue: summary.averageOrderValue,
       sheetsUrl,
       status: 'COMPLETED',
       createdTime: new Date().toISOString()

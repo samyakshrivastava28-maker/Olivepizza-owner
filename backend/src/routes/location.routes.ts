@@ -56,7 +56,7 @@ router.get('/serviceable-cities', publicLimiter, async (_req: Request, res: Resp
         lng: number;
         deliveryRadiusKm: number;
       }>;
-      popularLocalities: Array<{
+      popularLocalities?: Array<{
         id?: string;
         title: string;
         subtitle: string;

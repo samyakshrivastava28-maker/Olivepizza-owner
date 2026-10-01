@@ -1,4 +1,4 @@
-﻿/**
+/**
  * MonthlyReportNotificationService.ts
  *
  * Authoritative Server-Side Role + Scope Based Monthly Report Notification System.
@@ -233,7 +233,8 @@ export class MonthlyReportNotificationService {
    */
   public static async dispatchMonthlyReportNotification(
     scope: ReportScope,
-    payload: ReportNotificationPayload
+    payload: ReportNotificationPayload,
+    options?: { skipOwners?: boolean }
   ): Promise<{ recipientCount: number; recipientUids: string[] }> {
     const recipients = await this.queryAuthorizedRecipients(scope);
     if (recipients.length === 0) {
@@ -251,7 +252,9 @@ export class MonthlyReportNotificationService {
       const role = (r.role || '').toLowerCase();
       const email = (r.email || '').toLowerCase();
       if (AUTHORIZED_OWNER_EMAILS.includes(email) || OWNER_ROLES.has(role)) {
-        ownerRecipients.push(r.uid);
+        if (!options?.skipOwners) {
+          ownerRecipients.push(r.uid);
+        }
       } else if (FRANCHISE_ROLES.has(role)) {
         franchiseRecipients.push(r.uid);
       } else {
@@ -259,7 +262,7 @@ export class MonthlyReportNotificationService {
       }
     });
 
-    // 1. Send to Owners
+    // 1. Send to Owners (if not skipped for consolidated executive dispatch)
     if (ownerRecipients.length > 0) {
       await notificationEngine.sendBulk(ownerRecipients, {
         notification: {
@@ -275,7 +278,7 @@ export class MonthlyReportNotificationService {
           periodYear: String(scope.periodYear),
           reportKey: payload.reportKey,
           pdfUrl: payload.pdfUrl || '',
-          url: '/dashboard/reports'
+          url: '/reports'
         }
       }, {
         category: 'monthly_report',
@@ -340,5 +343,63 @@ export class MonthlyReportNotificationService {
       recipientCount: allUids.length,
       recipientUids: allUids
     };
+  }
+
+  /**
+   * Dispatches EXACTLY ONE consolidated executive monthly report notification to owners.
+   * Idempotent tag ensures owners never receive duplicate pushes.
+   */
+  public static async dispatchExecutiveOwnerNotification(params: {
+    monthName: string;
+    year: number;
+    totalRevenue: number;
+    totalOrders: number;
+    pdfUrl?: string;
+  }): Promise<{ sent: boolean; recipientCount: number }> {
+    const { monthName, year, totalRevenue, totalOrders, pdfUrl } = params;
+    const globalScope: ReportScope = {
+      level: 'GLOBAL',
+      periodMonth: monthName,
+      periodYear: year,
+    };
+    const recipients = await this.queryAuthorizedRecipients(globalScope);
+    const ownerRecipients = recipients
+      .filter(r => {
+        const role = (r.role || '').toLowerCase();
+        const email = (r.email || '').toLowerCase();
+        return AUTHORIZED_OWNER_EMAILS.includes(email) || OWNER_ROLES.has(role);
+      })
+      .map(r => r.uid);
+
+    if (ownerRecipients.length === 0) {
+      console.warn('[MonthlyReportNotificationService] No owners found for executive notification.');
+      return { sent: false, recipientCount: 0 };
+    }
+
+    const periodStr = `${monthName} ${year}`;
+    const tag = `monthly_report_executive_${year}_${monthName.toLowerCase()}`;
+
+    await notificationEngine.sendBulk(ownerRecipients, {
+      notification: {
+        title: `Olive Pizza Executive Report — ${periodStr}`,
+        body: `Monthly report ready: ₹${totalRevenue.toLocaleString('en-IN')} revenue across ${totalOrders} orders.`
+      },
+      data: {
+        category: 'monthly_report',
+        scopeLevel: 'GLOBAL',
+        periodMonth: monthName,
+        periodYear: String(year),
+        reportKey: `executive_${year}_${monthName.toLowerCase()}`,
+        pdfUrl: pdfUrl || '',
+        url: '/reports'
+      }
+    }, {
+      category: 'monthly_report',
+      targetApp: 'owner',
+      priority: 'high',
+      tag
+    }).catch(err => console.error('[MonthlyReportNotificationService] Executive owner dispatch error:', err));
+
+    return { sent: true, recipientCount: ownerRecipients.length };
   }
 }

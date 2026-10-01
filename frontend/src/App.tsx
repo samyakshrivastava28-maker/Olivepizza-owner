@@ -178,6 +178,7 @@ export default function App() {
                       </RouteErrorBoundary>
                     }
                   />
+                  <Route path="/dashboard/reports" element={<Navigate to="/reports" replace />} />
 
                   {/* 6. Notification Center */}
                   <Route

@@ -4,7 +4,6 @@ import apiApp from './app';
 import { DataRetentionJob } from './jobs/DataRetentionJob';
 import './services/DataLifecycleService';
 import './services/notification/NotificationQueueService';
-import './jobs/MonthlyReportJob';
 import { kb } from './services/KnowledgeBaseService';
 import { storageAnalyzer } from './services/storageAnalyzer.service';
 import { validateEnvironmentVariables } from './config/validator';

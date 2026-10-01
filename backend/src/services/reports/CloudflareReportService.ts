@@ -12,26 +12,40 @@ export interface MonthlyReportMetadata {
   id: string;
   month: string;
   year: number;
+  period?: string;
   revenue: number;
   orders: number;
+  averageOrderValue?: number;
+  branchId?: string;
+  branchName?: string;
+  franchiseId?: string;
+  franchiseName?: string;
+  restaurantId?: string;
+  accessScope?: string;
   reportUrl?: string;
+  viewUrl?: string;
   downloadUrl?: string;
+  sheetsUrl?: string;
   cloudflarePath: string;
   createdTime: string;
-  pdfSize: string;
+  pdfSize?: string;
   status: 'COMPLETED' | 'PENDING' | 'FAILED';
 }
 
 export class CloudflareReportService {
   /**
-   * Uploads a monthly PDF report buffer to Cloudflare R2.
+   * Uploads a monthly PDF report buffer to Cloudflare R2 with unique deterministic branch path.
+   * Format: reports/{year}/olive-pizza/{franchiseId}/{branchId}/monthly/{year}-{month}.pdf
    */
   static async uploadPdfReport(
     year: number,
     monthName: string,
-    pdfBuffer: Buffer
+    pdfBuffer: Buffer,
+    franchiseId: string = 'fra_primary',
+    branchId: string = 'main_branch'
   ): Promise<{ cloudflarePath: string; publicUrl?: string; sizeFormatted: string }> {
-    const key = `reports/${year}/Olive-Pizza-${monthName}${year}.pdf`;
+    const monthNum = String(new Date(Date.parse(`${monthName} 1, ${year}`)).getMonth() + 1).padStart(2, '0');
+    const key = `reports/${year}/olive-pizza/${franchiseId}/${branchId}/monthly/${year}-${monthNum}.pdf`;
     const sizeKb = (pdfBuffer.length / 1024).toFixed(1);
     const sizeFormatted = pdfBuffer.length > 1024 * 1024
       ? `${(pdfBuffer.length / (1024 * 1024)).toFixed(2)} MB`
@@ -50,14 +64,21 @@ export class CloudflareReportService {
 
   /**
    * Generates secure time-limited view and download URLs for a report.
-   * If R2 is unconfigured, uses the backend API endpoint (/api/reports/pdf/:reportId).
+   * If R2 is unconfigured, uses the backend API endpoint (/api/reports/monthly/:reportId/view and /download).
    */
-  static async getReportUrls(cloudflarePath: string, reportId?: string, expiresInSeconds: number = 86400): Promise<{ viewUrl: string; downloadUrl: string }> {
+  static async getReportUrls(
+    cloudflarePath: string,
+    reportId?: string,
+    expiresInSeconds: number = 86400
+  ): Promise<{ viewUrl: string; downloadUrl: string }> {
+    const fallbackId = reportId || cloudflarePath.split('/').pop()?.replace('.pdf', '') || 'latest';
+    const filename = `Olive-Pizza-Report-${fallbackId}.pdf`;
+
     if (CloudflareR2Service.isConfigured()) {
       try {
         const viewUrl = await CloudflareR2Service.generatePreSignedUrl(cloudflarePath, expiresInSeconds);
         if (viewUrl) {
-          const downloadUrl = `${viewUrl}&response-content-disposition=attachment`;
+          const downloadUrl = `${viewUrl}&response-content-disposition=attachment%3B%20filename%3D%22${encodeURIComponent(filename)}%22`;
           return { viewUrl, downloadUrl };
         }
       } catch (err: any) {
@@ -65,10 +86,9 @@ export class CloudflareReportService {
       }
     }
 
-    // Fallback: API endpoint route
-    const fallbackId = reportId || cloudflarePath.split('/').pop()?.replace('.pdf', '') || 'latest';
-    const apiViewUrl = `/api/reports/pdf/${fallbackId}`;
-    const apiDownloadUrl = `/api/reports/pdf/${fallbackId}?download=true`;
+    // Fallback: API endpoint routes
+    const apiViewUrl = `/api/reports/monthly/${fallbackId}/view`;
+    const apiDownloadUrl = `/api/reports/monthly/${fallbackId}/download`;
 
     return { viewUrl: apiViewUrl, downloadUrl: apiDownloadUrl };
   }
@@ -112,9 +132,14 @@ export class CloudflareReportService {
 
       for (const doc of snap.docs) {
         const item = doc.data() as MonthlyReportMetadata;
+        item.id = item.id || doc.id;
         const urls = await this.getReportUrls(item.cloudflarePath || `reports/${item.id}.pdf`, item.id);
+        item.viewUrl = urls.viewUrl;
         item.reportUrl = urls.viewUrl;
         item.downloadUrl = urls.downloadUrl;
+        if (!item.period) {
+          item.period = `${item.month} ${item.year}`;
+        }
         reports.push(item);
       }
 

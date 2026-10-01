@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   FileText,
   Download,
@@ -20,6 +20,7 @@ import {
   Link as LinkIcon,
   ShieldCheck,
   Building2,
+  Eye,
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
@@ -92,13 +93,17 @@ export default function RestaurantReports() {
     );
 
     // Fetch PDF reports list
-    fetchApi('/api/reports/list')
-      .then(async (res) => { if (!res.ok) return {}; return res.json().catch(() => ({})); })
-      .then((data) => {
-        if (Array.isArray(data)) setPdfReports(data);
-        else if (data.reports) setPdfReports(data.reports);
-      })
-      .catch((e) => console.warn('[RestaurantReports] Reports list fallback:', e));
+    const loadPdfReports = () => {
+      fetchApi('/api/reports/monthly')
+        .then(async (res) => { if (!res.ok) return {}; return res.json().catch(() => ({})); })
+        .then((data) => {
+          if (Array.isArray(data)) setPdfReports(data);
+          else if (data.reports) setPdfReports(data.reports);
+        })
+        .catch((e) => console.warn('[RestaurantReports] Reports list fallback:', e));
+    };
+
+    loadPdfReports();
 
     // Fetch Looker Studio & Google Sheets Config
     fetchApi('/api/reports/looker-studio/config')
@@ -246,18 +251,26 @@ export default function RestaurantReports() {
     setGeneratingPdf(true);
     const toastId = toast.loading(`Generating official ${type} audit PDF report...`);
     try {
-      const res = await fetchApi('/api/reports/generate', {
+      const res = await fetchApi('/api/reports/generate-monthly', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type, month: lastMonthName }),
       });
       const data = await res.json();
-      if (data.url || data.reportUrl) {
-        toast.success('Report PDF generated and archived in Cloudflare R2!', { id: toastId });
-        setPdfReports((prev) => [data, ...prev]);
-        window.open(data.url || data.reportUrl, '_blank');
+      if (data.success && data.report) {
+        toast.success('Report PDF generated and archived successfully!', { id: toastId });
+        fetchApi('/api/reports/monthly')
+          .then(async (r) => { if (!r.ok) return {}; return r.json().catch(() => ({})); })
+          .then((d) => {
+            if (Array.isArray(d)) setPdfReports(d);
+            else if (d.reports) setPdfReports(d.reports);
+          });
+        const urlToOpen = data.report.viewUrl || data.report.downloadUrl || data.report.pdfUrl;
+        if (urlToOpen) {
+          window.open(urlToOpen, '_blank');
+        }
       } else {
-        toast.success('Report compiled successfully!', { id: toastId });
+        toast.error(data.error || 'Failed to generate report', { id: toastId });
       }
     } catch (e: any) {
       toast.error('Failed to generate report PDF: ' + e.message, { id: toastId });
@@ -599,18 +612,32 @@ export default function RestaurantReports() {
 
       {/* TAB 4: REPORT PDFS ARCHIVE */}
       {activeTab === 'pdfs' && (
-        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-6 shadow-md space-y-4">
+        <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-6 shadow-md space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
             <div>
               <h3 className="text-sm font-extrabold text-white uppercase tracking-wider flex items-center gap-2">
-                <FileText className="w-4 h-4 text-orange-400" /> Official PDF Statement Archive
+                <FileText className="w-4 h-4 text-orange-400" /> Official Monthly PDF Statements
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                Download generated audit balance sheets, tax breakdowns, and executive summaries.
+                Authoritative executive balance sheets, tax breakdown, and sales ledger archived in Cloudflare R2.
               </p>
             </div>
 
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  fetchApi('/api/reports/monthly')
+                    .then(async (r) => { if (!r.ok) return {}; return r.json().catch(() => ({})); })
+                    .then((d) => {
+                      if (Array.isArray(d)) setPdfReports(d);
+                      else if (d.reports) setPdfReports(d.reports);
+                    });
+                }}
+                className="p-2 bg-[#0B0F17] hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all"
+                title="Refresh Reports"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Refresh
+              </button>
               <button
                 onClick={() => handleGeneratePdf('monthly')}
                 disabled={generatingPdf}
@@ -622,31 +649,102 @@ export default function RestaurantReports() {
           </div>
 
           {pdfReports.length === 0 ? (
-            <div className="text-center py-12 text-slate-500 text-xs space-y-2">
-              <FileText className="w-8 h-8 mx-auto text-slate-600 opacity-50" />
-              <p>No historical PDF reports found. Click "Generate Monthly PDF" to create one.</p>
+            <div className="text-center py-14 text-slate-500 text-xs space-y-3">
+              <FileText className="w-10 h-10 mx-auto text-slate-600 opacity-40" />
+              <p className="font-semibold text-slate-400">No monthly PDF statements found.</p>
+              <p className="text-slate-500 max-w-sm mx-auto">
+                Monthly reports are automatically finalized on the 1st of every month at 00:05 AM IST, or you can generate on-demand.
+              </p>
+              <button
+                onClick={() => handleGeneratePdf('monthly')}
+                disabled={generatingPdf}
+                className="mt-2 px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded-xl text-xs inline-flex items-center gap-1.5 shadow-md shadow-orange-600/20"
+              >
+                <Download className="w-3.5 h-3.5" /> Generate September 2026 PDF
+              </button>
             </div>
           ) : (
-            <div className="divide-y divide-slate-800">
-              {pdfReports.map((r: any, idx: number) => (
-                <div key={idx} className="py-3 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <FileSpreadsheet className="w-5 h-5 text-orange-400" />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {pdfReports.map((r: any, idx: number) => {
+                const viewLink = r.viewUrl || r.reportUrl || `/api/reports/monthly/${r.id}/view`;
+                const downloadLink = r.downloadUrl || `${viewLink}?download=true`;
+                const revenue = Number(r.revenue || 0);
+                const orders = Number(r.orders || 0);
+                const aov = r.averageOrderValue ? Math.round(r.averageOrderValue) : (orders > 0 ? Math.round(revenue / orders) : 0);
+
+                return (
+                  <div
+                    key={r.id || idx}
+                    className="p-5 bg-[#0B0F17] hover:bg-[#0c121e] rounded-2xl border border-slate-800 transition-all flex flex-col justify-between space-y-4 shadow-sm"
+                  >
                     <div>
-                      <div className="text-xs font-bold text-white">{r.title || r.name || `Statement ${r.month || ''}`}</div>
-                      <div className="text-[10px] text-slate-400">{r.createdAt || 'Archived'}</div>
+                      {/* Top Row: Period & Status */}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="px-3 py-1 bg-orange-500/10 border border-orange-500/20 text-orange-400 rounded-full text-xs font-black uppercase tracking-wider flex items-center gap-1.5">
+                          <Calendar className="w-3 h-3" /> {r.period || `${r.month || ''} ${r.year || ''}`}
+                        </span>
+                        <span className="px-2.5 py-0.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-[11px] font-bold flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" /> Audited & Ready
+                        </span>
+                      </div>
+
+                      {/* Branch Info */}
+                      <div className="mt-3">
+                        <h4 className="text-sm font-extrabold text-white flex items-center gap-1.5">
+                          <Building2 className="w-4 h-4 text-orange-400 shrink-0" />
+                          <span>{r.branchName || r.title || `Olive Pizza — ${r.branchId || 'HQ Branch'}`}</span>
+                        </h4>
+                        <div className="text-[11px] text-slate-400 mt-0.5">
+                          {r.franchiseName || 'Olive Pizza Franchise'} • {r.pdfSize || 'Cloudflare R2 Encrypted'}
+                        </div>
+                      </div>
+
+                      {/* Financial Metrics */}
+                      <div className="grid grid-cols-3 gap-2 mt-4 pt-3 border-t border-slate-800/80">
+                        <div className="bg-[#121927] p-2.5 rounded-xl border border-slate-800">
+                          <div className="text-[10px] font-bold text-slate-400 uppercase">Gross Sales</div>
+                          <div className="text-sm font-black text-emerald-400 font-mono mt-0.5">
+                            ₹{revenue.toLocaleString('en-IN')}
+                          </div>
+                        </div>
+                        <div className="bg-[#121927] p-2.5 rounded-xl border border-slate-800">
+                          <div className="text-[10px] font-bold text-slate-400 uppercase">Total Orders</div>
+                          <div className="text-sm font-black text-white font-mono mt-0.5">
+                            {orders}
+                          </div>
+                        </div>
+                        <div className="bg-[#121927] p-2.5 rounded-xl border border-slate-800">
+                          <div className="text-[10px] font-bold text-slate-400 uppercase">Avg Ticket</div>
+                          <div className="text-sm font-black text-orange-400 font-mono mt-0.5">
+                            ₹{aov}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Action Buttons: View & Download */}
+                    <div className="flex items-center gap-2 pt-2 border-t border-slate-800/60">
+                      <a
+                        href={viewLink}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex-1 py-2 px-3 bg-[#161f30] hover:bg-[#1e2a42] border border-slate-700/60 text-slate-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all"
+                      >
+                        <Eye className="w-3.5 h-3.5 text-blue-400" /> View PDF
+                      </a>
+                      <a
+                        href={downloadLink}
+                        target="_blank"
+                        rel="noreferrer"
+                        download
+                        className="flex-1 py-2 px-3 bg-orange-600 hover:bg-orange-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-orange-600/20"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Download PDF
+                      </a>
                     </div>
                   </div>
-                  <a
-                    href={r.url || r.reportUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="p-2 bg-[#0B0F17] hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-lg text-xs font-bold flex items-center gap-1"
-                  >
-                    <Download className="w-3.5 h-3.5" /> Download PDF
-                  </a>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

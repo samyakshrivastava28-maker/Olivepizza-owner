@@ -42,12 +42,12 @@ export interface AuthRequest extends Request {
 
 export const verifyToken = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.split('Bearer ')[1] : (req.query.token as string);
+
+  if (!token) {
     res.status(401).json({ error: 'Unauthorized: No token provided' });
     return;
   }
-
-  const token = authHeader.split('Bearer ')[1];
   try {
     // SECURITY: Always verify through Firebase Admin SDK with checkRevoked = true.
     // When an account is replaced or revoked, revokeRefreshTokens invalidates existing tokens immediately.

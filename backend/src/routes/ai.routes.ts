@@ -177,7 +177,7 @@ router.post('/chat', optionalAuth, aiHourlyMessageLimiter, async (req: AuthReque
       if (matchedProducts.length === 0) matchedProducts = kb.searchProducts(message, 4);
       matchedProducts = matchedProducts.slice(0, 4);
 
-      const cacheStats = embeddingCache.getStats();
+      const cacheStats = { hitRatio: contextRes.cacheHit ? 1.0 : 0.0 };
       const memStats = conversationMemory.getStats();
 
       const debugInfo = {
