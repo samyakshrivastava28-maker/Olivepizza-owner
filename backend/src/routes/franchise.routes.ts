@@ -3,6 +3,8 @@ import crypto from 'crypto';
 import { adminDb, adminAuth } from '../config/firebase.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
+import { FranchiseLifecycleService } from '../services/franchise/FranchiseLifecycleService.js';
+import { FranchiseAccessService } from '../services/franchise/FranchiseAccessService.js';
 import { FranchisePinService } from '../services/franchise/FranchisePinService.js';
 import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogleSheetsService.js';
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
@@ -142,6 +144,13 @@ router.get('/', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'f
       };
     });
 
+    // Exclude soft-deleted branches/franchises by default unless explicitly requested
+    const includeDeleted = req.query.includeDeleted === 'true';
+    if (!includeDeleted) {
+      branches = branches.filter(b => b.status !== 'deleted' && !(b.isActive === false && b.deletedAt));
+      franchiseEntities = franchiseEntities.filter(f => f.status !== 'deleted' && !(f.isActive === false && f.deletedAt));
+    }
+
     res.json({
       success: true,
       branches,
@@ -260,6 +269,92 @@ router.get('/analytics/fastest-growing', requireRole(['owner', 'admin', 'develop
   } catch (error: any) {
     console.error('[FranchiseRoutes] Error in GET /analytics/fastest-growing:', error);
     res.status(500).json({ error: 'Failed to calculate fastest growing franchise' });
+  }
+});
+
+// ─── 0.08 FRANCHISE LIFECYCLE MANAGEMENT (SOFT-DELETE, HISTORY, RECOVER, PERMANENT DELETE) ───
+
+// GET /api/franchises/history/deleted - List all soft-deleted franchises with metadata
+router.get('/history/deleted', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const deletedFranchises = await FranchiseLifecycleService.listDeletedFranchises();
+    res.json({
+      success: true,
+      deletedFranchises,
+      count: deletedFranchises.length
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error listing deleted franchises:', error);
+    res.status(500).json({ error: error.message || 'Failed to list deleted franchises' });
+  }
+});
+
+// GET /api/franchises/:id/history - Read-only historical snapshot of a franchise
+router.get('/:id/history', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const history = await FranchiseLifecycleService.getFranchiseHistory(id);
+    res.json({
+      success: true,
+      history
+    });
+  } catch (error: any) {
+    console.error(`[FranchiseRoutes] Error getting franchise history for ${req.params.id}:`, error);
+    res.status(error.message?.includes('not found') ? 404 : 500).json({ error: error.message || 'Failed to retrieve franchise history' });
+  }
+});
+
+// POST /api/franchises/:id/recover - Recover a soft-deleted franchise
+router.post('/:id/recover', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const recoveredBy = req.user?.email || req.user?.uid || 'owner';
+    const result = await FranchiseLifecycleService.recoverFranchise({ franchiseId: id, recoveredBy });
+    res.json(result);
+  } catch (error: any) {
+    console.error(`[FranchiseRoutes] Error recovering franchise ${req.params.id}:`, error);
+    res.status(error.message?.includes('not found') ? 404 : 500).json({ error: error.message || 'Failed to recover franchise' });
+  }
+});
+
+// DELETE /api/franchises/:id/permanent - Permanently delete franchise operational data (Owner only)
+router.delete('/:id/permanent', requireRole(['owner', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const confirmFranchiseName = req.body?.confirmFranchiseName || req.body?.franchiseName || '';
+    if (!confirmFranchiseName) {
+      res.status(400).json({ error: 'Confirmation franchise name is required in confirmFranchiseName field' });
+      return;
+    }
+    const deletedBy = req.user?.email || req.user?.uid || 'owner';
+    const result = await FranchiseLifecycleService.permanentDeleteFranchise({
+      franchiseId: id,
+      confirmFranchiseName,
+      deletedBy
+    });
+    res.json(result);
+  } catch (error: any) {
+    console.error(`[FranchiseRoutes] Error permanently deleting franchise ${req.params.id}:`, error);
+    res.status(error.message?.includes('not match') ? 400 : (error.message?.includes('not found') ? 404 : 500)).json({ error: error.message || 'Failed to permanently delete franchise' });
+  }
+});
+
+// DELETE /api/franchises/:id - Soft-delete a franchise (Owner only)
+router.delete('/:id', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const reason = req.body?.reason || req.body?.deletionReason || 'Soft-deleted by Owner';
+    const deletedBy = req.user?.email || req.user?.uid || 'owner';
+
+    const result = await FranchiseLifecycleService.softDeleteFranchise({
+      franchiseId: id,
+      deletedBy,
+      reason
+    });
+    res.json(result);
+  } catch (error: any) {
+    console.error(`[FranchiseRoutes] Error soft-deleting franchise ${req.params.id}:`, error);
+    res.status(error.message?.includes('not found') ? 404 : 500).json({ error: error.message || 'Failed to soft delete franchise' });
   }
 });
 
@@ -419,6 +514,22 @@ router.patch('/:id', requireRole(['owner', 'admin', 'developer', 'platform_owner
           console.warn('[FranchiseRoutes] Error revoking replaced manager account:', revErr);
         }
       }
+
+      // Automatically provision/approve new restaurant manager in users & restaurant_managers
+      const targetFId = targetEntityRef ? targetEntityRef.id : id;
+      const targetBId = branchDoc.exists ? branchDoc.id : id;
+      await FranchiseAccessService.updateFranchiseAccess({
+        targetUserId: newManagerEmail,
+        franchiseId: targetFId,
+        branchId: targetBId,
+        targetRole: 'restaurant_manager',
+        applicationAccess: {
+          app_restaurant_management: true
+        },
+        accountStatus: 'ACTIVE',
+        actorUid: req.user?.uid || 'owner',
+        actorEmail: req.user?.email || 'owner@olivepizza.in'
+      }).catch(err => console.warn('[FranchiseRoutes] Auto-syncing new restaurant manager access:', err));
     }
 
     // Account replacement & revocation when franchiseOwnerEmail is updated (protecting platform owner)
@@ -443,6 +554,23 @@ router.patch('/:id', requireRole(['owner', 'admin', 'developer', 'platform_owner
           console.warn('[FranchiseRoutes] Error revoking replaced franchise owner account:', revErr);
         }
       }
+
+      // Automatically provision/approve new franchise owner in users, franchise_users & pos_accounts
+      const targetFId = targetEntityRef ? targetEntityRef.id : id;
+      const targetBId = branchDoc.exists ? branchDoc.id : id;
+      await FranchiseAccessService.updateFranchiseAccess({
+        targetUserId: newOwnerEmail,
+        franchiseId: targetFId,
+        branchId: targetBId,
+        targetRole: 'franchise_manager',
+        applicationAccess: {
+          app_franchise_management: true,
+          app_pos: true
+        },
+        accountStatus: 'ACTIVE',
+        actorUid: req.user?.uid || 'owner',
+        actorEmail: req.user?.email || 'owner@olivepizza.in'
+      }).catch(err => console.warn('[FranchiseRoutes] Auto-syncing new franchise owner access:', err));
     }
 
     // Atomically persist to franchises collection
@@ -2413,94 +2541,17 @@ router.post('/:id/access/edit', requireRole(['owner', 'admin', 'developer', 'pla
       return;
     }
 
-    // Build structured permissions
-    const updatedPerms: string[] = Array.isArray(permissions) ? [...permissions] : [];
-
-    if (applicationAccess) {
-      if (applicationAccess.app_franchise_management && !updatedPerms.includes('app_franchise_management')) updatedPerms.push('app_franchise_management');
-      if (!applicationAccess.app_franchise_management) {
-        const idx = updatedPerms.indexOf('app_franchise_management');
-        if (idx > -1) updatedPerms.splice(idx, 1);
-      }
-
-      if (applicationAccess.app_restaurant_management && !updatedPerms.includes('app_restaurant_management')) updatedPerms.push('app_restaurant_management');
-      if (!applicationAccess.app_restaurant_management) {
-        const idx = updatedPerms.indexOf('app_restaurant_management');
-        if (idx > -1) updatedPerms.splice(idx, 1);
-      }
-
-      if (applicationAccess.app_pos && !updatedPerms.includes('app_pos')) {
-        updatedPerms.push('app_pos');
-        if (!updatedPerms.includes('pos.billing')) updatedPerms.push('pos.billing');
-      }
-      if (!applicationAccess.app_pos) {
-        const idx1 = updatedPerms.indexOf('app_pos');
-        if (idx1 > -1) updatedPerms.splice(idx1, 1);
-        const idx2 = updatedPerms.indexOf('pos.billing');
-        if (idx2 > -1) updatedPerms.splice(idx2, 1);
-      }
-
-      if (applicationAccess.app_delivery && !updatedPerms.includes('app_delivery')) updatedPerms.push('app_delivery');
-      if (!applicationAccess.app_delivery) {
-        const idx = updatedPerms.indexOf('app_delivery');
-        if (idx > -1) updatedPerms.splice(idx, 1);
-      }
-    }
-
-    // Compute authorized operational applications
-    const allowedApps: string[] = [];
-    if (applicationAccess?.app_franchise_management) allowedApps.push('FRANCHISE_MANAGER');
-    if (applicationAccess?.app_restaurant_management) allowedApps.push('RESTAURANT_MANAGER');
-    if (applicationAccess?.app_pos) allowedApps.push('POS');
-    if (applicationAccess?.app_delivery) allowedApps.push('DELIVERY');
-    if (allowedApps.length > 0) allowedApps.push('OWNER');
-
-    const updates: Record<string, any> = {
-      permissions: updatedPerms,
-      applicationAccess: applicationAccess || {},
-      allowedApps,
+    const result = await FranchiseAccessService.updateFranchiseAccess({
+      targetUserId,
       franchiseId: id,
-      updatedAt: new Date().toISOString(),
-      updatedBy: req.user?.uid || 'owner'
-    };
-
-    if (accountStatus) {
-      updates.isActive = accountStatus === 'ACTIVE';
-      updates.status = accountStatus;
-    }
-    if (assignedBranchId) {
-      updates.branchId = assignedBranchId;
-    }
-
-    // Always update users collection doc as source of truth
-    await adminDb.collection('users').doc(targetUserId).set(updates, { merge: true });
-
-    // Synchronize to role-specific collections
-    if (targetRole === 'restaurant_manager' || applicationAccess?.app_restaurant_management) {
-      await adminDb.collection('restaurant_managers').doc(targetUserId).set({
-        ...updates,
-        status: accountStatus === 'ACTIVE' ? 'APPROVED' : 'DEACTIVATED',
-        isActive: accountStatus === 'ACTIVE',
-        role: 'restaurant_manager'
-      }, { merge: true });
-    }
-
-    if (targetRole === 'delivery_partner' || applicationAccess?.app_delivery) {
-      await adminDb.collection('delivery_partners').doc(targetUserId).set({
-        ...updates,
-        status: accountStatus === 'ACTIVE' ? 'approved' : 'suspended',
-        isActive: accountStatus === 'ACTIVE',
-        role: 'delivery_partner'
-      }, { merge: true });
-    }
-
-    if (applicationAccess?.app_franchise_management) {
-      await adminDb.collection('franchise_users').doc(targetUserId).set({
-        ...updates,
-        role: 'franchise_manager',
-        isActive: accountStatus === 'ACTIVE'
-      }, { merge: true });
-    }
+      branchId: assignedBranchId,
+      targetRole: targetRole || 'staff',
+      applicationAccess: applicationAccess || {},
+      accountStatus: accountStatus || 'ACTIVE',
+      permissions: Array.isArray(permissions) ? permissions : [],
+      actorUid: req.user?.uid || 'owner',
+      actorEmail: req.user?.email || 'owner@olivepizza.in'
+    });
 
     // Log Server-Authoritative Audit Event
     await FranchiseScopeService.logFranchiseAudit({
@@ -2513,7 +2564,7 @@ router.post('/:id/access/edit', requireRole(['owner', 'admin', 'developer', 'pla
       entityId: targetUserId,
       details: {
         applicationAccess,
-        permissions: updatedPerms,
+        permissions: Array.isArray(permissions) ? permissions : [],
         accountStatus,
         assignedBranchId
       }
@@ -2521,11 +2572,12 @@ router.post('/:id/access/edit', requireRole(['owner', 'admin', 'developer', 'pla
 
     res.json({
       success: true,
-      message: `Access permissions updated successfully for ${targetUserId}`,
+      message: result.message || `Access permissions updated successfully for ${targetUserId}`,
       targetUserId,
       applicationAccess,
-      permissions: updatedPerms,
-      accountStatus: accountStatus || 'ACTIVE'
+      permissions: Array.isArray(permissions) ? permissions : [],
+      accountStatus: accountStatus || 'ACTIVE',
+      accessEntry: result.accessEntry
     });
   } catch (error: any) {
     console.error('[FranchiseRoutes] Error updating access:', error);

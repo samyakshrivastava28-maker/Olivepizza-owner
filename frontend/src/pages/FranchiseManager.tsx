@@ -26,7 +26,11 @@ import {
   Check,
   AlertCircle,
   Save,
-  Radio
+  Radio,
+  Trash2,
+  History,
+  RotateCcw,
+  Archive
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { collection, getDocs, doc, setDoc, updateDoc } from 'firebase/firestore';
@@ -146,6 +150,29 @@ export default function FranchiseManager() {
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [showEditMapPicker, setShowEditMapPicker] = useState(false);
 
+  // Top-level Navigation View: active franchises vs delete history
+  const [activeTab, setActiveTab] = useState<'franchises' | 'delete_history'>('franchises');
+  const [deletedFranchises, setDeletedFranchises] = useState<any[]>([]);
+  const [loadingDeleted, setLoadingDeleted] = useState(false);
+
+  // Soft Delete Modal State
+  const [softDeleteBranch, setSoftDeleteBranch] = useState<FranchiseBranch | null>(null);
+  const [softDeleteReason, setSoftDeleteReason] = useState('Store operations suspended / lease closed');
+  const [softDeleteConfirmName, setSoftDeleteConfirmName] = useState('');
+  const [isSoftDeleting, setIsSoftDeleting] = useState(false);
+
+  // History Inspector Modal State
+  const [historyModalData, setHistoryModalData] = useState<any | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
+  // Permanent Delete Modal State
+  const [permanentDeleteTarget, setPermanentDeleteTarget] = useState<any | null>(null);
+  const [permanentDeleteConfirmName, setPermanentDeleteConfirmName] = useState('');
+  const [isPermanentDeleting, setIsPermanentDeleting] = useState(false);
+
+  // Recovering State
+  const [isRecoveringId, setIsRecoveringId] = useState<string | null>(null);
+
   const handleOpenEdit = (branch: FranchiseBranch) => {
     setEditingBranch(branch);
     setEditForm({
@@ -237,9 +264,130 @@ export default function FranchiseManager() {
     }
   };
 
+  const loadDeletedFranchises = async () => {
+    setLoadingDeleted(true);
+    try {
+      const res = await fetchApi('/api/franchises/history/deleted');
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.deletedFranchises) {
+        setDeletedFranchises(data.deletedFranchises);
+      } else {
+        setDeletedFranchises([]);
+      }
+    } catch (err) {
+      console.warn('Failed to load deleted franchises:', err);
+      setDeletedFranchises([]);
+    } finally {
+      setLoadingDeleted(false);
+    }
+  };
+
   useEffect(() => {
     loadBranches();
+    loadDeletedFranchises();
   }, []);
+
+  const handleOpenSoftDelete = (branch: FranchiseBranch) => {
+    setSoftDeleteBranch(branch);
+    setSoftDeleteReason('Store operations suspended / lease closed');
+    setSoftDeleteConfirmName('');
+  };
+
+  const handleConfirmSoftDelete = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!softDeleteBranch) return;
+    if (softDeleteConfirmName.trim().toLowerCase() !== softDeleteBranch.name.trim().toLowerCase()) {
+      toast.error('Franchise name does not match confirmation.');
+      return;
+    }
+
+    setIsSoftDeleting(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${softDeleteBranch.id}`, {
+        method: 'DELETE',
+        body: JSON.stringify({ reason: softDeleteReason })
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        toast.success(data.message || 'Franchise soft-deleted successfully!');
+        setSoftDeleteBranch(null);
+        setEditingBranch(null);
+        await Promise.all([loadBranches(), loadDeletedFranchises()]);
+      } else {
+        throw new Error(data?.error || 'Failed to soft delete franchise');
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Error soft-deleting franchise');
+    } finally {
+      setIsSoftDeleting(false);
+    }
+  };
+
+  const handleInspectHistory = async (franchiseId: string) => {
+    setLoadingHistory(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${franchiseId}/history`);
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.history) {
+        setHistoryModalData(data.history);
+      } else {
+        throw new Error(data?.error || 'Failed to retrieve history');
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Error loading franchise history');
+    } finally {
+      setLoadingHistory(false);
+    }
+  };
+
+  const handleRecoverFranchise = async (franchiseId: string) => {
+    setIsRecoveringId(franchiseId);
+    try {
+      const res = await fetchApi(`/api/franchises/${franchiseId}/recover`, {
+        method: 'POST'
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        toast.success(data.message || 'Franchise recovered successfully!');
+        await Promise.all([loadBranches(), loadDeletedFranchises()]);
+      } else {
+        throw new Error(data?.error || 'Failed to recover franchise');
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Error recovering franchise');
+    } finally {
+      setIsRecoveringId(null);
+    }
+  };
+
+  const handleConfirmPermanentDelete = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!permanentDeleteTarget) return;
+    if (permanentDeleteConfirmName.trim().toLowerCase() !== permanentDeleteTarget.name.trim().toLowerCase()) {
+      toast.error('Franchise name does not match confirmation.');
+      return;
+    }
+
+    setIsPermanentDeleting(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${permanentDeleteTarget.id || permanentDeleteTarget.franchiseId}/permanent`, {
+        method: 'DELETE',
+        body: JSON.stringify({ confirmFranchiseName: permanentDeleteConfirmName })
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success) {
+        toast.success(data.message || 'Franchise permanently deleted.');
+        setPermanentDeleteTarget(null);
+        await Promise.all([loadBranches(), loadDeletedFranchises()]);
+      } else {
+        throw new Error(data?.error || 'Failed to permanently delete franchise');
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Error permanently deleting franchise');
+    } finally {
+      setIsPermanentDeleting(false);
+    }
+  };
 
   const handleOpenLaunch = async (targetApp: 'franchise' | 'restaurant_management', branch: FranchiseBranch) => {
     try {
@@ -463,185 +611,361 @@ export default function FranchiseManager() {
         </div>
       </div>
 
-      {/* Filter and Search Bar */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-3 rounded-2xl bg-slate-900 border border-slate-800">
-        <div className="relative w-full sm:w-80">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="Search by franchise, city, code, email..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-orange-500"
-          />
-        </div>
+      {/* View Switcher: Active Franchises vs Franchise Delete History */}
+      <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+        <button
+          onClick={() => setActiveTab('franchises')}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition-all cursor-pointer ${
+            activeTab === 'franchises'
+              ? 'bg-orange-500 text-white shadow-lg shadow-orange-500/20'
+              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+          }`}
+        >
+          <Building2 className="w-4 h-4" />
+          <span>Active Franchises</span>
+          <span className={`px-2 py-0.5 rounded-full text-[10px] ${
+            activeTab === 'franchises' ? 'bg-black/20 text-white' : 'bg-slate-800 text-slate-400'
+          }`}>
+            {branches.length}
+          </span>
+        </button>
 
-        <div className="flex items-center gap-1.5 w-full sm:w-auto">
-          {(['all', 'active', 'inactive'] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setStatusFilter(tab)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize transition-colors ${
-                statusFilter === tab
-                  ? 'bg-orange-500 text-white shadow-sm'
-                  : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
+        <button
+          onClick={() => {
+            setActiveTab('delete_history');
+            loadDeletedFranchises();
+          }}
+          className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition-all cursor-pointer ${
+            activeTab === 'delete_history'
+              ? 'bg-rose-500 text-white shadow-lg shadow-rose-500/20'
+              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+          }`}
+        >
+          <History className="w-4 h-4" />
+          <span>Franchise Delete History</span>
+          {deletedFranchises.length > 0 && (
+            <span className={`px-2 py-0.5 rounded-full text-[10px] ${
+              activeTab === 'delete_history' ? 'bg-black/20 text-white' : 'bg-rose-500/20 text-rose-300'
+            }`}>
+              {deletedFranchises.length}
+            </span>
+          )}
+        </button>
       </div>
 
-      {/* Franchise List Table & Cards */}
-      <div className="space-y-4">
-        {loading ? (
-          <div className="p-12 text-center text-slate-400 text-xs font-bold">
-            Loading franchises & branch records...
+      {activeTab === 'franchises' ? (
+        <>
+          {/* Filter and Search Bar */}
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-3 rounded-2xl bg-slate-900 border border-slate-800">
+            <div className="relative w-full sm:w-80">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search by franchise, city, code, email..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-10 pr-4 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-orange-500"
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5 w-full sm:w-auto">
+              {(['all', 'active', 'inactive'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setStatusFilter(tab)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold capitalize transition-colors ${
+                    statusFilter === tab
+                      ? 'bg-orange-500 text-white shadow-sm'
+                      : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
           </div>
-        ) : filteredBranches.length === 0 ? (
-          <div className="p-12 rounded-3xl bg-slate-900 border border-slate-800 text-center space-y-3">
-            <Building2 className="w-12 h-12 text-slate-600 mx-auto" />
-            <p className="text-sm font-bold text-white">No franchises found</p>
-            <p className="text-xs text-slate-400 max-w-sm mx-auto">
-              Create a new franchise using the Provisioning Wizard above.
-            </p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {filteredBranches.map((branch) => (
-              <div
-                key={branch.id}
-                className="p-5 rounded-3xl bg-slate-900 border border-slate-800 hover:border-slate-700 transition-all space-y-4 shadow-xl"
-              >
-                {/* Card Header */}
-                <div className="flex items-start justify-between gap-3">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="font-extrabold text-white text-base leading-tight">
-                        {branch.name}
-                      </h3>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-slate-400">
-                      <span className="font-mono text-orange-400 font-bold">{branch.code}</span>
-                      <span>•</span>
-                      <span>{branch.city}, {branch.state}</span>
-                    </div>
-                  </div>
 
-                  <span
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold ${
-                      branch.isActive
-                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                        : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                    }`}
-                  >
-                    <span className={`w-1.5 h-1.5 rounded-full ${branch.isActive ? 'bg-emerald-400' : 'bg-rose-400'}`} />
-                    {branch.isActive ? 'Active' : 'Disabled'}
-                  </span>
-                </div>
-
-                {/* Details Grid */}
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
-                    <span className="text-[10px] uppercase font-bold text-slate-500 block">Franchise Owner</span>
-                    <span className="text-white font-medium truncate block" title={branch.franchiseOwnerEmail || 'Unassigned'}>
-                      {branch.franchiseOwnerEmail || 'Unassigned'}
-                    </span>
-                  </div>
-
-                  <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
-                    <span className="text-[10px] uppercase font-bold text-slate-500 block">Restaurant Manager</span>
-                    <span className="text-white font-medium truncate block" title={branch.restaurantManagerEmail || 'Unassigned'}>
-                      {branch.restaurantManagerEmail || 'Unassigned'}
-                    </span>
-                  </div>
-
-                  <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
-                    <span className="text-[10px] uppercase font-bold text-slate-500 block">POS Terminals</span>
-                    <span className="text-amber-400 font-bold block">
-                      {branch.posTerminalCount || 1} Active Counters
-                    </span>
-                  </div>
-
-                  <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
-                    <span className="text-[10px] uppercase font-bold text-slate-500 block">Delivery Radius</span>
-                    <span className="text-cyan-400 font-bold block">
-                      {branch.maxDeliveryRadiusKm || 12} km Radius
-                    </span>
-                  </div>
-                </div>
-
-                {/* Location address */}
-                <div className="flex items-start gap-2 text-xs text-slate-400 bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/60">
-                  <MapPin className="w-3.5 h-3.5 text-orange-400 shrink-0 mt-0.5" />
-                  <span className="line-clamp-1">{branch.address}</span>
-                </div>
-
-                {/* Actions: Show Live, Manage Workspace, Edit, View & Power */}
-                <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {/* Show Live Button (Navigates to in-app Live Dashboard & Reports tab) */}
-                    <button
-                      onClick={() => navigate(`/franchise-management/${(branch as any).slug || (branch.id === 'main_branch' ? 'rajnandgaon' : branch.id.replace('fra_', ''))}?tab=live-dashboard`)}
-                      className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 font-bold text-xs transition-all cursor-pointer group shadow-sm"
-                      title="View Real-Time Live Franchise Dashboard & Operational Reports"
-                    >
-                      <span className="relative flex h-2 w-2">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
-                      </span>
-                      <span>Show Live</span>
-                    </button>
-
-                    {/* Manage Workspace Button (In-App Management) */}
-                    <button
-                      onClick={() => navigate(`/franchise-management/${(branch as any).slug || (branch.id === 'main_branch' ? 'rajnandgaon' : branch.id.replace('fra_', ''))}`)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 font-bold text-xs transition-colors cursor-pointer"
-                      title="Open In-App Franchise Workspace"
-                    >
-                      <Layers className="w-3.5 h-3.5" />
-                      <span>Manage Workspace</span>
-                    </button>
-
-                    {/* Edit Button */}
-                    <button
-                      onClick={() => handleOpenEdit(branch)}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-400 font-bold text-xs transition-colors cursor-pointer"
-                      title="Edit Franchise & Branch Configuration"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                      <span>Edit</span>
-                    </button>
-                  </div>
-
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => setViewingBranch(branch)}
-                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-                      title="View Details"
-                    >
-                      <Eye className="w-4 h-4" />
-                    </button>
-
-                    <button
-                      onClick={() => handleToggleActive(branch)}
-                      className={`p-1.5 rounded-lg border transition-colors ${
-                        branch.isActive
-                          ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border-rose-500/30'
-                          : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-                      }`}
-                      title={branch.isActive ? 'Deactivate Franchise' : 'Activate Franchise'}
-                    >
-                      <Power className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
+          {/* Franchise List Table & Cards */}
+          <div className="space-y-4">
+            {loading ? (
+              <div className="p-12 text-center text-slate-400 text-xs font-bold">
+                Loading franchises & branch records...
               </div>
-            ))}
+            ) : filteredBranches.length === 0 ? (
+              <div className="p-12 rounded-3xl bg-slate-900 border border-slate-800 text-center space-y-3">
+                <Building2 className="w-12 h-12 text-slate-600 mx-auto" />
+                <p className="text-sm font-bold text-white">No franchises found</p>
+                <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                  Create a new franchise using the Provisioning Wizard above.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {filteredBranches.map((branch) => (
+                  <div
+                    key={branch.id}
+                    className="p-5 rounded-3xl bg-slate-900 border border-slate-800 hover:border-slate-700 transition-all space-y-4 shadow-xl"
+                  >
+                    {/* Card Header */}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-extrabold text-white text-base leading-tight">
+                            {branch.name}
+                          </h3>
+                        </div>
+                        <div className="flex items-center gap-2 text-xs text-slate-400">
+                          <span className="font-mono text-orange-400 font-bold">{branch.code}</span>
+                          <span>•</span>
+                          <span>{branch.city}, {branch.state}</span>
+                        </div>
+                      </div>
+
+                      <span
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold ${
+                          branch.isActive
+                            ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                            : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                        }`}
+                      >
+                        <span className={`w-1.5 h-1.5 rounded-full ${branch.isActive ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+                        {branch.isActive ? 'Active' : 'Disabled'}
+                      </span>
+                    </div>
+
+                    {/* Details Grid */}
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                        <span className="text-[10px] uppercase font-bold text-slate-500 block">Franchise Owner</span>
+                        <span className="text-white font-medium truncate block" title={branch.franchiseOwnerEmail || 'Unassigned'}>
+                          {branch.franchiseOwnerEmail || 'Unassigned'}
+                        </span>
+                      </div>
+
+                      <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                        <span className="text-[10px] uppercase font-bold text-slate-500 block">Restaurant Manager</span>
+                        <span className="text-white font-medium truncate block" title={branch.restaurantManagerEmail || 'Unassigned'}>
+                          {branch.restaurantManagerEmail || 'Unassigned'}
+                        </span>
+                      </div>
+
+                      <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                        <span className="text-[10px] uppercase font-bold text-slate-500 block">POS Terminals</span>
+                        <span className="text-amber-400 font-bold block">
+                          {branch.posTerminalCount || 1} Active Counters
+                        </span>
+                      </div>
+
+                      <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                        <span className="text-[10px] uppercase font-bold text-slate-500 block">Delivery Radius</span>
+                        <span className="text-cyan-400 font-bold block">
+                          {branch.maxDeliveryRadiusKm || 12} km Radius
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Location address */}
+                    <div className="flex items-start gap-2 text-xs text-slate-400 bg-slate-950/40 p-2.5 rounded-xl border border-slate-800/60">
+                      <MapPin className="w-3.5 h-3.5 text-orange-400 shrink-0 mt-0.5" />
+                      <span className="line-clamp-1">{branch.address}</span>
+                    </div>
+
+                    {/* Actions: Show Live, Manage Workspace, Edit, View & Power */}
+                    <div className="pt-3 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* Show Live Button (Navigates to in-app Live Dashboard & Reports tab) */}
+                        <button
+                          onClick={() => navigate(`/franchise-management/${(branch as any).slug || (branch.id === 'main_branch' ? 'rajnandgaon' : branch.id.replace('fra_', ''))}?tab=live-dashboard`)}
+                          className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 font-bold text-xs transition-all cursor-pointer group shadow-sm"
+                          title="View Real-Time Live Franchise Dashboard & Operational Reports"
+                        >
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-500"></span>
+                          </span>
+                          <span>Show Live</span>
+                        </button>
+
+                        {/* Manage Workspace Button (In-App Management) */}
+                        <button
+                          onClick={() => navigate(`/franchise-management/${(branch as any).slug || (branch.id === 'main_branch' ? 'rajnandgaon' : branch.id.replace('fra_', ''))}`)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 font-bold text-xs transition-colors cursor-pointer"
+                          title="Open In-App Franchise Workspace"
+                        >
+                          <Layers className="w-3.5 h-3.5" />
+                          <span>Manage Workspace</span>
+                        </button>
+
+                        {/* Edit Button */}
+                        <button
+                          onClick={() => handleOpenEdit(branch)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-400 font-bold text-xs transition-colors cursor-pointer"
+                          title="Edit Franchise & Branch Configuration"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                          <span>Edit</span>
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => setViewingBranch(branch)}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+                          title="View Details"
+                        >
+                          <Eye className="w-4 h-4" />
+                        </button>
+
+                        <button
+                          onClick={() => handleToggleActive(branch)}
+                          className={`p-1.5 rounded-lg border transition-colors ${
+                            branch.isActive
+                              ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border-rose-500/30'
+                              : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                          }`}
+                          title={branch.isActive ? 'Deactivate Franchise' : 'Activate Franchise'}
+                        >
+                          <Power className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </>
+      ) : (
+        /* ─── FRANCHISE DELETE HISTORY SECTION ─── */
+        <div className="space-y-4">
+          <div className="p-4 rounded-2xl bg-rose-950/20 border border-rose-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400">
+                <Archive className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-white">Franchise Deletion & Recovery Center</h3>
+                <p className="text-xs text-slate-400">
+                  Audit, inspect read-only snapshots, recover deactivated franchises, or execute permanent deletion.
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => loadDeletedFranchises()}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs flex items-center gap-1.5 self-start sm:self-auto cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingDeleted ? 'animate-spin' : ''}`} />
+              <span>Refresh History</span>
+            </button>
+          </div>
+
+          {loadingDeleted ? (
+            <div className="p-12 text-center text-slate-400 text-xs font-bold">
+              Loading deleted franchise history records...
+            </div>
+          ) : deletedFranchises.length === 0 ? (
+            <div className="p-12 rounded-3xl bg-slate-900 border border-slate-800 text-center space-y-3">
+              <Archive className="w-12 h-12 text-slate-600 mx-auto" />
+              <p className="text-sm font-bold text-white">No deleted franchises in history</p>
+              <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                All provisioned stores are currently active or operational. Soft-deleted franchises will appear here with complete recovery options.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {deletedFranchises.map((df) => (
+                <div
+                  key={df.id || df.franchiseId}
+                  className="p-5 rounded-3xl bg-slate-900/90 border border-rose-500/20 hover:border-rose-500/40 transition-all space-y-4 shadow-xl"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-extrabold text-white text-base leading-tight">
+                          {df.name}
+                        </h3>
+                      </div>
+                      <div className="flex items-center gap-2 text-xs text-slate-400">
+                        <span className="font-mono text-rose-400 font-bold">{df.code || 'OP-FRA'}</span>
+                        <span>•</span>
+                        <span>{df.city}{df.state ? `, ${df.state}` : ''}</span>
+                      </div>
+                    </div>
+
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                      <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+                      Soft-Deleted
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                      <span className="text-[10px] uppercase font-bold text-slate-500 block">Deleted At</span>
+                      <span className="text-slate-300 font-medium truncate block">
+                        {df.deletedAt ? new Date(df.deletedAt).toLocaleDateString(undefined, { dateStyle: 'medium' }) : 'Unknown'}
+                      </span>
+                    </div>
+
+                    <div className="p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                      <span className="text-[10px] uppercase font-bold text-slate-500 block">Deleted By</span>
+                      <span className="text-slate-300 font-medium truncate block" title={df.deletedBy}>
+                        {df.deletedBy || 'owner'}
+                      </span>
+                    </div>
+
+                    <div className="col-span-2 p-2.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                      <span className="text-[10px] uppercase font-bold text-slate-500 block">Deletion Reason</span>
+                      <span className="text-rose-300 font-medium line-clamp-1">
+                        {df.deletionReason || 'Soft-deleted by Owner'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Actions for Deleted Franchise: Inspect History, Recover, Permanent Delete */}
+                  <div className="pt-3 border-t border-slate-800 flex items-center justify-between gap-2">
+                    <button
+                      onClick={() => handleInspectHistory(df.id || df.franchiseId)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-400 font-bold text-xs transition-colors cursor-pointer"
+                      title="Inspect Orders, Revenue, Customers & Audit Trail"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Inspect History</span>
+                    </button>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => handleRecoverFranchise(df.id || df.franchiseId)}
+                        disabled={isRecoveringId === (df.id || df.franchiseId)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 font-bold text-xs transition-colors cursor-pointer disabled:opacity-50"
+                        title="Restore Franchise & Re-activate Accounts"
+                      >
+                        {isRecoveringId === (df.id || df.franchiseId) ? (
+                          <div className="w-3.5 h-3.5 border-2 border-emerald-400/30 border-t-emerald-400 rounded-full animate-spin" />
+                        ) : (
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        )}
+                        <span>Recover Store</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setPermanentDeleteTarget(df);
+                          setPermanentDeleteConfirmName('');
+                        }}
+                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 font-bold text-xs transition-colors cursor-pointer"
+                        title="Permanently Delete Operational Config"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ─── 7-STEP PROVISIONING WIZARD MODAL ─── */}
       {isProvisionWizardOpen && (
@@ -1340,27 +1664,308 @@ export default function FranchiseManager() {
               </div>
 
               {/* Form Actions */}
-              <div className="pt-4 border-t border-slate-800 flex items-center justify-end gap-3">
+              <div className="pt-4 border-t border-slate-800 flex items-center justify-between gap-3">
                 <button
                   type="button"
-                  onClick={() => setEditingBranch(null)}
-                  disabled={isSavingEdit}
-                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-colors"
+                  onClick={() => handleOpenSoftDelete(editingBranch)}
+                  className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-400 font-bold text-xs transition-colors cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Delete Franchise</span>
+                </button>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setEditingBranch(null)}
+                    disabled={isSavingEdit}
+                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-colors"
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={isSavingEdit}
+                    className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-600/20 transition-all disabled:opacity-50 cursor-pointer"
+                  >
+                    {isSavingEdit ? (
+                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4" />
+                        <span>Save Changes</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ─── SOFT DELETE CONFIRMATION MODAL ─── */}
+      {softDeleteBranch && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-slate-900 border border-rose-500/30 rounded-3xl p-6 shadow-2xl space-y-5">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white">Deactivate & Soft-Delete Franchise</h3>
+                  <p className="text-xs text-slate-400">{softDeleteBranch.name} ({softDeleteBranch.code})</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setSoftDeleteBranch(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white bg-slate-800"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-rose-950/40 border border-rose-500/30 text-xs text-rose-200 space-y-2">
+              <div className="flex items-center gap-2 font-bold text-rose-400">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>Immediate Access Revocation Notice</span>
+              </div>
+              <p>
+                Soft-deleting this franchise will immediately disable operational logins across <strong>Restaurant Management, POS, Franchise Management, and Delivery</strong> for all staff assigned to this store.
+              </p>
+              <p className="text-[11px] text-slate-400">
+                Historical orders, customer data, revenue, and reports are safely preserved and can be viewed or recovered anytime in <strong>Franchise Delete History</strong>.
+              </p>
+            </div>
+
+            <form onSubmit={handleConfirmSoftDelete} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Reason for Deletion *</label>
+                <input
+                  type="text"
+                  required
+                  value={softDeleteReason}
+                  onChange={(e) => setSoftDeleteReason(e.target.value)}
+                  placeholder="e.g., Store renovation, lease ended, partner transition"
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  Type <span className="text-white font-mono font-bold select-all">{softDeleteBranch.name}</span> to confirm:
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={softDeleteConfirmName}
+                  onChange={(e) => setSoftDeleteConfirmName(e.target.value)}
+                  placeholder="Type exact franchise name..."
+                  className="w-full px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
+                />
+              </div>
+
+              <div className="pt-3 border-t border-slate-800 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setSoftDeleteBranch(null)}
+                  disabled={isSoftDeleting}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold"
                 >
                   Cancel
                 </button>
 
                 <button
                   type="submit"
-                  disabled={isSavingEdit}
-                  className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs shadow-lg shadow-blue-600/20 transition-all disabled:opacity-50 cursor-pointer"
+                  disabled={isSoftDeleting || softDeleteConfirmName.trim().toLowerCase() !== softDeleteBranch.name.trim().toLowerCase()}
+                  className="flex items-center gap-1.5 px-5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold transition-all disabled:opacity-40 cursor-pointer shadow-lg shadow-rose-600/20"
                 >
-                  {isSavingEdit ? (
+                  {isSoftDeleting ? (
                     <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   ) : (
                     <>
-                      <Save className="w-4 h-4" />
-                      <span>Save Changes</span>
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Confirm Soft Delete</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ─── READ-ONLY HISTORY INSPECTION MODAL ─── */}
+      {historyModalData && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400">
+                  <History className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-white">{historyModalData.franchise.name} — Historical Record</h3>
+                  <p className="text-xs text-slate-400">
+                    Status: <span className="uppercase font-bold text-rose-400">{historyModalData.franchise.status}</span> • Deleted by: {historyModalData.franchise.deletedBy || 'owner'}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setHistoryModalData(null)}
+                className="p-2 rounded-xl text-slate-400 hover:text-white bg-slate-800"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Sales & Orders Stats */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
+                <span className="text-[10px] uppercase font-bold text-slate-500 block">Total Lifetime Orders</span>
+                <p className="text-xl font-black text-white mt-1">{historyModalData.stats.totalOrders}</p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
+                <span className="text-[10px] uppercase font-bold text-emerald-500 block">Delivered Orders</span>
+                <p className="text-xl font-black text-emerald-400 mt-1">{historyModalData.stats.completedOrders}</p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
+                <span className="text-[10px] uppercase font-bold text-amber-500 block">Gross Revenue</span>
+                <p className="text-xl font-black text-amber-400 mt-1">₹{historyModalData.stats.totalRevenue.toLocaleString()}</p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800">
+                <span className="text-[10px] uppercase font-bold text-cyan-500 block">Unique Customers</span>
+                <p className="text-xl font-black text-cyan-400 mt-1">{historyModalData.stats.uniqueCustomers}</p>
+              </div>
+            </div>
+
+            {/* Accounts Snapshot prior to deletion */}
+            <div className="space-y-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <Users className="w-3.5 h-3.5 text-orange-400" />
+                <span>Assigned Accounts Pre-Deletion State ({historyModalData.accounts?.length || 0})</span>
+              </h4>
+              {historyModalData.accounts && historyModalData.accounts.length > 0 ? (
+                <div className="space-y-2">
+                  {historyModalData.accounts.map((acc: any, idx: number) => (
+                    <div key={idx} className="flex items-center justify-between p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs">
+                      <div>
+                        <span className="font-bold text-white block">{acc.email || acc.uid}</span>
+                        <span className="text-[11px] text-slate-400 capitalize">{acc.role.replace(/_/g, ' ')} • Collection: {acc.sourceCollection}</span>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        acc.isActive ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-slate-800 text-slate-400'
+                      }`}>
+                        {acc.isActive ? 'Was Active' : 'Was Suspended'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 italic p-3 rounded-xl bg-slate-950 border border-slate-800">No staff accounts bound prior to deletion.</p>
+              )}
+            </div>
+
+            {/* Audit Trail */}
+            <div className="space-y-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
+                <span>Franchise Audit Log Trail ({historyModalData.auditTrail?.length || 0})</span>
+              </h4>
+              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                {historyModalData.auditTrail && historyModalData.auditTrail.length > 0 ? (
+                  historyModalData.auditTrail.map((audit: any, idx: number) => (
+                    <div key={idx} className="p-2.5 rounded-xl bg-slate-950/80 border border-slate-800/80 text-[11px] flex items-center justify-between">
+                      <div>
+                        <span className="font-bold text-slate-200">{audit.actionType || 'AUDIT_EVENT'}</span>
+                        <span className="text-slate-400 block text-[10px]">By: {audit.actorEmail || audit.actorUid}</span>
+                      </div>
+                      <span className="text-slate-500 font-mono text-[10px]">
+                        {audit.timestamp ? new Date(audit.timestamp).toLocaleString() : ''}
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-xs text-slate-500 italic p-3 rounded-xl bg-slate-950 border border-slate-800">No historical audit logs found.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-slate-800 flex items-center justify-end">
+              <button
+                onClick={() => setHistoryModalData(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs"
+              >
+                Close Inspector
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── PERMANENT DELETE CONFIRMATION MODAL ─── */}
+      {permanentDeleteTarget && (
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-slate-950 border border-rose-600 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-5">
+            <div className="flex items-center gap-3 pb-3 border-b border-rose-900/40">
+              <div className="p-2.5 rounded-xl bg-rose-600/20 border border-rose-500/40 text-rose-400">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-white">Permanently Delete Franchise</h3>
+                <p className="text-xs text-rose-400 font-bold uppercase tracking-wider">High Stakes • Irreversible Action</p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200 space-y-2">
+              <p className="font-bold">
+                Are you completely sure you want to permanently purge <strong>{permanentDeleteTarget.name}</strong>?
+              </p>
+              <ul className="list-disc pl-4 space-y-1 text-slate-300">
+                <li>Operational configurations in <code>franchises</code> & <code>franchise_entities</code> will be permanently removed.</li>
+                <li>Associated POS terminal registrations and POS operator records will be purged.</li>
+                <li>Financial and order records are preserved in archived audit mode for statutory compliance.</li>
+              </ul>
+            </div>
+
+            <form onSubmit={handleConfirmPermanentDelete} className="space-y-4 text-xs">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  Type <span className="text-white font-mono font-bold select-all">{permanentDeleteTarget.name}</span> to confirm permanent deletion:
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={permanentDeleteConfirmName}
+                  onChange={(e) => setPermanentDeleteConfirmName(e.target.value)}
+                  placeholder="Type exact franchise name..."
+                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-rose-500/40 text-white placeholder-slate-500 focus:outline-none focus:border-rose-400 font-mono"
+                />
+              </div>
+
+              <div className="pt-3 border-t border-slate-800 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setPermanentDeleteTarget(null)}
+                  disabled={isPermanentDeleting}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={isPermanentDeleting || permanentDeleteConfirmName.trim().toLowerCase() !== permanentDeleteTarget.name.trim().toLowerCase()}
+                  className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold transition-all disabled:opacity-40 cursor-pointer shadow-xl shadow-rose-600/30"
+                >
+                  {isPermanentDeleting ? (
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      <span>Permanently Delete</span>
                     </>
                   )}
                 </button>
