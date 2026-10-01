@@ -106,23 +106,19 @@ export class MultiProviderGeocodeService {
     providersQueried.push('photon');
     searchPromises.push(this.queryPhoton(rawQuery, city, lat, lng));
 
-    // 2. Nominatim (OpenStreetMap) — always available, rich address hierarchy
-    providersQueried.push('nominatim');
-    searchPromises.push(this.queryNominatim(rawQuery, city, lat, lng));
-
-    // 3. Mapbox — if token configured
+    // 2. Mapbox — if token configured
     if (mapboxToken) {
       providersQueried.push('mapbox');
       searchPromises.push(this.queryMapbox(rawQuery, city, lat, lng, mapboxToken));
     }
 
-    // 4. Geoapify — if key configured
+    // 3. Geoapify — if key configured
     if (geoapifyKey) {
       providersQueried.push('geoapify');
       searchPromises.push(this.queryGeoapify(rawQuery, city, lat, lng, geoapifyKey));
     }
 
-    // 5. Mappls — if key configured
+    // 4. Mappls — if key configured
     if (mapplsKey) {
       providersQueried.push('mappls');
       searchPromises.push(this.queryMappls(rawQuery, city, lat, lng, mapplsKey));
@@ -146,28 +142,17 @@ export class MultiProviderGeocodeService {
     // Score and rank based on provider agreement, query match, and geographic proximity
     const rankedResults = this.rankResults(mergedResults, rawQuery, lat, lng);
 
-    // Attach authoritative serviceability check for top candidates
-    const finalResults = await Promise.all(
-      rankedResults.slice(0, limit).map(async (item) => {
-        try {
-          const serviceCheck = await CustomerOrderingContextService.resolveOrderingContext({
-            customerId: 'guest',
-            lat: item.latitude,
-            lng: item.longitude,
-            addressLine: item.formattedAddress
-          });
+    // Attach authoritative in-memory serviceability check for top candidates (0 Firestore reads)
+    const topCandidates = rankedResults.slice(0, limit);
+    const serviceChecks = await CustomerOrderingContextService.checkBatchServiceability(topCandidates);
 
-          item.isServiceable = serviceCheck.isServiceable;
-          item.serviceabilityMessage = serviceCheck.isServiceable
-            ? `Deliverable from ${serviceCheck.context?.branchName || 'Olive Pizza'}`
-            : serviceCheck.error || "Outside current delivery radius";
-          item.distanceKm = serviceCheck.context?.distanceKm;
-        } catch {
-          item.isServiceable = false;
-        }
-        return item;
-      })
-    );
+    const finalResults = topCandidates.map((item, idx) => {
+      const check = serviceChecks[idx];
+      item.isServiceable = check?.isServiceable ?? false;
+      item.serviceabilityMessage = check?.serviceabilityMessage ?? 'Outside current delivery radius';
+      item.distanceKm = check?.distanceKm;
+      return item;
+    });
 
     if (finalResults.length > 0) {
       geocodeCache.set(cacheKey, finalResults);
@@ -264,98 +249,6 @@ export class MultiProviderGeocodeService {
     }
   }
 
-  // ─── Provider: Nominatim (OpenStreetMap) ───────────────────────────────────
-  private static async queryNominatim(
-    query: string,
-    city?: string,
-    lat?: number,
-    lng?: number
-  ): Promise<{ provider: string; results: NormalizedLocationResult[] }> {
-    try {
-      const q = city ? `${query}, ${city}, India` : `${query}, India`;
-      const params: Record<string, any> = {
-        q,
-        format: 'json',
-        addressdetails: 1,
-        limit: 8,
-        countrycodes: 'in'
-      };
-
-      if (lat != null && lng != null) {
-        // Construct small 25km bounding viewbox around bias coordinates
-        const delta = 0.25;
-        params.viewbox = `${lng - delta},${lat + delta},${lng + delta},${lat - delta}`;
-      }
-
-      const res = await axios.get('https://nominatim.openstreetmap.org/search', {
-        params,
-        headers: {
-          'User-Agent': 'OlivePizzaApp/1.0 (contact: olivepizzarjn@gmail.com; platform: customer-web)',
-          'Accept-Language': 'en-IN,en;q=0.9'
-        },
-        timeout: 2000
-      });
-
-      const list = Array.isArray(res.data) ? res.data : [];
-      const results: NormalizedLocationResult[] = [];
-
-      for (const item of list) {
-        const latitude = parseFloat(item.lat);
-        const longitude = parseFloat(item.lon);
-        if (isNaN(latitude) || isNaN(longitude)) continue;
-
-        const addr = item.address || {};
-        const name = (
-          addr.amenity ||
-          addr.shop ||
-          addr.building ||
-          addr.road ||
-          addr.suburb ||
-          item.name ||
-          query
-        ).trim();
-
-        const subtitleParts = [
-          addr.suburb || addr.neighbourhood || addr.road,
-          addr.city || addr.town || addr.village || city,
-          addr.state,
-          addr.country || 'India'
-        ].filter(Boolean).filter((val, idx, arr) => arr.indexOf(val) === idx);
-
-        const formattedAddress = item.display_name || [name, ...subtitleParts].join(', ');
-
-        results.push({
-          id: `osm_${item.place_id || Math.random().toString(36).substring(2, 9)}`,
-          provider: 'nominatim',
-          name,
-          formattedAddress,
-          latitude,
-          longitude,
-          city: addr.city || addr.town || addr.village || city,
-          district: addr.county || addr.state_district,
-          state: addr.state,
-          country: addr.country || 'India',
-          pincode: addr.postcode,
-          type: item.type,
-          relevance: 0.8,
-          matchedProviders: ['nominatim'],
-          providerCount: 1,
-          address: {
-            road: addr.road || addr.pedestrian,
-            suburb: addr.suburb || addr.neighbourhood,
-            city: addr.city || addr.town || addr.village || city,
-            state: addr.state,
-            postcode: addr.postcode,
-            country: addr.country || 'India'
-          }
-        });
-      }
-
-      return { provider: 'nominatim', results };
-    } catch {
-      return { provider: 'nominatim', results: [] };
-    }
-  }
 
   // ─── Provider: Mapbox Geocoding API ────────────────────────────────────────
   private static async queryMapbox(

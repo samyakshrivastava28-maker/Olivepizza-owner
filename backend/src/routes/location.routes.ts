@@ -13,18 +13,26 @@ const router = Router();
 const geocodeCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 const citiesCache = new NodeCache({ stdTTL: 60, checkperiod: 30 });
 
-// Simple per-IP throttling map for Nominatim (ensures >= 1000ms between requests to follow OSM policy)
-const lastRequestTimeByIp = new Map<string, number>();
+// Global application-wide throttling lock for Nominatim reverse-geocoding (strictly max 1 req/sec app-wide per OSM policy)
+let lastNominatimRequestTime = 0;
+let nominatimQueuePromise: Promise<void> = Promise.resolve();
 
-const throttleNominatim = async (clientIp: string) => {
+const throttleNominatimApplicationWide = async (): Promise<void> => {
+  const currentLock = nominatimQueuePromise;
+  let release: () => void = () => {};
+  nominatimQueuePromise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  await currentLock;
   const now = Date.now();
-  const lastTime = lastRequestTimeByIp.get(clientIp) || 0;
-  const timeSinceLast = now - lastTime;
+  const timeSinceLast = now - lastNominatimRequestTime;
   if (timeSinceLast < 1000) {
     const delay = 1000 - timeSinceLast;
     await new Promise((resolve) => setTimeout(resolve, delay));
   }
-  lastRequestTimeByIp.set(clientIp, Date.now());
+  lastNominatimRequestTime = Date.now();
+  release();
 };
 
 // ============================================================================
@@ -412,6 +420,34 @@ router.get('/search-parallel', publicLimiter, async (req: Request, res: Response
   }
 });
 
+router.post('/search-parallel', publicLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const query = String(req.body?.q || req.body?.query || '').trim();
+    const city = String(req.body?.city || '').trim();
+    const lat = req.body?.lat != null ? parseFloat(String(req.body?.lat)) : undefined;
+    const lng = req.body?.lng != null ? parseFloat(String(req.body?.lng)) : undefined;
+    const limit = req.body?.limit != null ? parseInt(String(req.body?.limit), 10) : 10;
+
+    if (!query || query.length < 2) {
+      res.status(400).json({ success: false, error: 'Search query must be at least 2 characters.' });
+      return;
+    }
+
+    const response = await MultiProviderGeocodeService.searchParallel({
+      query,
+      city,
+      lat: isNaN(lat!) ? undefined : lat,
+      lng: isNaN(lng!) ? undefined : lng,
+      limit,
+    });
+
+    res.json(response);
+  } catch (error: any) {
+    console.error('[LocationRoutes] POST parallel search error:', error?.message);
+    res.status(500).json({ success: false, error: 'Parallel location search failed.' });
+  }
+});
+
 // ============================================================================
 // 2b. GET /api/location/geocode
 // Authoritative parallel multi-provider search with backward-compatible format
@@ -465,7 +501,7 @@ router.get('/geocode', publicLimiter, async (req: Request, res: Response): Promi
       results: formattedResults,
       providersQueried: parallelResponse.providersQueried,
       activeProviders: parallelResponse.activeProviders,
-      attribution: 'Multi-Provider Search (Mapbox, Geoapify, OpenStreetMap, Nominatim, Mappls)',
+      attribution: 'Multi-Provider Search (Mapbox, Geoapify, Photon, Mappls)',
     });
   } catch (error: any) {
     console.error('[LocationRoutes] Geocode proxy error:', error?.message);
@@ -499,8 +535,7 @@ router.get('/reverse-geocode', publicLimiter, async (req: Request, res: Response
       return;
     }
 
-    const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
-    await throttleNominatim(clientIp);
+    await throttleNominatimApplicationWide();
 
     const response = await axios.get('https://nominatim.openstreetmap.org/reverse', {
       params: {

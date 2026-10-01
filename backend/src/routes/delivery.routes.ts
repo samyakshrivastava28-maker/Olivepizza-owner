@@ -12,6 +12,7 @@ import { DeliveryCapacityService } from '../services/delivery/DeliveryCapacitySe
 import { webSocketServer } from '../services/websocket/WebSocketServer.js';
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 import { StoreBoundDeliveryFleetService, RiderOperationalState } from '../services/delivery/StoreBoundDeliveryFleetService.js';
+import { ApiSecurityMiddleware, ResponseSanitizationService } from '../security/index.js';
 
 const router = Router();
 
@@ -34,6 +35,7 @@ router.get('/availability', async (req: Request, res: Response) => {
 });
 
 router.use(verifyToken);
+router.use(ApiSecurityMiddleware.rejectParameterTampering());
 
 // Customer gets live location via polling
 router.get('/orders/:id/location', async (req: AuthRequest, res: Response) => {
@@ -70,7 +72,7 @@ router.get('/orders/:id/location', async (req: AuthRequest, res: Response) => {
   }
 });
 
-// Delivery partner gets their active tasks
+// Delivery partner gets their active tasks (Sanitized minimal DTO: customer PII & franchise financials omitted)
 router.get('/tasks', requireRole(['delivery', 'delivery_partner']), async (req: AuthRequest, res: Response) => {
   try {
     const deliveryPartnerId = req.user?.uid;
@@ -79,7 +81,7 @@ router.get('/tasks', requireRole(['delivery', 'delivery_partner']), async (req: 
       .where('status', 'in', ['partner_assigned', 'out_for_delivery', 'preparing', 'ready', 'picked_up'])
       .get();
       
-    const tasks = snapshot.docs.map(doc => ({
+    const tasks = snapshot.docs.map(doc => ResponseSanitizationService.toDeliveryOrderDTO({
       id: doc.id,
       ...doc.data()
     }));

@@ -33,6 +33,7 @@ import {
   expensiveLimiter 
 } from './config/security.config.js';
 import { errorSanitizerMiddleware, sanitizeErrorDetails, generateReferenceId } from './middleware/errorSanitizer.middleware.js';
+import { ApiSecurityMiddleware } from './security/index.js';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -200,6 +201,7 @@ app.use(cors({
 // Allow up to 50MB JSON Body Payload for high-resolution AI/pasted image uploads
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(ApiSecurityMiddleware.rejectParameterTampering());
 
 // API Performance & Correlation Tracker
 app.use((req, res, next) => {

@@ -1,5 +1,6 @@
 import { adminDb, adminAuth } from '../../config/firebase.js';
 import { FranchiseScopeService } from './FranchiseScopeService.js';
+import { CustomerOrderingContextService } from '../order/CustomerOrderingContextService.js';
 
 export interface PreDeleteAccountSnapshot {
   uid: string;
@@ -282,6 +283,8 @@ export class FranchiseLifecycleService {
         accountsDeactivatedCount: accountsSnapshot.length
       }
     });
+
+    CustomerOrderingContextService.invalidateBranchesSnapshot();
 
     return {
       success: true,
@@ -583,6 +586,8 @@ export class FranchiseLifecycleService {
       }
     });
 
+    CustomerOrderingContextService.invalidateBranchesSnapshot();
+
     return {
       success: true,
       message: `Franchise "${franchiseName}" recovered successfully. ${accountsRestoredCount} account(s) restored.`,
@@ -708,6 +713,8 @@ export class FranchiseLifecycleService {
         archivedOrdersCount: orderSnaps.docs.length
       }
     });
+
+    CustomerOrderingContextService.invalidateBranchesSnapshot();
 
     return {
       success: true,

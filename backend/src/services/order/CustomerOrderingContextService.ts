@@ -39,6 +39,191 @@ export class CustomerOrderingContextService {
     return R * c;
   }
 
+  private static cachedBranches: Array<{
+    id: string;
+    franchiseId: string;
+    name: string;
+    lat: number;
+    lng: number;
+    deliveryRadiusKm: number;
+  }> | null = null;
+  private static branchCacheExpiry: number = 0;
+  private static readonly BRANCH_CACHE_TTL_MS = 60 * 1000; // 60s cache
+
+  /**
+   * Invalidate operational branches snapshot cache (e.g. after franchise mutation)
+   */
+  public static invalidateBranchesSnapshot(): void {
+    this.cachedBranches = null;
+    this.branchCacheExpiry = 0;
+  }
+
+  /**
+   * Fetch active operational branches snapshot once and cache in-memory.
+   * Excludes deleted, deactivated, suspended, or planned branches.
+   */
+  public static async getActiveBranchesSnapshot(): Promise<Array<{
+    id: string;
+    franchiseId: string;
+    name: string;
+    lat: number;
+    lng: number;
+    deliveryRadiusKm: number;
+  }>> {
+    const now = Date.now();
+    if (this.cachedBranches && now < this.branchCacheExpiry) {
+      return this.cachedBranches;
+    }
+
+    const branches: Array<{
+      id: string;
+      franchiseId: string;
+      name: string;
+      lat: number;
+      lng: number;
+      deliveryRadiusKm: number;
+    }> = [];
+    const seenBranchIds = new Set<string>();
+
+    try {
+      // 1. Fetch active branches across franchises collection
+      const franchisesSnap = await adminDb.collection('franchises').get();
+      for (const bDoc of franchisesSnap.docs) {
+        const bData = bDoc.data();
+        const bStatus = String(bData.status || '').toLowerCase();
+        if (
+          bData.isActive === false ||
+          bStatus === 'deleted' ||
+          bStatus === 'deactivated' ||
+          bStatus === 'suspended' ||
+          bStatus === 'planned'
+        ) {
+          continue;
+        }
+
+        const bLat = Number(bData.lat ?? bData.coordinates?.lat ?? bData.location?.lat);
+        const bLng = Number(bData.lng ?? bData.coordinates?.lng ?? bData.location?.lng);
+        if (!isNaN(bLat) && !isNaN(bLng)) {
+          const maxRadius = Number(
+            bData.deliveryRadiusKm ||
+            bData.maxDeliveryRadiusKm ||
+            bData.deliverySettings?.maxDeliveryRadiusKm ||
+            bData.deliveryRadius ||
+            15
+          );
+
+          seenBranchIds.add(bDoc.id);
+          branches.push({
+            id: bDoc.id,
+            franchiseId: bData.franchiseId || bDoc.id,
+            name: bData.name || 'Olive Pizza Branch',
+            lat: bLat,
+            lng: bLng,
+            deliveryRadiusKm: maxRadius
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[CustomerOrderingContext] Warning reading franchises snapshot:', err);
+    }
+
+    // 2. Also check franchise_entities collection if available
+    try {
+      const entitiesSnap = await adminDb.collection('franchise_entities').get();
+      for (const eDoc of entitiesSnap.docs) {
+        const eData = eDoc.data();
+        const eStatus = String(eData.status || '').toLowerCase();
+        if (
+          eData.isActive === false ||
+          eStatus === 'deleted' ||
+          eStatus === 'deactivated' ||
+          eStatus === 'suspended' ||
+          eStatus === 'planned'
+        ) {
+          continue;
+        }
+
+        const bId = eData.mainBranchId || eDoc.id;
+        if (seenBranchIds.has(bId)) continue;
+
+        const eLat = Number(eData.lat ?? eData.coordinates?.lat ?? eData.location?.lat);
+        const eLng = Number(eData.lng ?? eData.coordinates?.lng ?? eData.location?.lng);
+        if (!isNaN(eLat) && !isNaN(eLng)) {
+          const maxRadius = Number(eData.deliveryRadiusKm || eData.maxDeliveryRadiusKm || 15);
+          branches.push({
+            id: bId,
+            franchiseId: eDoc.id,
+            name: eData.name || 'Olive Pizza Franchise',
+            lat: eLat,
+            lng: eLng,
+            deliveryRadiusKm: maxRadius
+          });
+          seenBranchIds.add(bId);
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    this.cachedBranches = branches;
+    this.branchCacheExpiry = now + this.BRANCH_CACHE_TTL_MS;
+    return branches;
+  }
+
+  /**
+   * Fast in-memory batch serviceability check for multiple location candidates.
+   * Eliminates per-candidate Firestore queries.
+   */
+  public static async checkBatchServiceability(candidates: Array<{ latitude: number; longitude: number }>): Promise<Array<{
+    isServiceable: boolean;
+    serviceabilityMessage: string;
+    distanceKm?: number;
+    branchId?: string;
+    branchName?: string;
+    franchiseId?: string;
+  }>> {
+    const branches = await this.getActiveBranchesSnapshot();
+
+    return candidates.map((cand) => {
+      const cLat = Number(cand.latitude);
+      const cLng = Number(cand.longitude);
+      if (isNaN(cLat) || isNaN(cLng)) {
+        return {
+          isServiceable: false,
+          serviceabilityMessage: 'Invalid coordinates'
+        };
+      }
+
+      let closestBranch: (typeof branches)[0] | null = null;
+      let minDistance = Infinity;
+
+      for (const b of branches) {
+        const dist = this.haversineDistanceKm(cLat, cLng, b.lat, b.lng);
+        if (dist <= b.deliveryRadiusKm && dist < minDistance) {
+          minDistance = dist;
+          closestBranch = b;
+        }
+      }
+
+      if (!closestBranch) {
+        return {
+          isServiceable: false,
+          serviceabilityMessage: 'Outside current delivery radius'
+        };
+      }
+
+      const roundedDist = Math.round(minDistance * 100) / 100;
+      return {
+        isServiceable: true,
+        serviceabilityMessage: `Deliverable from ${closestBranch.name} (${roundedDist} km)`,
+        distanceKm: roundedDist,
+        branchId: closestBranch.id,
+        branchName: closestBranch.name,
+        franchiseId: closestBranch.franchiseId
+      };
+    });
+  }
+
   /**
    * Resolves the authoritative Olive Pizza franchise & branch serving the provided GPS coordinates.
    * If customer is outside all active branches' delivery radius, rejects with OUT_OF_DELIVERY_ZONE.
@@ -62,86 +247,20 @@ export class CustomerOrderingContextService {
     const custLat = Number(lat);
     const custLng = Number(lng);
 
-    // 1. Fetch active branches across franchises collection
-    const branchesSnap = await adminDb.collection('franchises').get();
+    // 1. Fetch active branches using snapshot cache
+    const branches = await this.getActiveBranchesSnapshot();
     let closestBranch: any = null;
     let minDistance = Infinity;
 
-    for (const bDoc of branchesSnap.docs) {
-      const bData = bDoc.data();
-      const bStatus = String(bData.status || '').toLowerCase();
-      if (
-        bData.isActive === false ||
-        bStatus === 'deleted' ||
-        bStatus === 'deactivated' ||
-        bStatus === 'suspended' ||
-        bStatus === 'planned'
-      ) {
-        continue;
+    for (const b of branches) {
+      const dist = this.haversineDistanceKm(custLat, custLng, b.lat, b.lng);
+      if (dist <= b.deliveryRadiusKm && dist < minDistance) {
+        minDistance = dist;
+        closestBranch = {
+          ...b,
+          maxRadius: b.deliveryRadiusKm
+        };
       }
-
-      const bLat = Number(bData.lat ?? bData.coordinates?.lat ?? bData.location?.lat);
-      const bLng = Number(bData.lng ?? bData.coordinates?.lng ?? bData.location?.lng);
-
-      if (!isNaN(bLat) && !isNaN(bLng)) {
-        const dist = this.haversineDistanceKm(custLat, custLng, bLat, bLng);
-        const maxRadius = Number(
-          bData.deliveryRadiusKm ||
-          bData.maxDeliveryRadiusKm ||
-          bData.deliverySettings?.maxDeliveryRadiusKm ||
-          bData.deliveryRadius ||
-          15
-        );
-
-        if (dist <= maxRadius && dist < minDistance) {
-          minDistance = dist;
-          closestBranch = {
-            id: bDoc.id,
-            ...bData,
-            computedDistance: dist,
-            maxRadius
-          };
-        }
-      }
-    }
-
-    // Also check franchise_entities collection if available
-    try {
-      const entitiesSnap = await adminDb.collection('franchise_entities').get();
-      for (const eDoc of entitiesSnap.docs) {
-        const eData = eDoc.data();
-        const eStatus = String(eData.status || '').toLowerCase();
-        if (
-          eData.isActive === false ||
-          eStatus === 'deleted' ||
-          eStatus === 'deactivated' ||
-          eStatus === 'suspended' ||
-          eStatus === 'planned'
-        ) {
-          continue;
-        }
-
-        const eLat = Number(eData.lat ?? eData.coordinates?.lat ?? eData.location?.lat);
-        const eLng = Number(eData.lng ?? eData.coordinates?.lng ?? eData.location?.lng);
-
-        if (!isNaN(eLat) && !isNaN(eLng)) {
-          const dist = this.haversineDistanceKm(custLat, custLng, eLat, eLng);
-          const maxRadius = Number(eData.deliveryRadiusKm || eData.maxDeliveryRadiusKm || 15);
-
-          if (dist <= maxRadius && dist < minDistance) {
-            minDistance = dist;
-            closestBranch = {
-              id: eData.mainBranchId || eDoc.id,
-              franchiseId: eDoc.id,
-              name: eData.name,
-              computedDistance: dist,
-              maxRadius
-            };
-          }
-        }
-      }
-    } catch (entityErr) {
-      // Non-fatal fallback
     }
 
     // 2. Strict Delivery Radius Evaluation

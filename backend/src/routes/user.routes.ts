@@ -4,10 +4,12 @@ import { verifyToken, AuthRequest } from '../middleware/auth.middleware.js';
 import { adminAuth, adminDb } from '../config/firebase.js';
 import { LoyaltyService } from '../services/loyalty/LoyaltyService.js';
 import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
+import { ApiSecurityMiddleware, ResponseSanitizationService } from '../security/index.js';
 
 const router = Router();
 
 router.use(verifyToken);
+router.use(ApiSecurityMiddleware.rejectParameterTampering());
 
 // Upsert user (Called after Firebase Auth signup/login)
 router.post('/sync', async (req: AuthRequest, res: Response): Promise<void> => {
@@ -236,12 +238,14 @@ router.get('/profile', async (req: AuthRequest, res: Response): Promise<void> =>
     }
 
     const u = doc.data() as any;
+    const profileDTO = ResponseSanitizationService.toCustomerProfileDTO({ id: doc.id, ...u });
     res.json({
-      ...u,
+      success: true,
+      user: profileDTO,
       address: {
-        addressLine: u.full_address,
-        city: u.city,
-        state: u.state,
+        addressLine: u.full_address || u.fullAddress || '',
+        city: u.city || '',
+        state: u.state || '',
         lat: u.lat,
         lng: u.lng
       }
@@ -288,11 +292,12 @@ router.put('/profile', async (req: AuthRequest, res: Response): Promise<void> =>
 
     await userRef.update(updates);
     const updatedDoc = await userRef.get();
+    const sanitizedUser = ResponseSanitizationService.toCustomerProfileDTO({ id: updatedDoc.id, ...updatedDoc.data() });
 
     res.json({
       success: true,
       message: 'Profile updated successfully',
-      user: { id: updatedDoc.id, ...updatedDoc.data() }
+      user: sanitizedUser
     });
   } catch (error: any) {
     console.error('[UserRoutes] Profile update error:', error);
