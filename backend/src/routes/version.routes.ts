@@ -1,5 +1,5 @@
 import express from 'express';
-import { supabase } from '../lib/supabase.js';
+import { adminDb, adminMessaging } from '../config/firebase.js';
 import { query } from '../lib/db.js';
 import { execSync } from 'child_process';
 
@@ -24,20 +24,26 @@ router.get('/check', async (req, res) => {
   }
 });
 
-// Get version settings (public)
+// Get version settings (public) - Authoritative source: Firestore settings/app_update
 router.get('/settings', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('app_update_settings')
-      .select('*')
-      .eq('id', 1)
-      .single();
-
-    if (!error && data) {
-      return res.json(data);
+    const doc = await adminDb.collection('settings').doc('app_update').get();
+    if (doc.exists) {
+      const data = doc.data() || {};
+      return res.json({
+        id: 1,
+        latest_version: data.latest_version || process.env.npm_package_version || '1.0.0',
+        minimum_version: data.minimum_version || '1.0.0',
+        update_mode: data.update_mode || 'optional',
+        mandatory_update: Boolean(data.mandatory_update),
+        maintenance_mode: Boolean(data.maintenance_mode),
+        release_notes: data.release_notes || 'Enjoy a faster experience, improved ordering and new features.',
+        release_date: data.release_date || new Date().toISOString(),
+        download_url: data.download_url || 'https://github.com/samyakshrivastava28-maker/Olive-Pizza/releases/latest',
+      });
     }
   } catch (err: any) {
-    // Supabase table or query failure fallback
+    // Firestore read fallback
   }
 
   // Fallback to PostgreSQL or default app settings
@@ -52,6 +58,7 @@ router.get('/settings', async (req, res) => {
         minimum_version: cfg.minimum_version || '1.0.0',
         update_mode: cfg.update_mode || 'optional',
         mandatory_update: Boolean(cfg.mandatory_update),
+        maintenance_mode: Boolean(cfg.maintenance_mode),
         release_notes: cfg.release_notes || 'Enjoy a faster experience, improved ordering and new features.',
         release_date: cfg.release_date || new Date().toISOString(),
         download_url: 'https://github.com/samyakshrivastava28-maker/Olive-Pizza/releases/latest',
@@ -65,6 +72,7 @@ router.get('/settings', async (req, res) => {
     minimum_version: '1.0.0',
     update_mode: 'optional',
     mandatory_update: false,
+    maintenance_mode: false,
     release_notes: 'Enjoy a faster experience, improved ordering and new features.',
     release_date: new Date().toISOString(),
     download_url: 'https://github.com/samyakshrivastava28-maker/Olive-Pizza/releases/latest',
@@ -93,17 +101,19 @@ router.get('/status', async (req, res) => {
   });
 });
 
-// Admin ONLY routes below (assuming some auth middleware, I will use a simple check or rely on caller for now)
-// In a real app we'd add `requireAdmin` middleware.
-
+// Admin ONLY routes below
 router.get('/history', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('app_versions')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const snapshot = await adminDb.collection('app_versions')
+      .orderBy('created_at', 'desc')
+      .limit(50)
+      .get();
 
-    if (error) throw error;
+    const data = snapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+
     res.json(data);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -114,50 +124,37 @@ router.post('/publish', async (req, res) => {
   try {
     const { version_string, build_number, release_notes, features, bug_fixes, update_mode, update_minimum } = req.body;
 
-    // Insert new version
-    const { data: newVersion, error: insertError } = await supabase
-      .from('app_versions')
-      .insert([{
-        version_string,
-        build_number,
-        release_notes,
-        features: features || [],
-        bug_fixes: bug_fixes || [],
-        status: 'published'
-      }])
-      .select()
-      .single();
+    const versionDoc = {
+      version_string,
+      build_number: build_number || null,
+      release_notes: release_notes || '',
+      features: features || [],
+      bug_fixes: bug_fixes || [],
+      status: 'published',
+      created_at: new Date().toISOString()
+    };
 
-    if (insertError) throw insertError;
+    // Insert new version into Firestore
+    const newVersionRef = await adminDb.collection('app_versions').add(versionDoc);
 
-    // Update settings
-    const { data: currentSettings, error: settingsError } = await supabase
-      .from('app_update_settings')
-      .select('*')
-      .eq('id', 1)
-      .single();
-
-    if (settingsError) throw settingsError;
+    // Fetch current settings to preserve existing fields
+    const settingsRef = adminDb.collection('settings').doc('app_update');
+    const currentSnap = await settingsRef.get();
+    const currentSettings = currentSnap.exists ? currentSnap.data() || {} : {};
 
     const updates = {
       latest_version: version_string,
-      update_mode: update_mode || currentSettings.update_mode,
-      minimum_version: update_minimum ? version_string : currentSettings.minimum_version,
+      update_mode: update_mode || currentSettings.update_mode || 'optional',
+      minimum_version: update_minimum ? version_string : (currentSettings.minimum_version || '1.0.0'),
       updated_at: new Date().toISOString()
     };
 
-    const { error: updateError } = await supabase
-      .from('app_update_settings')
-      .update(updates)
-      .eq('id', 1);
-
-    if (updateError) throw updateError;
+    await settingsRef.set(updates, { merge: true });
 
     // Trigger FCM Broadcast
     let successCount = 0;
     let failureCount = 0;
     try {
-      const { adminDb, adminMessaging } = await import('../config/firebase.js');
       const usersSnapshot = await adminDb.collection('users').where('notificationEnabled', '==', true).get();
       let tokens: string[] = [];
       usersSnapshot.forEach(doc => {
@@ -190,33 +187,33 @@ router.post('/publish', async (req, res) => {
       console.error("FCM Broadcast failed:", fcmError);
     }
 
-    res.json({ success: true, version: newVersion, stats: { successCount, failureCount } });
+    res.json({
+      success: true,
+      version: { id: newVersionRef.id, ...versionDoc },
+      stats: { successCount, failureCount }
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
 router.put('/settings', async (req, res) => {
-    try {
-        const { update_mode, minimum_version, maintenance_mode } = req.body;
-        
-        const updates: any = { updated_at: new Date().toISOString() };
-        if (update_mode !== undefined) updates.update_mode = update_mode;
-        if (minimum_version !== undefined) updates.minimum_version = minimum_version;
-        if (maintenance_mode !== undefined) updates.maintenance_mode = maintenance_mode;
-
-        const { data, error } = await supabase
-          .from('app_update_settings')
-          .update(updates)
-          .eq('id', 1)
-          .select()
-          .single();
+  try {
+    const { update_mode, minimum_version, maintenance_mode } = req.body;
     
-        if (error) throw error;
-        res.json(data);
-    } catch (err: any) {
-        res.status(500).json({ error: err.message });
-    }
+    const updates: any = { updated_at: new Date().toISOString() };
+    if (update_mode !== undefined) updates.update_mode = update_mode;
+    if (minimum_version !== undefined) updates.minimum_version = minimum_version;
+    if (maintenance_mode !== undefined) updates.maintenance_mode = maintenance_mode;
+
+    const settingsRef = adminDb.collection('settings').doc('app_update');
+    await settingsRef.set(updates, { merge: true });
+    const updatedSnap = await settingsRef.get();
+    
+    res.json({ id: 1, ...updatedSnap.data() });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;

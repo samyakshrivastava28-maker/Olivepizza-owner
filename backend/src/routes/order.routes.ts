@@ -611,6 +611,9 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       }
     }
 
+    let branchDeliverySettings: any = null;
+    let restaurantDeliverySettings: any = null;
+
     // Lookup resolved branch details to guarantee consistent name & IDs
     try {
       const bDoc = await adminDb.collection('franchises').doc(resolvedBranchId).get();
@@ -619,6 +622,7 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         resolvedBranchName = bData.name || resolvedBranchName;
         resolvedFranchiseId = bData.franchiseId || resolvedFranchiseId;
         resolvedOrgId = bData.organizationId || resolvedOrgId;
+        branchDeliverySettings = bData.deliverySettings || null;
 
         // Check operational availability of branch
         if (bData.isActive === false || bData.isOpen === false || bData.acceptingOrders === false) {
@@ -640,6 +644,7 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       const restDoc = await adminDb.collection('restaurant_settings').doc(resolvedBranchId).get();
       if (restDoc.exists) {
         const restData = restDoc.data() || {};
+        restaurantDeliverySettings = restData.deliverySettings || restData;
         if (restData.isOpen === false || restData.acceptingOrders === false) {
           res.status(400).json({
             error: restData.closeReason || `${resolvedBranchName} is currently closed and not accepting orders.`,
@@ -669,88 +674,140 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
 
     console.log("Order attempt:", { phone: userPhone, address: userAddress, itemsCount: items.length });
 
-    // 2. Validate prices from Firestore / DB across collections
+    // 2. Validate prices from Firestore / DB across collections (Strict Authoritative Pricing)
     let serverCalculatedTotal = 0;
     const validatedItems: any[] = [];
 
     for (const item of items) {
       const itemId = item.menuItemId || item.id;
-      let menuData: any = null;
+      if (!itemId || typeof itemId !== 'string') {
+        res.status(400).json({ error: 'Invalid or missing menu item identifier.', code: 'INVALID_MENU_ITEM' });
+        return;
+      }
 
-      if (itemId && typeof itemId === 'string' && !itemId.startsWith('item-')) {
-        try {
-          // 1. Check products collection
-          let docSnap = await adminDb.collection('products').doc(itemId).get();
+      let menuData: any = null;
+      try {
+        // 1. Check products collection
+        let docSnap = await adminDb.collection('products').doc(itemId).get();
+        if (docSnap.exists) {
+          menuData = docSnap.data();
+        } else {
+          // 2. Check menu_items collection
+          docSnap = await adminDb.collection('menu_items').doc(itemId).get();
           if (docSnap.exists) {
             menuData = docSnap.data();
           } else {
-            // 2. Check menu_items collection
-            docSnap = await adminDb.collection('menu_items').doc(itemId).get();
+            // 3. Check combos collection
+            docSnap = await adminDb.collection('combos').doc(itemId).get();
             if (docSnap.exists) {
               menuData = docSnap.data();
-            } else {
-              // 3. Check combos collection
-              docSnap = await adminDb.collection('combos').doc(itemId).get();
-              if (docSnap.exists) {
-                menuData = docSnap.data();
-              }
             }
           }
-        } catch (dbReadErr) {
-          console.warn('[Orders] DB lookup fallback:', dbReadErr);
+        }
+      } catch (dbReadErr) {
+        console.warn('[Orders] DB lookup fallback:', dbReadErr);
+      }
+
+      // Security check: Must exist in authoritative catalog
+      if (!menuData) {
+        res.status(400).json({
+          error: `Item "${item.name || itemId}" was not found in our authoritative menu catalog.`,
+          code: 'INVALID_MENU_ITEM'
+        });
+        return;
+      }
+
+      if (menuData.isAvailable === false || menuData.isActive === false) {
+        res.status(400).json({ error: 'Item ' + (menuData.name || menuData.productName || item.name) + ' is currently unavailable' });
+        return;
+      }
+
+      // Authoritative Price Determination
+      let itemPrice = 0;
+      const selectedSize = (item.size || item.variant || '').toLowerCase();
+      if (selectedSize && menuData.sizes && menuData.sizes[selectedSize]?.price) {
+        itemPrice = Number(menuData.sizes[selectedSize].price);
+      } else if (selectedSize && Array.isArray(menuData.variants)) {
+        const variant = menuData.variants.find((v: any) => (v.name || v.size || '').toLowerCase() === selectedSize);
+        if (variant && variant.price) {
+          itemPrice = Number(variant.price);
         }
       }
 
-      let itemPrice = Number(item.price || 0);
-      let itemName = item.name || 'Artisan Pizza Item';
-      let itemImage = item.image || '';
-
-      if (menuData) {
-        if (menuData.isAvailable === false || menuData.isActive === false) {
-          res.status(400).json({ error: 'Item ' + (menuData.name || menuData.productName || item.name) + ' is currently unavailable' });
-          return;
-        }
-        const dbPrice = Number(menuData.offerPrice || menuData.basePrice || menuData.price || 0);
-        if (dbPrice > 0) {
-          itemPrice = dbPrice;
-        } else if (!itemPrice || itemPrice <= 0) {
-          itemPrice = 299;
-        }
-        itemName = menuData.productName || menuData.name || itemName;
-        itemImage = menuData.imageUrl || menuData.image || itemImage;
+      if (!itemPrice || itemPrice <= 0) {
+        itemPrice = Number(menuData.offerPrice || menuData.basePrice || menuData.price || 0);
       }
 
       if (itemPrice <= 0) {
-        itemPrice = 299;
+        res.status(400).json({
+          error: `Unable to verify price for item "${menuData.name || menuData.productName || item.name}".`,
+          code: 'PRICE_VERIFICATION_FAILED'
+        });
+        return;
       }
 
-      const qty = Number(item.quantity || 1);
+      const itemName = menuData.productName || menuData.name || item.name || 'Artisan Pizza Item';
+      const itemImage = menuData.imageUrl || menuData.image || item.image || '';
+
+      const qty = Math.max(1, Math.min(50, Math.floor(Number(item.quantity || 1))));
       let addonsCost = 0;
+      const validatedAddons: any[] = [];
       if (Array.isArray(item.addons)) {
         for (const addon of item.addons) {
-          addonsCost += Number(addon?.price || 0);
+          if (!addon) continue;
+          let addonPrice = Number(addon.price || 0);
+          if (Array.isArray(menuData.addons)) {
+            const authoritativeAddon = menuData.addons.find((a: any) => (a.id === addon.id || a.name === addon.name));
+            if (authoritativeAddon) {
+              addonPrice = Number(authoritativeAddon.price || 0);
+            }
+          }
+          addonsCost += addonPrice;
+          validatedAddons.push({
+            id: addon.id || addon.name,
+            name: addon.name,
+            price: addonPrice
+          });
         }
       }
       serverCalculatedTotal += (itemPrice + addonsCost) * qty;
 
       validatedItems.push({
-        menuItemId: itemId || 'item-' + Math.random().toString(36).substr(2, 9),
+        menuItemId: itemId,
         name: itemName,
         price: itemPrice,
         quantity: qty,
         size: item.size || item.variant || 'regular',
         crust: item.crust || 'normal',
         image: itemImage,
-        addons: item.addons || []
+        addons: validatedAddons
       });
     }
 
-    const deliveryFee = deliveryType === 'delivery' ? Number(req.body.deliveryFee ?? 40) : 0;
+    // Authoritative Server-side Delivery Fee Calculation
+    let deliveryFee = 0;
+    if (deliveryType === 'delivery') {
+      const baseFee = Number(
+        branchDeliverySettings?.deliveryFee ??
+        restaurantDeliverySettings?.deliveryFee ??
+        restaurantDeliverySettings?.deliveryCharge ??
+        30
+      );
+      const freeAbove = Number(
+        branchDeliverySettings?.freeDeliveryThreshold ??
+        restaurantDeliverySettings?.freeDeliveryAbove ??
+        restaurantDeliverySettings?.freeDeliveryThreshold ??
+        500
+      );
+      if (freeAbove > 0 && serverCalculatedTotal >= freeAbove) {
+        deliveryFee = 0;
+      } else {
+        deliveryFee = Math.max(0, baseFee);
+      }
+    }
     const taxes = Math.round(serverCalculatedTotal * 0.05);
 
-    // ── PHASE 3: SERVER-SIDE COUPON REVALIDATION ──────────────────────────────
-    // The client may supply a couponCode. The server independently verifies it.
-    // Client-supplied discountAmount is IGNORED in favor of the server-calculated value.
+    // ── PHASE 3: SERVER-SIDE COUPON REVALIDATION & CONCURRENCY ATOMICITY ────────
     let discountAmount = 0;
     let appliedCouponCode: string | null = null;
     let couponRejectReason: string | null = null;
@@ -764,26 +821,37 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
           .get();
 
         if (!couponSnap.empty) {
-          const couponData = couponSnap.docs[0].data();
-          const now = new Date();
-          const expiresAt = couponData.expiresAt ? new Date(couponData.expiresAt) : null;
-          const startsAt = couponData.startsAt ? new Date(couponData.startsAt) : null;
-          const usageCount = Number(couponData.usageCount || 0);
-          const usageLimit = Number(couponData.usageLimit || Infinity);
-          const minOrderAmount = Number(couponData.minOrderAmount || 0);
+          const couponDocRef = couponSnap.docs[0].ref;
 
-          if (!couponData.isActive) {
-            couponRejectReason = `Coupon ${clientCouponCode} is inactive.`;
-          } else if (expiresAt && now > expiresAt) {
-            couponRejectReason = `Coupon ${clientCouponCode} has expired.`;
-          } else if (startsAt && now < startsAt) {
-            couponRejectReason = `Coupon ${clientCouponCode} is not yet valid.`;
-          } else if (usageCount >= usageLimit) {
-            couponRejectReason = `Coupon ${clientCouponCode} has reached its usage limit.`;
-          } else if (serverCalculatedTotal < minOrderAmount) {
-            couponRejectReason = `Minimum order amount for this coupon is ₹${minOrderAmount}. Current subtotal: ₹${serverCalculatedTotal}.`;
-          } else {
-            // Calculate server-side discount
+          await adminDb.runTransaction(async (transaction) => {
+            const freshCouponDoc = await transaction.get(couponDocRef);
+            if (!freshCouponDoc.exists) {
+              throw new Error('COUPON_NOT_FOUND');
+            }
+            const couponData = freshCouponDoc.data()!;
+            const now = new Date();
+            const expiresAt = couponData.expiresAt ? new Date(couponData.expiresAt) : null;
+            const startsAt = couponData.startsAt ? new Date(couponData.startsAt) : null;
+            const usageCount = Number(couponData.usageCount || 0);
+            const usageLimit = Number(couponData.usageLimit || Infinity);
+            const minOrderAmount = Number(couponData.minOrderAmount || 0);
+
+            if (!couponData.isActive) {
+              throw new Error(`Coupon ${clientCouponCode} is inactive.`);
+            }
+            if (expiresAt && now > expiresAt) {
+              throw new Error(`Coupon ${clientCouponCode} has expired.`);
+            }
+            if (startsAt && now < startsAt) {
+              throw new Error(`Coupon ${clientCouponCode} is not yet valid.`);
+            }
+            if (usageCount >= usageLimit) {
+              throw new Error(`Coupon ${clientCouponCode} has reached its usage limit.`);
+            }
+            if (serverCalculatedTotal < minOrderAmount) {
+              throw new Error(`Minimum order amount for this coupon is ₹${minOrderAmount}. Current subtotal: ₹${serverCalculatedTotal}.`);
+            }
+
             const discountType: string = couponData.discountType || 'percentage';
             const discountValue = Number(couponData.discountValue || 0);
             const maxDiscount = Number(couponData.maxDiscount || Infinity);
@@ -794,19 +862,21 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
               discountAmount = Math.min(discountValue, serverCalculatedTotal);
             }
 
-            appliedCouponCode = clientCouponCode;
-            // Increment usage count asynchronously (non-blocking)
-            adminDb.collection('coupons').doc(couponSnap.docs[0].id).update({
-              usageCount: (couponData.usageCount || 0) + 1,
+            transaction.update(couponDocRef, {
+              usageCount: usageCount + 1,
               lastUsedAt: new Date().toISOString()
-            }).catch((e) => console.warn('[Orders] Coupon usage count update warning:', e));
-          }
+            });
+          });
+
+          appliedCouponCode = clientCouponCode;
         } else {
           couponRejectReason = `Coupon ${clientCouponCode} does not exist.`;
         }
       } catch (couponErr: any) {
-        console.warn('[Orders] Coupon validation error (non-blocking, coupon not applied):', couponErr.message);
-        couponRejectReason = 'Coupon validation temporarily unavailable. Order placed without discount.';
+        console.warn('[Orders] Coupon validation error:', couponErr.message);
+        couponRejectReason = couponErr.message || 'Coupon validation failed. Order placed without discount.';
+        discountAmount = 0;
+        appliedCouponCode = null;
       }
     }
 
@@ -1657,6 +1727,16 @@ router.post('/:id/rating', verifyToken, async (req: AuthRequest, res: Response):
     const orderData = snap.data()!;
     if (orderData.userId !== userId && req.user?.role !== 'owner' && req.user?.role !== 'admin') {
       res.status(403).json({ error: 'Forbidden: You can only rate your own orders.' });
+      return;
+    }
+
+    if (String(orderData.status || '').toLowerCase() !== 'delivered') {
+      res.status(400).json({ error: 'Only completed and delivered orders can be rated.', code: 'ORDER_NOT_DELIVERED' });
+      return;
+    }
+
+    if (orderData.isRated === true) {
+      res.status(400).json({ error: 'This order has already been rated.', code: 'ORDER_ALREADY_RATED' });
       return;
     }
 

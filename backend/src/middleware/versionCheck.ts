@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { supabase } from '../lib/supabase.js';
+import { adminDb } from '../config/firebase.js';
 import semver from 'semver';
 
 // Cache settings for a short time to avoid hitting the DB on every single request
@@ -19,14 +19,9 @@ export const versionCheck = async (req: Request, res: Response, next: NextFuncti
   try {
     const now = Date.now();
     if (!cachedSettings || now - lastCheckTime > CACHE_TTL) {
-      const { data, error } = await supabase
-        .from('app_update_settings')
-        .select('*')
-        .eq('id', 1)
-        .single();
-        
-      if (!error && data) {
-        cachedSettings = data;
+      const doc = await adminDb.collection('settings').doc('app_update').get();
+      if (doc.exists) {
+        cachedSettings = doc.data();
         lastCheckTime = now;
       }
     }

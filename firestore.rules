@@ -155,6 +155,16 @@ service cloud.firestore {
       allow write: if isSignedIn();
     }
 
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow write: if hasFullAccess();
+    }
+
+    match /order_ratings/{ratingId} {
+      allow read: if hasFullAccess();
+      allow write: if hasFullAccess();
+    }
+
     match /notifications/{notificationId} {
       allow read: if hasFullAccess() || isOwner(resource.data.userId);
       allow write: if hasFullAccess();
@@ -174,17 +184,17 @@ service cloud.firestore {
     }
     
     match /client_errors/{errorId} {
-      allow create: if true;
+      allow create: if request.resource.data.size() < 12;
       allow read, update, delete: if hasFullAccess();
     }
     
     match /activity_logs/{logId} {
-      allow create: if true;
+      allow create: if request.resource.data.size() < 12;
       allow read, update, delete: if hasFullAccess();
     }
     
     match /crash_reports/{reportId} {
-      allow create: if true;
+      allow create: if request.resource.data.size() < 12;
       allow read, update, delete: if hasFullAccess();
     }
 
