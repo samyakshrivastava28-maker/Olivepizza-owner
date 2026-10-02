@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
-import { pgPool } from '../config/postgres.js';
-import { adminDb } from '../config/firebase.js';
+import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 
 const router = Router();
 const OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving';
@@ -69,48 +68,34 @@ router.post('/route', verifyToken, async (req: AuthRequest, res: Response) => {
       throw new Error(`OSRM API error: ${fetchRes.status}`);
     }
 
-    const json = await fetchRes.json();
-    if (!json.routes?.[0]) {
+    const data: any = await fetchRes.json();
+
+    if (!data.routes || data.routes.length === 0) {
       res.status(404).json({ error: 'No route found between coordinates' });
       return;
     }
 
-    const route = json.routes[0];
+    const route = data.routes[0];
+    const distanceMeters = Math.round(route.distance);
+    const durationSeconds = Math.round(route.duration);
     const coordinates = decodePolyline(route.geometry);
 
-    const steps = [];
-    for (const leg of route.legs || []) {
-      for (const step of leg.steps || []) {
-        steps.push({
-          distance: step.distance,
-          duration: step.duration,
-          name: step.name || '',
-          maneuver: {
-            type: step.maneuver?.type || 'continue',
-            modifier: step.maneuver?.modifier,
-            bearing_before: step.maneuver?.bearing_before,
-            bearing_after: step.maneuver?.bearing_after,
-          },
-        });
-      }
-    }
-
-    const geojson: any = {
-      type: 'Feature',
-      properties: {},
-      geometry: {
-        type: 'LineString',
-        coordinates,
-      },
-    };
+    const steps = (route.legs?.[0]?.steps || []).map((s: any) => ({
+      instruction: s.maneuver?.instruction || s.name || 'Proceed along route',
+      distanceMeters: Math.round(s.distance),
+      durationSeconds: Math.round(s.duration),
+      modifier: s.maneuver?.modifier || null,
+      type: s.maneuver?.type || 'turn'
+    }));
 
     res.json({
-      coordinates,
-      distanceMeters: Math.round(route.distance),
-      durationSeconds: Math.round(route.duration),
-      steps,
-      geojson,
+      success: true,
       orderId: orderId || null,
+      distanceKm: Number((distanceMeters / 1000).toFixed(2)),
+      durationMinutes: Math.ceil(durationSeconds / 60),
+      geometry: route.geometry,
+      coordinates,
+      steps
     });
   } catch (err: any) {
     console.error('[NavigationRoute] Route calculation error:', err.message);
@@ -130,22 +115,11 @@ router.post('/session/start', verifyToken, requireRole(['delivery', 'delivery_pa
     }
 
     const sessionId = `nav_${orderId}_${deliveryPartnerId}`;
-    const client = await pgPool.connect();
-
-    try {
-      await client.query(`
-        INSERT INTO navigation_sessions 
-          (id, order_id, delivery_partner_id, status, started_at, expires_at)
-        VALUES ($1, $2, $3, 'ACTIVE', CURRENT_TIMESTAMP, NULL)
-        ON CONFLICT (id) 
-        DO UPDATE SET 
-          status = 'ACTIVE',
-          ended_at = NULL,
-          expires_at = NULL
-      `, [sessionId, orderId, deliveryPartnerId]);
-    } finally {
-      client.release();
-    }
+    await SupabaseGpsService.startNavigationSession({
+      sessionId,
+      orderId,
+      deliveryPartnerId
+    });
 
     res.json({ success: true, sessionId, status: 'ACTIVE' });
   } catch (err: any) {
@@ -166,28 +140,23 @@ router.post('/session/update', verifyToken, requireRole(['delivery', 'delivery_p
     }
 
     const sessionId = `nav_${orderId}_${deliveryPartnerId}`;
-    const client = await pgPool.connect();
 
-    try {
-      // Ensure session is ACTIVE
-      await client.query(`
-        INSERT INTO navigation_sessions 
-          (id, order_id, delivery_partner_id, status, started_at, expires_at)
-        VALUES ($1, $2, $3, 'ACTIVE', CURRENT_TIMESTAMP, NULL)
-        ON CONFLICT (id) 
-        DO UPDATE SET status = 'ACTIVE', expires_at = NULL
-      `, [sessionId, orderId, deliveryPartnerId]);
+    // Ensure session is ACTIVE & record telemetry point directly in Supabase
+    await SupabaseGpsService.startNavigationSession({
+      sessionId,
+      orderId,
+      deliveryPartnerId
+    });
 
-      // Record telemetry point
-      await client.query(`
-        INSERT INTO navigation_points 
-          (session_id, order_id, latitude, longitude, speed, heading, accuracy, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
-      `, [sessionId, orderId, latitude, longitude, speed || null, heading || null, accuracy || null]);
-
-    } finally {
-      client.release();
-    }
+    await SupabaseGpsService.appendNavigationPoint({
+      sessionId,
+      orderId,
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      speed: speed != null ? Number(speed) : null,
+      heading: heading != null ? Number(heading) : null,
+      accuracy: accuracy != null ? Number(accuracy) : null
+    });
 
     res.json({ success: true, sessionId });
   } catch (err: any) {
@@ -208,19 +177,7 @@ router.post('/session/stop', verifyToken, requireRole(['delivery', 'delivery_par
     }
 
     const sessionId = `nav_${orderId}_${deliveryPartnerId}`;
-    const client = await pgPool.connect();
-
-    try {
-      await client.query(`
-        UPDATE navigation_sessions 
-        SET status = 'STOPPED', 
-            ended_at = CURRENT_TIMESTAMP, 
-            expires_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes'
-        WHERE id = $1 AND status = 'ACTIVE'
-      `, [sessionId]);
-    } finally {
-      client.release();
-    }
+    await SupabaseGpsService.endNavigationSession(sessionId);
 
     res.json({ success: true, sessionId, status: 'STOPPED', expiresAtInMinutes: 5 });
   } catch (err: any) {

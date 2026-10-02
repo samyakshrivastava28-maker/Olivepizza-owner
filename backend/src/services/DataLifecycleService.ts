@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import { pgPool } from '../config/postgres.js';
+import { SupabaseGpsService } from './gps/SupabaseGpsService.js';
 
 export class DataLifecycleService {
   constructor() {
@@ -29,6 +30,9 @@ export class DataLifecycleService {
   public async runMinutelyCleanup() {
     let client: any = null;
     try {
+      // 0. Prune authoritative Supabase GPS breadcrumbs older than 5 minutes
+      await SupabaseGpsService.pruneStaleNavigationPoints(5).catch(() => {});
+
       client = await pgPool.connect();
       // 1. Delete SQL live navigation data for active deliveries updated > 5 mins ago or completed orders > 5 mins ago
       await client.query(`
@@ -92,6 +96,13 @@ export class DataLifecycleService {
     if (!orderId) return false;
     console.log(`[DataLifecycle] 🗑️ Executing 5-min post-delivery tracking purge for order "${orderId}"...`);
     
+    // 0. Supabase Authoritative GPS Telemetry Cleanup
+    try {
+      await SupabaseGpsService.cleanupDeliveredGps(orderId);
+    } catch (err: any) {
+      console.warn(`[DataLifecycle] Supabase GPS purge notice for "${orderId}":`, err.message);
+    }
+
     // 1. PostgreSQL Cleanup
     let client: any = null;
     try {

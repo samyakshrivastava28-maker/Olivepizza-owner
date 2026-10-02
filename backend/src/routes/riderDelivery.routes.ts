@@ -10,6 +10,7 @@ import { OrderProjectionService } from '../services/order/OrderProjectionService
 import { RestaurantTemplates, CustomerTemplates, DeliveryTemplates } from '../services/notification/NotificationTemplates.js';
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
 import { RiderDispatchEngine } from '../services/delivery/RiderDispatchEngine.js';
+import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 
 const router = Router();
 
@@ -666,15 +667,13 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
 
         if ((effectiveRiderLat == null || effectiveRiderLng == null) && destLat && destLng) {
           try {
-            const client = await pgPool.connect();
-            const locRes = await client.query('SELECT latitude, longitude FROM delivery_locations WHERE delivery_partner_id = $1', [uid]);
-            client.release();
-            if (locRes.rows.length > 0) {
-              effectiveRiderLat = locRes.rows[0].latitude;
-              effectiveRiderLng = locRes.rows[0].longitude;
+            const loc = await SupabaseGpsService.getLatestLocation(uid);
+            if (loc) {
+              effectiveRiderLat = loc.latitude;
+              effectiveRiderLng = loc.longitude;
             }
-          } catch (pgErr: any) {
-            console.warn('[RiderDelivery] Could not read Postgres rider location:', pgErr.message);
+          } catch (gpsErr: any) {
+            console.warn('[RiderDelivery] Could not read Supabase rider location:', gpsErr.message);
           }
         }
 
@@ -732,19 +731,12 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           updatedAt: new Date()
         }, { merge: true }).catch(() => {});
 
-        // Release navigation session in PostgreSQL
+        // Release navigation session and clear active order in Supabase GPS
         try {
-          const client = await pgPool.connect();
-          await client.query(`
-            UPDATE navigation_sessions
-            SET status = 'DELIVERED',
-                ended_at = CURRENT_TIMESTAMP,
-                expires_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes'
-            WHERE order_id = $1 AND delivery_partner_id = $2
-          `, [orderId, uid]);
-          client.release();
+          await SupabaseGpsService.clearActiveOrder(uid, orderId);
+          await SupabaseGpsService.cleanupDeliveredGps(orderId);
         } catch (navErr: any) {
-          console.warn('[RiderDelivery] Navigation session close warning:', navErr.message);
+          console.warn('[RiderDelivery] Supabase GPS close warning:', navErr.message);
         }
 
         // Asynchronously notify Restaurant Management and Customer of delivery
@@ -995,28 +987,16 @@ router.post('/location', async (req: AuthRequest, res: Response): Promise<void> 
       }, { merge: true }).catch(() => {});
     }
 
-    // 3. PostgreSQL delivery_locations update (triggers Supabase Realtime for public.delivery_locations)
-    try {
-      const client = await pgPool.connect();
-      await client.query(`
-        INSERT INTO delivery_locations 
-          (delivery_partner_id, active_order_id, latitude, longitude, speed, heading, online_status, last_updated)
-        VALUES ($1, $2, $3, $4, $5, $6, true, CURRENT_TIMESTAMP)
-        ON CONFLICT (delivery_partner_id) 
-        DO UPDATE SET 
-          active_order_id = COALESCE($2, delivery_locations.active_order_id),
-          latitude = $3,
-          longitude = $4,
-          speed = $5,
-          heading = $6,
-          online_status = true,
-          last_updated = CURRENT_TIMESTAMP
-      `, [uid, effectiveOrderId, numLat, numLng, numSpeed, numHeading]);
-      client.release();
-    } catch (pgErr: any) {
-      // Postgres error shouldn't crash the location ingest
-      console.warn('[RiderLocation] PostgreSQL delivery_locations notice:', pgErr?.message);
-    }
+    // 3. Authoritative Supabase delivery_locations update (triggers Supabase Realtime for public.delivery_locations)
+    await SupabaseGpsService.upsertLatestLocation({
+      deliveryPartnerId: uid,
+      activeOrderId: effectiveOrderId,
+      latitude: numLat,
+      longitude: numLng,
+      speed: numSpeed,
+      heading: numHeading,
+      onlineStatus: true
+    });
 
     // 4. Instant WebSocket broadcast (<5ms latency to all listening customers & owners)
     try {

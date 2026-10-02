@@ -226,17 +226,27 @@ class RedisService {
 
   /**
    * Distributed Lock Helper with TTL (Prevents concurrent race conditions)
+   * @param lockKey Unique lock identifier
+   * @param ttlSeconds Lock duration in seconds (default 10)
+   * @param failClosed If true, fails closed (returns false) if Redis is disconnected or errors out, preventing concurrent execution in high-risk flows.
    */
-  public async acquireLock(lockKey: string, ttlSeconds = 10): Promise<boolean> {
+  public async acquireLock(lockKey: string, ttlSeconds = 10, failClosed = false): Promise<boolean> {
     if (!this.isConnected || !this.client) {
-      // In disconnected fallback mode, allow operation to proceed
+      if (failClosed) {
+        console.warn(`[RedisService] Critical lock "${lockKey}" rejected: Redis is disconnected (fail-closed).`);
+        return false;
+      }
       return true;
     }
     try {
       const result = await this.client.set(`lock:${lockKey}`, '1', 'EX', ttlSeconds, 'NX');
       return result === 'OK';
-    } catch {
-      return true; // Graceful fallback
+    } catch (err: any) {
+      if (failClosed) {
+        console.error(`[RedisService] Critical lock "${lockKey}" error: ${err.message} (fail-closed).`);
+        return false;
+      }
+      return true; // Graceful fallback for non-critical operations
     }
   }
 

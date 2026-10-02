@@ -17,6 +17,9 @@ export interface CreatePaymentSessionParams {
   deliveryAddress?: string;
   paymentMethod: 'cod' | 'upi' | 'card' | 'wallet';
   couponCode?: string;
+  branchId?: string;
+  deliveryType?: 'delivery' | 'pickup' | 'dine_in';
+  deliveryFee?: number;
   userIp?: string;
   deviceId?: string;
   customerName?: string;
@@ -27,12 +30,22 @@ export interface CreatePaymentSessionParams {
 export class PaymentService {
   /**
    * Recalculates total server-side with 100% price accuracy from Firestore products/menu_items/combos
+   * Strictly server-authoritative: rejects unknown items, computes variants & addons, includes 5% GST & branch delivery fee.
    */
-  public static async recalculateServerTotal(items: any[]): Promise<{
+  public static async recalculateServerTotal(
+    items: any[],
+    options?: {
+      branchId?: string;
+      deliveryType?: string;
+      couponCode?: string;
+      customDeliveryFee?: number;
+    }
+  ): Promise<{
     validatedItems: any[];
     subtotal: number;
     taxes: number;
     deliveryFee: number;
+    discountAmount: number;
     totalAmount: number;
   }> {
     let subtotal = 0;
@@ -40,59 +53,162 @@ export class PaymentService {
 
     for (const item of items) {
       const itemId = item.menuItemId || item.id;
+      if (!itemId || typeof itemId !== 'string') {
+        throw new Error('Invalid or missing menu item identifier.');
+      }
+
       let menuData: any = null;
 
-      if (itemId && typeof itemId === 'string' && !itemId.startsWith('item-')) {
+      if (!itemId.startsWith('item-')) {
         let snap = await adminDb.collection('products').doc(itemId).get();
-        if (snap.exists) menuData = snap.data();
-        else {
+        if (snap.exists) {
+          menuData = snap.data();
+        } else {
           snap = await adminDb.collection('menu_items').doc(itemId).get();
-          if (snap.exists) menuData = snap.data();
-          else {
+          if (snap.exists) {
+            menuData = snap.data();
+          } else {
             snap = await adminDb.collection('combos').doc(itemId).get();
-            if (snap.exists) menuData = snap.data();
+            if (snap.exists) {
+              menuData = snap.data();
+            }
           }
         }
       }
 
-      let price = Number(item.price || 0);
-      let name = item.name || 'Artisan Pizza Item';
-      let image = item.image || '';
-
-      if (menuData) {
-        if (menuData.isAvailable === false || menuData.isActive === false) {
-          throw new Error(`Item "${menuData.name || name}" is currently unavailable.`);
-        }
-        price = Number(menuData.basePrice ?? menuData.price ?? menuData.base_price ?? item.price ?? 0);
-        name = menuData.name || name;
-        image = menuData.image || menuData.imageUrl || image;
+      // Security check: Must exist in authoritative catalog
+      if (!menuData) {
+        throw new Error(`Item "${item.name || itemId}" was not found in our authoritative menu catalog.`);
       }
 
-      const qty = Number(item.quantity || 1);
-      subtotal += price * qty;
+      if (menuData.isAvailable === false || menuData.isActive === false) {
+        throw new Error(`Item "${menuData.name || menuData.productName || item.name}" is currently unavailable.`);
+      }
+
+      // Authoritative Price Determination
+      let itemPrice = 0;
+      const selectedSize = (item.size || item.variant || '').toLowerCase();
+      if (selectedSize && menuData.sizes && menuData.sizes[selectedSize]?.price) {
+        itemPrice = Number(menuData.sizes[selectedSize].price);
+      } else if (selectedSize && Array.isArray(menuData.variants)) {
+        const variant = menuData.variants.find((v: any) => (v.name || v.size || '').toLowerCase() === selectedSize);
+        if (variant && variant.price) {
+          itemPrice = Number(variant.price);
+        }
+      }
+
+      if (!itemPrice || itemPrice <= 0) {
+        itemPrice = Number(menuData.offerPrice ?? menuData.basePrice ?? menuData.price ?? menuData.base_price ?? 0);
+      }
+
+      if (itemPrice <= 0) {
+        throw new Error(`Unable to verify authoritative price for item "${menuData.name || item.name}".`);
+      }
+
+      const itemName = menuData.productName || menuData.name || item.name || 'Artisan Pizza Item';
+      const itemImage = menuData.imageUrl || menuData.image || item.image || '';
+
+      const qty = Math.max(1, Math.min(50, Math.floor(Number(item.quantity || 1))));
+      let addonsCost = 0;
+      const validatedAddons: any[] = [];
+      if (Array.isArray(item.addons)) {
+        for (const addon of item.addons) {
+          if (!addon) continue;
+          let addonPrice = Number(addon.price || 0);
+          if (Array.isArray(menuData.addons)) {
+            const authoritativeAddon = menuData.addons.find((a: any) => (a.id === addon.id || a.name === addon.name));
+            if (authoritativeAddon) {
+              addonPrice = Number(authoritativeAddon.price || 0);
+            }
+          }
+          addonsCost += addonPrice;
+          validatedAddons.push({
+            id: addon.id || addon.name,
+            name: addon.name,
+            price: addonPrice
+          });
+        }
+      }
+
+      subtotal += (itemPrice + addonsCost) * qty;
 
       validatedItems.push({
-        id: itemId || `item-${Date.now()}`,
+        id: itemId,
         menuItemId: itemId,
-        name,
-        price,
+        name: itemName,
+        price: itemPrice,
         quantity: qty,
-        size: item.size || 'Medium',
+        size: item.size || item.variant || 'Medium',
         crust: item.crust || 'Classic Crust',
-        addons: item.addons || [],
-        image,
+        addons: validatedAddons,
+        image: itemImage,
       });
     }
 
-    const deliveryFee = subtotal > 500 || subtotal === 0 ? 0 : 30;
-    const taxes = Math.round(subtotal * 0.05); // 5% GST
-    const totalAmount = subtotal + deliveryFee;
+    // Authoritative Delivery Fee calculation
+    let deliveryFee = 0;
+    const deliveryType = options?.deliveryType || 'delivery';
+    if (deliveryType === 'delivery') {
+      if (options?.customDeliveryFee != null) {
+        deliveryFee = Math.max(0, Number(options.customDeliveryFee));
+      } else if (options?.branchId) {
+        try {
+          const bDoc = await adminDb.collection('franchises').doc(options.branchId).get();
+          const bData = bDoc.data();
+          const dSettings = bData?.deliverySettings;
+          const baseFee = Number(dSettings?.deliveryFee ?? 30);
+          const freeAbove = Number(dSettings?.freeDeliveryThreshold ?? 500);
+          deliveryFee = (freeAbove > 0 && subtotal >= freeAbove) ? 0 : Math.max(0, baseFee);
+        } catch {
+          deliveryFee = subtotal >= 500 || subtotal === 0 ? 0 : 30;
+        }
+      } else {
+        deliveryFee = subtotal >= 500 || subtotal === 0 ? 0 : 30;
+      }
+    }
+
+    // 5% GST
+    const taxes = Math.round(subtotal * 0.05);
+
+    // Optional Coupon Discount re-evaluation
+    let discountAmount = 0;
+    if (options?.couponCode) {
+      try {
+        const cCode = options.couponCode.toUpperCase().trim();
+        const cSnap = await adminDb.collection('coupons').doc(cCode).get();
+        if (cSnap.exists) {
+          const cData = cSnap.data()!;
+          const now = new Date();
+          const startsAt = cData.startsAt ? new Date(cData.startsAt) : null;
+          const expiresAt = cData.expiresAt ? new Date(cData.expiresAt) : null;
+          const usageCount = Number(cData.usageCount || 0);
+          const usageLimit = Number(cData.usageLimit ?? Infinity);
+          const minOrderAmount = Number(cData.minOrderAmount || 0);
+
+          if (cData.isActive !== false && (!expiresAt || now <= expiresAt) && (!startsAt || now >= startsAt) && usageCount < usageLimit && subtotal >= minOrderAmount) {
+            const discountType = cData.discountType || 'percentage';
+            const discountValue = Number(cData.discountValue || 0);
+            const maxDiscount = Number(cData.maxDiscount || Infinity);
+            if (discountType === 'percentage') {
+              discountAmount = Math.min(Math.round(subtotal * (discountValue / 100)), maxDiscount);
+            } else if (discountType === 'flat') {
+              discountAmount = Math.min(discountValue, subtotal);
+            }
+          }
+        }
+      } catch (cErr: any) {
+        console.warn('[PaymentService] Coupon recheck notice:', cErr.message);
+      }
+    }
+
+    const totalAmount = Math.max(0, subtotal - discountAmount) + deliveryFee + taxes;
 
     return {
       validatedItems,
       subtotal,
       taxes,
       deliveryFee,
+      discountAmount,
       totalAmount,
     };
   }
@@ -120,7 +236,12 @@ export class PaymentService {
     }
 
     // 1. Recalculate total server-side
-    const { validatedItems, totalAmount } = await this.recalculateServerTotal(params.items);
+    const { validatedItems, totalAmount } = await this.recalculateServerTotal(params.items, {
+      branchId: params.branchId,
+      deliveryType: params.deliveryType,
+      couponCode: params.couponCode,
+      customDeliveryFee: params.deliveryFee,
+    });
 
     // 2. Fraud & Velocity Evaluation
     const fraudRes = FraudProtectionEngine.evaluateRisk({

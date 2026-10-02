@@ -13,6 +13,7 @@ import { webSocketServer } from '../services/websocket/WebSocketServer.js';
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 import { StoreBoundDeliveryFleetService, RiderOperationalState } from '../services/delivery/StoreBoundDeliveryFleetService.js';
 import { ApiSecurityMiddleware, ResponseSanitizationService } from '../security/index.js';
+import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 
 const router = Router();
 
@@ -135,15 +136,13 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
 
         if (riderLat == null || riderLng == null) {
           try {
-            const client = await pgPool.connect();
-            const locRes = await client.query('SELECT latitude, longitude, accuracy, last_updated FROM delivery_locations WHERE delivery_partner_id = $1', [req.user.uid]);
-            client.release();
-            if (locRes.rows.length > 0) {
-              riderLat = locRes.rows[0].latitude;
-              riderLng = locRes.rows[0].longitude;
+            const loc = await SupabaseGpsService.getLatestLocation(req.user.uid);
+            if (loc) {
+              riderLat = loc.latitude;
+              riderLng = loc.longitude;
             }
           } catch (e: any) {
-            console.warn('[Delivery Validation] Could not query latest Postgres location:', e.message);
+            console.warn('[Delivery Validation] Could not query latest Supabase location:', e.message);
           }
         }
 
@@ -266,19 +265,12 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
         console.warn('[Delivery Routes] setPartnerStatus warning:', e.message);
       }
       
-      // Update PostgreSQL navigation session to DELIVERED with 5-minute expiry
+      // Update Supabase navigation session and clear active order on delivery
       try {
-        const client = await pgPool.connect();
-        await client.query(`
-          UPDATE navigation_sessions
-          SET status = 'DELIVERED',
-              ended_at = CURRENT_TIMESTAMP,
-              expires_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes'
-          WHERE order_id = $1 AND delivery_partner_id = $2
-        `, [id, req.user.uid]);
-        client.release();
+        await SupabaseGpsService.clearActiveOrder(req.user.uid, id);
+        await SupabaseGpsService.cleanupDeliveredGps(id);
       } catch (e: any) {
-        console.warn('[Delivery Routes] Navigation session cleanup trigger warning:', e.message);
+        console.warn('[Delivery Routes] Supabase GPS cleanup trigger warning:', e.message);
       }
     }
 
@@ -348,28 +340,17 @@ const handleLocationUpdate = async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // 1. Update PostgreSQL delivery_locations (Triggers Supabase Realtime)
-    try {
-      const client = await pgPool.connect();
-      await client.query(`
-        INSERT INTO delivery_locations 
-          (delivery_partner_id, active_order_id, latitude, longitude, accuracy, speed, heading, online_status, last_updated)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, true, CURRENT_TIMESTAMP)
-        ON CONFLICT (delivery_partner_id) 
-        DO UPDATE SET 
-          active_order_id = COALESCE($2, delivery_locations.active_order_id),
-          latitude = $3,
-          longitude = $4,
-          accuracy = $5,
-          speed = $6,
-          heading = $7,
-          online_status = true,
-          last_updated = CURRENT_TIMESTAMP
-      `, [deliveryPartnerId, targetOrderId, actualLat, actualLng, accuracy || null, speed || null, heading || null]);
-      client.release();
-    } catch (pgErr: any) {
-      console.warn('[LocationUpdate] Postgres update warning:', pgErr.message);
-    }
+    // 1. Authoritative Supabase delivery_locations update (Triggers Supabase Realtime)
+    await SupabaseGpsService.upsertLatestLocation({
+      deliveryPartnerId,
+      activeOrderId: targetOrderId || null,
+      latitude: Number(actualLat),
+      longitude: Number(actualLng),
+      accuracy: accuracy ? Number(accuracy) : null,
+      speed: speed ? Number(speed) : null,
+      heading: heading ? Number(heading) : null,
+      onlineStatus: true
+    });
 
     // 2. Update Firestore active_deliveries (Triggers Firestore Polling Fallback)
     const docId = targetOrderId || deliveryPartnerId;

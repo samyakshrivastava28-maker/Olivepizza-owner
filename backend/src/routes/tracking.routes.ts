@@ -3,6 +3,7 @@ import { pgPool } from '../config/postgres.js';
 import { adminDb } from '../config/firebase.js';
 import { verifyToken, requireRole, optionalAuth, AuthRequest } from '../middleware/auth.middleware.js';
 import { generateTrackingToken, verifyTrackingToken } from '../utils/trackingToken.js';
+import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 
 const router = Router();
 
@@ -100,24 +101,19 @@ router.post('/location/update', verifyToken, requireRole(['delivery', 'delivery_
       status: 'ONLINE'
     });
 
+    // 1. Authoritative Supabase delivery_locations update (Triggers Supabase Realtime)
+    await SupabaseGpsService.upsertLatestLocation({
+      deliveryPartnerId: actualPartnerId,
+      activeOrderId: orderId || null,
+      latitude: Number(actualLat),
+      longitude: Number(actualLng),
+      accuracy: accuracy ? Number(accuracy) : null,
+      speed: speed ? Number(speed) : null,
+      heading: heading ? Number(heading) : null,
+      onlineStatus: true
+    });
+
     const client = await pgPool.connect();
-    
-    // 1. Update PostgreSQL delivery_locations (Triggers Supabase Realtime)
-    await client.query(`
-      INSERT INTO delivery_locations 
-        (delivery_partner_id, active_order_id, latitude, longitude, accuracy, speed, heading, online_status, last_updated)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, true, CURRENT_TIMESTAMP)
-      ON CONFLICT (delivery_partner_id) 
-      DO UPDATE SET 
-        active_order_id = COALESCE($2, delivery_locations.active_order_id),
-        latitude = $3,
-        longitude = $4,
-        accuracy = $5,
-        speed = $6,
-        heading = $7,
-        online_status = true,
-        last_updated = CURRENT_TIMESTAMP
-    `, [actualPartnerId, orderId || null, actualLat, actualLng, accuracy || null, speed || null, heading || null]);
 
     // ── 300M RESTAURANT DEPARTURE REMINDER RULE ──────────────────────────
     if (orderId) {
@@ -198,15 +194,11 @@ router.post('/location/update', verifyToken, requireRole(['delivery', 'delivery_
 router.get('/location/:partnerId', async (req: Request, res: Response) => {
   try {
     const { partnerId } = req.params;
-    const client = await pgPool.connect();
-    const result = await client.query('SELECT * FROM delivery_locations WHERE delivery_partner_id = $1', [partnerId]);
-    client.release();
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Partner not found' });
+    const loc = await SupabaseGpsService.getLatestLocation(partnerId);
+    if (!loc) {
+      return res.status(404).json({ error: 'Partner location not found' });
     }
-
-    res.json(result.rows[0]);
+    res.json(loc);
   } catch (error) {
     console.error('Error getting location:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -395,15 +387,11 @@ router.post('/navigation/stop', verifyToken, requireRole(['delivery_partner']), 
       // Delete route
       await client.query('DELETE FROM delivery_routes WHERE order_id = $1', [orderId]);
     }
-    
-    // Clear active order from location
-    await client.query(`
-      UPDATE delivery_locations 
-      SET active_order_id = NULL 
-      WHERE delivery_partner_id = $1
-    `, [partnerId]);
-
     client.release();
+
+    // Clear active order from Supabase live GPS location
+    await SupabaseGpsService.clearActiveOrder(partnerId, orderId);
+
     res.json({ success: true });
   } catch (error) {
     console.error('Error stopping navigation:', error);
@@ -419,15 +407,10 @@ router.post('/status', verifyToken, requireRole(['delivery_partner']), async (re
     if (req.user?.uid !== partnerId) {
       return res.status(403).json({ error: 'Forbidden: Cannot update status for other partners' });
     }
-    const client = await pgPool.connect();
-    
-    await client.query(`
-      UPDATE delivery_locations 
-      SET online_status = $1 
-      WHERE delivery_partner_id = $2
-    `, [status, partnerId]);
 
-    client.release();
+    // Authoritative update in Supabase delivery_locations
+    await SupabaseGpsService.setOnlineStatus(partnerId, Boolean(status));
+
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating status:', error);

@@ -14,7 +14,7 @@ const router = Router();
 // ─── 1. Create Payment Intent / Session ─────────────────────────────────────────
 router.post('/create-intent', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { items, deliveryAddress, paymentMethod, couponCode, customerName, customerPhone, customerEmail } = req.body;
+    const { items, deliveryAddress, paymentMethod, couponCode, customerName, customerPhone, customerEmail, branchId, deliveryType, deliveryFee } = req.body;
     const userId = req.user?.uid || 'guest-user';
     const userIp = (req.headers['x-forwarded-for'] as string) || req.ip || '127.0.0.1';
     const deviceId = (req.headers['x-device-id'] as string) || 'unknown-device';
@@ -30,6 +30,9 @@ router.post('/create-intent', optionalAuth, async (req: AuthRequest, res: Respon
       deliveryAddress,
       paymentMethod: paymentMethod || 'cod',
       couponCode,
+      branchId,
+      deliveryType,
+      deliveryFee: deliveryFee != null ? Number(deliveryFee) : undefined,
       userIp,
       deviceId,
       customerName: customerName || (req.user as any)?.name || 'Gourmet Customer',
