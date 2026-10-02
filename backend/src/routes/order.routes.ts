@@ -711,7 +711,11 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
           return;
         }
         const dbPrice = Number(menuData.offerPrice || menuData.basePrice || menuData.price || 0);
-        if (!itemPrice || itemPrice <= 0) itemPrice = dbPrice;
+        if (dbPrice > 0) {
+          itemPrice = dbPrice;
+        } else if (!itemPrice || itemPrice <= 0) {
+          itemPrice = 299;
+        }
         itemName = menuData.productName || menuData.name || itemName;
         itemImage = menuData.imageUrl || menuData.image || itemImage;
       }
@@ -721,7 +725,13 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       }
 
       const qty = Number(item.quantity || 1);
-      serverCalculatedTotal += itemPrice * qty;
+      let addonsCost = 0;
+      if (Array.isArray(item.addons)) {
+        for (const addon of item.addons) {
+          addonsCost += Number(addon?.price || 0);
+        }
+      }
+      serverCalculatedTotal += (itemPrice + addonsCost) * qty;
 
       validatedItems.push({
         menuItemId: itemId || 'item-' + Math.random().toString(36).substr(2, 9),
