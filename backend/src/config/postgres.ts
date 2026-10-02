@@ -6,7 +6,22 @@ import { runMigrations } from '../migrations/runner.js';
 
 dotenv.config();
 
-let dbUrl = process.env.DATABASE_URL;
+export type DatabaseEnvironment = 'development' | 'testing' | 'render-test' | 'staging' | 'production' | 'vps';
+
+export const DATABASE_ENV: DatabaseEnvironment = 
+  (process.env.DATABASE_ENV as DatabaseEnvironment) || 
+  (process.env.NODE_ENV === 'production' ? 'production' : 'development');
+
+let dbUrl: string | undefined;
+
+if (DATABASE_ENV === 'render-test') {
+  dbUrl = process.env.RENDER_POSTGRES_URL || process.env.DATABASE_URL;
+} else if (DATABASE_ENV === 'production' || DATABASE_ENV === 'vps') {
+  dbUrl = process.env.VPS_POSTGRES_URL || process.env.DATABASE_URL;
+} else {
+  // development / testing / default
+  dbUrl = process.env.RENDER_POSTGRES_URL || process.env.DATABASE_URL;
+}
 
 // Auto-fix Render IPv6 issue for Supabase (Forces IPv4 Connection Pooler)
 if (dbUrl && dbUrl.includes('.supabase.co')) {
@@ -15,6 +30,9 @@ if (dbUrl && dbUrl.includes('.supabase.co')) {
     dbUrl += (dbUrl.includes('?') ? '&' : '?') + 'pgbouncer=true';
   }
 }
+
+const isRenderPostgres = Boolean(dbUrl?.includes('render.com') || dbUrl?.includes('dpg-'));
+const isCloudPostgres = Boolean(isRenderPostgres || dbUrl?.includes('supabase.co') || dbUrl?.includes('pooler.supabase.com'));
 
 const maxConnections = parseInt(process.env.POSTGRES_POOL_MAX || '20', 10);
 const idleTimeoutMillis = parseInt(process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS || '30000', 10);
@@ -27,11 +45,13 @@ export const pgPool = new Pool({
   connectionTimeoutMillis: connectionTimeoutMillis,
   ssl: process.env.PG_SSL_REJECT_UNAUTHORIZED === 'true'
     ? { rejectUnauthorized: true, ca: process.env.PG_SSL_CA }
-    : process.env.PG_SSL_REJECT_UNAUTHORIZED === 'false' || dbUrl?.includes('supabase.co') || dbUrl?.includes('pooler.supabase.com')
+    : process.env.PG_SSL_REJECT_UNAUTHORIZED === 'false' || isCloudPostgres
       ? { rejectUnauthorized: false }
       : { rejectUnauthorized: process.env.NODE_ENV === 'production' },
   statement_timeout: 15000, // 15 seconds per statement limit
 });
+
+console.log(`[PostgreSQL] Active Environment: "${DATABASE_ENV}" | Target: ${isRenderPostgres ? 'Render PostgreSQL (Testing/Staging)' : 'PostgreSQL'}`);
 
 pgPool.on('error', (err) => {
   console.warn('[PostgreSQL Pool] Idle client connection warning (safe to ignore):', err.message);
@@ -83,6 +103,7 @@ export async function withTransaction<T>(callback: (client: PoolClient) => Promi
 export async function checkPostgresHealth(): Promise<{
   connected: boolean;
   latencyMs: number;
+  environment: DatabaseEnvironment;
   poolStatus: { total: number; idle: number; waiting: number };
   error?: string;
 }> {
@@ -93,6 +114,7 @@ export async function checkPostgresHealth(): Promise<{
     return {
       connected: res.rows[0]?.ping === 1,
       latencyMs,
+      environment: DATABASE_ENV,
       poolStatus: {
         total: pgPool.totalCount,
         idle: pgPool.idleCount,
@@ -103,6 +125,7 @@ export async function checkPostgresHealth(): Promise<{
     return {
       connected: false,
       latencyMs: Date.now() - start,
+      environment: DATABASE_ENV,
       poolStatus: {
         total: pgPool.totalCount,
         idle: pgPool.idleCount,

@@ -412,6 +412,8 @@ app.use('/api/rider-delivery', riderDeliveryRoutes);
 app.use('/rider-delivery', riderDeliveryRoutes);
 app.use('/franchises', franchiseRoutes);
 app.use('/api/franchises', franchiseRoutes);
+app.use('/franchise', franchiseRoutes);
+app.use('/api/franchise', franchiseRoutes);
 app.use('/restaurant-managers', restaurantManagerRoutes);
 app.use('/api/restaurant-managers', restaurantManagerRoutes);
 app.use('/restaurant', restaurantRoutes);

@@ -297,6 +297,36 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
       return;
     }
 
+    // For operational actions, rider MUST be online and have a valid GPS fix
+    if (req.user?.role === 'delivery_partner') {
+      const partnerDoc = await adminDb.collection('delivery_partners').doc(uid).get();
+      const partnerData = partnerDoc.exists ? partnerDoc.data()! : {};
+      if (partnerData.isOnline === false) {
+        res.status(403).json({
+          success: false,
+          code: 'RIDER_OFFLINE',
+          error: 'You are currently off-duty. You must be Online with active GPS to perform delivery actions.'
+        });
+        return;
+      }
+
+      // Check GPS freshness (within 90 seconds)
+      const lastUpdate = partnerData.lastLocationUpdate || partnerData.timestamp;
+      const lastTime = lastUpdate ? new Date(lastUpdate).getTime() : 0;
+      if (!lastTime || Date.now() - lastTime > 90 * 1000) {
+        const inlineLat = Number(req.body?.lat);
+        const inlineLng = Number(req.body?.lng);
+        if (isNaN(inlineLat) || isNaN(inlineLng) || inlineLat < -90 || inlineLat > 90 || inlineLng < -180 || inlineLng > 180) {
+          res.status(403).json({
+            success: false,
+            code: 'GPS_REQUIRED',
+            error: 'Active GPS fix is required to perform delivery actions. Please enable location on your device.'
+          });
+          return;
+        }
+      }
+    }
+
     const normalizedAction = action.toUpperCase().trim();
 
     switch (normalizedAction) {
@@ -811,11 +841,56 @@ router.post('/status', async (req: AuthRequest, res: Response): Promise<void> =>
       return;
     }
 
-    const updates = {
-      isOnline: Boolean(isOnline),
+    const targetOnline = Boolean(isOnline);
+
+    // If going Online, GPS fix is strictly mandatory
+    if (targetOnline) {
+      const rawLat = req.body?.lat;
+      const rawLng = req.body?.lng;
+      let hasValidCoords = false;
+
+      if (rawLat !== undefined && rawLng !== undefined) {
+        const numLat = Number(rawLat);
+        const numLng = Number(rawLng);
+        if (!isNaN(numLat) && !isNaN(numLng) && numLat >= -90 && numLat <= 90 && numLng >= -180 && numLng <= 180) {
+          hasValidCoords = true;
+        }
+      }
+
+      if (!hasValidCoords) {
+        const partnerDoc = await adminDb.collection('delivery_partners').doc(uid).get();
+        const pData = partnerDoc.data() || {};
+        const lastUpdate = pData.lastLocationUpdate || pData.timestamp;
+        const lastTime = lastUpdate ? new Date(lastUpdate).getTime() : 0;
+        const isRecent = Date.now() - lastTime < 90 * 1000;
+        if (!isRecent || pData.lat == null || pData.lng == null) {
+          res.status(400).json({
+            success: false,
+            code: 'GPS_REQUIRED',
+            error: 'Active GPS fix is required to go Online. Please ensure device location is enabled and signal is acquired.'
+          });
+          return;
+        }
+      }
+    }
+
+    const updates: Record<string, any> = {
+      isOnline: targetOnline,
       onlineStatusUpdatedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
+
+    if (req.body?.lat !== undefined && req.body?.lng !== undefined) {
+      const numLat = Number(req.body.lat);
+      const numLng = Number(req.body.lng);
+      if (!isNaN(numLat) && !isNaN(numLng)) {
+        updates.lat = numLat;
+        updates.lng = numLng;
+        updates.latitude = numLat;
+        updates.longitude = numLng;
+        updates.lastLocationUpdate = new Date().toISOString();
+      }
+    }
 
     await adminDb.collection('users').doc(uid).set(updates, { merge: true });
     await adminDb.collection('delivery_partners').doc(uid).set(updates, { merge: true });

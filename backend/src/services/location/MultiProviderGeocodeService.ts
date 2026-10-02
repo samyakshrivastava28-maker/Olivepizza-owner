@@ -106,19 +106,23 @@ export class MultiProviderGeocodeService {
     providersQueried.push('photon');
     searchPromises.push(this.queryPhoton(rawQuery, city, lat, lng));
 
-    // 2. Mapbox — if token configured
+    // 2. Nominatim (OpenStreetMap) — throttled, high-accuracy Indian addresses
+    providersQueried.push('nominatim');
+    searchPromises.push(this.queryNominatim(rawQuery, city, lat, lng));
+
+    // 3. Mapbox — if token configured
     if (mapboxToken) {
       providersQueried.push('mapbox');
       searchPromises.push(this.queryMapbox(rawQuery, city, lat, lng, mapboxToken));
     }
 
-    // 3. Geoapify — if key configured
+    // 4. Geoapify — if key configured
     if (geoapifyKey) {
       providersQueried.push('geoapify');
       searchPromises.push(this.queryGeoapify(rawQuery, city, lat, lng, geoapifyKey));
     }
 
-    // 4. Mappls — if key configured
+    // 5. Mappls — if key configured
     if (mapplsKey) {
       providersQueried.push('mappls');
       searchPromises.push(this.queryMappls(rawQuery, city, lat, lng, mapplsKey));
@@ -246,6 +250,101 @@ export class MultiProviderGeocodeService {
       return { provider: 'photon', results };
     } catch {
       return { provider: 'photon', results: [] };
+    }
+  }
+
+  // ─── Provider: OpenStreetMap Nominatim ─────────────────────────────────────
+  private static lastNominatimRequestTime = 0;
+  private static nominatimLock: Promise<void> = Promise.resolve();
+
+  private static async throttleNominatim(): Promise<void> {
+    const currentLock = this.nominatimLock;
+    let release = () => {};
+    this.nominatimLock = new Promise<void>((resolve) => { release = resolve; });
+    await currentLock;
+    const now = Date.now();
+    const elapsed = now - this.lastNominatimRequestTime;
+    if (elapsed < 1000) {
+      await new Promise((r) => setTimeout(r, 1000 - elapsed));
+    }
+    this.lastNominatimRequestTime = Date.now();
+    release();
+  }
+
+  private static async queryNominatim(
+    query: string,
+    city?: string,
+    lat?: number,
+    lng?: number
+  ): Promise<{ provider: string; results: NormalizedLocationResult[] }> {
+    try {
+      await this.throttleNominatim();
+      const q = city ? `${query}, ${city}` : query;
+      const params: Record<string, any> = {
+        q,
+        format: 'json',
+        addressdetails: 1,
+        limit: 8,
+        countrycodes: 'in'
+      };
+
+      if (lat != null && lng != null) {
+        // Bias search towards user coordinate (+- 0.35 deg ~ 35km)
+        params.viewbox = `${(lng - 0.35).toFixed(4)},${(lat + 0.35).toFixed(4)},${(lng + 0.35).toFixed(4)},${(lat - 0.35).toFixed(4)}`;
+        params.bounded = 0;
+      }
+
+      const res = await axios.get('https://nominatim.openstreetmap.org/search', {
+        params,
+        headers: {
+          'User-Agent': 'OlivePizzaApp/1.0 (contact: olivepizzarjn@gmail.com; platform: backend-search)',
+          'Accept-Language': 'en-IN,en;q=0.9',
+        },
+        timeout: 2200
+      });
+
+      const items = Array.isArray(res.data) ? res.data : [];
+      const results: NormalizedLocationResult[] = [];
+
+      for (const item of items) {
+        const latitude = Number(item.lat);
+        const longitude = Number(item.lon);
+        if (isNaN(latitude) || isNaN(longitude)) continue;
+
+        const addr = item.address || {};
+        const name = (addr.road || addr.suburb || addr.neighbourhood || item.name || query).trim();
+        const formattedAddress = item.display_name || name;
+
+        results.push({
+          id: `nom_${item.osm_id || Math.random().toString(36).substring(2, 9)}`,
+          provider: 'nominatim',
+          name,
+          formattedAddress,
+          latitude,
+          longitude,
+          city: addr.city || addr.town || addr.village || city,
+          district: addr.state_district || addr.county,
+          state: addr.state,
+          country: addr.country || 'India',
+          pincode: addr.postcode,
+          type: item.type || item.class || 'place',
+          relevance: 0.85,
+          matchedProviders: ['nominatim'],
+          providerCount: 1,
+          address: {
+            road: addr.road,
+            suburb: addr.suburb || addr.neighbourhood,
+            city: addr.city || addr.town || addr.village || city,
+            state: addr.state,
+            postcode: addr.postcode,
+            country: addr.country || 'India'
+          }
+        });
+      }
+
+      return { provider: 'nominatim', results };
+    } catch {
+      return { provider: 'nominatim', results: [] };
     }
   }
 

@@ -11,7 +11,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export async function runMigrations(customPool?: any): Promise<{ applied: string[]; skipped: string[] }> {
-  let dbUrl = process.env.DATABASE_URL;
+  const databaseEnv = process.env.DATABASE_ENV || (process.env.NODE_ENV === 'production' ? 'production' : 'development');
+  let dbUrl = databaseEnv === 'render-test' 
+    ? (process.env.RENDER_POSTGRES_URL || process.env.DATABASE_URL)
+    : (process.env.DATABASE_URL || process.env.RENDER_POSTGRES_URL);
+
   if (dbUrl && dbUrl.includes('.supabase.co')) {
     dbUrl = dbUrl.replace('db.tdjrkqmhdynbaciguyvr.supabase.co:5432', 'aws-1-ap-south-1.pooler.supabase.com:6543');
     if (!dbUrl.includes('pgbouncer=true')) {
@@ -22,7 +26,7 @@ export async function runMigrations(customPool?: any): Promise<{ applied: string
   const pool = customPool || new Pool({
     connectionString: dbUrl,
     ssl: { rejectUnauthorized: false },
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: 15000,
   });
 
   const client = await pool.connect();

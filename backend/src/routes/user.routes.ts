@@ -330,14 +330,21 @@ router.get('/addresses', async (req: AuthRequest, res: Response): Promise<void> 
       return;
     }
     const userDoc = await adminDb.collection('users').doc(userId).get();
-    const addresses = userDoc.data()?.savedAddresses || [];
-    res.json({ success: true, addresses });
+    const data = userDoc.data() || {};
+    const addresses = data.addresses || data.savedAddresses || data.locations || [];
+    res.json({
+      success: true,
+      addresses,
+      count: addresses.length,
+      maxAllowed: 8,
+      isLimitReached: addresses.length >= 8
+    });
   } catch (error: any) {
     res.status(500).json({ error: 'Failed to fetch addresses' });
   }
 });
 
-// Save Customer Addresses
+// Save / Replace Customer Addresses (enforces max 8 locations)
 router.put('/addresses', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user?.uid;
@@ -346,13 +353,74 @@ router.put('/addresses', async (req: AuthRequest, res: Response): Promise<void> 
       res.status(400).json({ error: 'Invalid addresses payload' });
       return;
     }
+
+    if (addresses.length > 8) {
+      res.status(400).json({
+        success: false,
+        code: 'LOCATION_LIMIT_EXCEEDED',
+        error: 'Location limit reached (8/8). You can save up to 8 delivery locations. Please delete an existing location first.',
+        currentCount: addresses.length,
+        maxLimit: 8
+      });
+      return;
+    }
+
+    const now = new Date().toISOString();
     await adminDb.collection('users').doc(userId).set({
+      addresses,
       savedAddresses: addresses,
-      updatedAt: new Date().toISOString()
+      locations: addresses,
+      updatedAt: now
     }, { merge: true });
-    res.json({ success: true, message: 'Addresses saved successfully', addresses });
+
+    res.json({ success: true, message: 'Addresses saved successfully', addresses, count: addresses.length });
   } catch (error: any) {
     res.status(500).json({ error: 'Failed to save addresses' });
+  }
+});
+
+// Permanently Delete Customer Address
+router.delete('/addresses/:id', async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user?.uid;
+    const locationId = req.params.id;
+
+    if (!userId || !locationId) {
+      res.status(400).json({ success: false, error: 'User ID and Location ID required' });
+      return;
+    }
+
+    const userRef = adminDb.collection('users').doc(userId);
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) {
+      res.status(404).json({ success: false, error: 'User not found' });
+      return;
+    }
+
+    const data = userDoc.data() || {};
+    const existing: any[] = data.addresses || data.savedAddresses || data.locations || [];
+    const remaining = existing.filter((a) => a.id !== locationId);
+
+    // 1. Delete from subcollection
+    await userRef.collection('saved_locations').doc(locationId).delete().catch(() => {});
+
+    // 2. Update user document
+    await userRef.update({
+      addresses: remaining,
+      savedAddresses: remaining,
+      locations: remaining,
+      updatedAt: new Date().toISOString()
+    });
+
+    res.json({
+      success: true,
+      message: 'Address permanently deleted from database',
+      deletedId: locationId,
+      remainingCount: remaining.length,
+      addresses: remaining
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message || 'Failed to delete address' });
   }
 });
 

@@ -389,16 +389,20 @@ router.get('/popular-locations', async (req: Request, res: Response): Promise<vo
 });
 
 // ============================================================================
-// 2. GET /api/location/search-parallel
+// 2. GET & POST /api/location/search & /api/location/search-parallel
 // Multi-provider parallel geocoding (Mapbox, Geoapify, Photon, Nominatim, Mappls)
 // ============================================================================
-router.get('/search-parallel', publicLimiter, async (req: Request, res: Response): Promise<void> => {
+const handleParallelSearch = async (req: Request, res: Response): Promise<void> => {
   try {
-    const query = String(req.query.q || req.query.query || '').trim();
-    const city = String(req.query.city || '').trim();
-    const lat = req.query.lat != null ? parseFloat(String(req.query.lat)) : undefined;
-    const lng = req.query.lng != null ? parseFloat(String(req.query.lng)) : undefined;
-    const limit = req.query.limit != null ? parseInt(String(req.query.limit), 10) : 10;
+    const query = String(req.query.q || req.query.query || req.body?.q || req.body?.query || '').trim();
+    const city = String(req.query.city || req.body?.city || '').trim();
+    const rawLat = req.query.lat ?? req.body?.lat;
+    const rawLng = req.query.lng ?? req.body?.lng;
+    const lat = rawLat != null ? parseFloat(String(rawLat)) : undefined;
+    const lng = rawLng != null ? parseFloat(String(rawLng)) : undefined;
+    const limit = req.query.limit != null 
+      ? parseInt(String(req.query.limit), 10) 
+      : (req.body?.limit != null ? parseInt(String(req.body?.limit), 10) : 10);
 
     if (!query || query.length < 2) {
       res.status(400).json({ success: false, error: 'Search query must be at least 2 characters.' });
@@ -418,35 +422,48 @@ router.get('/search-parallel', publicLimiter, async (req: Request, res: Response
     console.error('[LocationRoutes] Parallel search error:', error?.message);
     res.status(500).json({ success: false, error: 'Parallel location search failed.' });
   }
-});
+};
 
-router.post('/search-parallel', publicLimiter, async (req: Request, res: Response): Promise<void> => {
+router.get('/search-parallel', publicLimiter, handleParallelSearch);
+router.post('/search-parallel', publicLimiter, handleParallelSearch);
+router.get('/search', publicLimiter, handleParallelSearch);
+router.post('/search', publicLimiter, handleParallelSearch);
+
+// ============================================================================
+// 2a. GET & POST /api/location/serviceability & /api/location/ordering-context/resolve
+// Canonical serviceability and delivery radius verification
+// ============================================================================
+const handleServiceabilityCheck = async (req: Request, res: Response): Promise<void> => {
   try {
-    const query = String(req.body?.q || req.body?.query || '').trim();
-    const city = String(req.body?.city || '').trim();
-    const lat = req.body?.lat != null ? parseFloat(String(req.body?.lat)) : undefined;
-    const lng = req.body?.lng != null ? parseFloat(String(req.body?.lng)) : undefined;
-    const limit = req.body?.limit != null ? parseInt(String(req.body?.limit), 10) : 10;
+    const rawLat = req.query.lat ?? req.body?.lat;
+    const rawLng = req.query.lng ?? req.body?.lng;
+    const lat = parseFloat(String(rawLat));
+    const lng = parseFloat(String(rawLng));
+    const addressLine = String(req.query.addressLine ?? req.body?.addressLine ?? '').trim();
+    const customerId = (req as any).user?.uid || String(req.query.customerId ?? req.body?.customerId ?? 'guest');
 
-    if (!query || query.length < 2) {
-      res.status(400).json({ success: false, error: 'Search query must be at least 2 characters.' });
+    if (isNaN(lat) || isNaN(lng)) {
+      res.status(400).json({ success: false, isServiceable: false, error: 'Valid latitude and longitude numbers are required.' });
       return;
     }
 
-    const response = await MultiProviderGeocodeService.searchParallel({
-      query,
-      city,
-      lat: isNaN(lat!) ? undefined : lat,
-      lng: isNaN(lng!) ? undefined : lng,
-      limit,
+    const resolution = await CustomerOrderingContextService.resolveOrderingContext({
+      customerId,
+      lat,
+      lng,
+      addressLine
     });
 
-    res.json(response);
-  } catch (error: any) {
-    console.error('[LocationRoutes] POST parallel search error:', error?.message);
-    res.status(500).json({ success: false, error: 'Parallel location search failed.' });
+    res.json(resolution);
+  } catch (err: any) {
+    console.error('[LocationRoutes] Serviceability check error:', err);
+    res.status(500).json({ success: false, isServiceable: false, error: 'Failed to verify serviceability' });
   }
-});
+};
+
+router.get('/serviceability', publicLimiter, handleServiceabilityCheck);
+router.post('/serviceability', publicLimiter, handleServiceabilityCheck);
+router.post('/ordering-context/resolve', publicLimiter, handleServiceabilityCheck);
 
 // ============================================================================
 // 2b. GET /api/location/geocode
@@ -610,9 +627,39 @@ router.get('/reverse-geocode', publicLimiter, async (req: Request, res: Response
 });
 
 // ============================================================================
-// 4. POST /api/location/save
-// Authoritatively validates serviceability and saves "Location 1" for customer
 // ============================================================================
+// 4. GET, POST, DELETE /api/location/save & /api/location/addresses
+// Authoritative 8-location limit management with permanent DB deletion
+// ============================================================================
+
+// GET /api/location/saved & /api/location/addresses — List all saved delivery locations for authenticated user
+router.get(['/saved', '/addresses', '/saved-locations'], verifyToken, userLimiter, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const userDoc = await adminDb.collection('users').doc(uid).get();
+    const userData = userDoc.exists ? userDoc.data()! : {};
+
+    // Harmonize across field naming conventions
+    const addresses = userData.addresses || userData.savedAddresses || userData.locations || [];
+    res.json({
+      success: true,
+      addresses,
+      count: addresses.length,
+      maxAllowed: 8,
+      isLimitReached: addresses.length >= 8
+    });
+  } catch (error: any) {
+    console.error('[LocationRoutes] Fetch saved addresses error:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch saved addresses.' });
+  }
+});
+
+// POST /api/location/save — Add or update delivery location with strict 8-location maximum
 router.post('/save', verifyToken, userLimiter, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user;
@@ -622,20 +669,32 @@ router.post('/save', verifyToken, userLimiter, async (req: AuthRequest, res: Res
     }
 
     const {
+      id,
       formattedAddress,
+      addressLine,
       lat,
       lng,
       city,
       houseNumber,
+      houseFlat,
       street,
+      streetArea,
       landmark,
       floor,
       building,
+      buildingName,
+      pincode,
       deliveryInstructions,
-      label = 'Location 1',
+      instructions,
+      recipientName,
+      recipientPhone,
+      type = 'Home',
+      label,
+      isDefault
     } = req.body;
 
-    if (!formattedAddress || lat == null || lng == null) {
+    const resolvedAddress = String(formattedAddress || addressLine || '').trim();
+    if (!resolvedAddress || lat == null || lng == null) {
       res.status(400).json({
         success: false,
         error: 'Address and valid map coordinates are required.',
@@ -646,7 +705,7 @@ router.post('/save', verifyToken, userLimiter, async (req: AuthRequest, res: Res
     const numLat = Number(lat);
     const numLng = Number(lng);
 
-    if (isNaN(numLat) || isNaN(numLng)) {
+    if (isNaN(numLat) || isNaN(numLng) || numLat < -90 || numLat > 90 || numLng < -180 || numLng > 180) {
       res.status(400).json({ success: false, error: 'Invalid coordinate numbers provided.' });
       return;
     }
@@ -656,7 +715,7 @@ router.post('/save', verifyToken, userLimiter, async (req: AuthRequest, res: Res
       customerId: user.uid,
       lat: numLat,
       lng: numLng,
-      addressLine: formattedAddress,
+      addressLine: resolvedAddress,
     });
 
     if (!orderingResolution.isServiceable) {
@@ -669,47 +728,96 @@ router.post('/save', verifyToken, userLimiter, async (req: AuthRequest, res: Res
       return;
     }
 
-    const locationId = 'location_1';
+    const userRef = adminDb.collection('users').doc(user.uid);
+    const userSnap = await userRef.get();
+    const existingUserData = userSnap.exists ? userSnap.data()! : {};
+    const existingAddresses: any[] = existingUserData.addresses || existingUserData.savedAddresses || existingUserData.locations || [];
+
+    const locationId = String(id || `loc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`);
+    const isExisting = existingAddresses.some((a) => a.id === locationId);
+
+    // 2. Enforce 8-location maximum per user account
+    if (!isExisting && existingAddresses.length >= 8) {
+      res.status(400).json({
+        success: false,
+        code: 'LOCATION_LIMIT_EXCEEDED',
+        error: 'Location limit reached (8/8). You can save up to 8 delivery locations. Please delete an existing location first.',
+        currentCount: existingAddresses.length,
+        maxLimit: 8
+      });
+      return;
+    }
+
     const now = new Date().toISOString();
+    const resolvedLabel = label || type || 'Other';
 
     const locationRecord = {
       id: locationId,
-      label,
-      formattedAddress: String(formattedAddress).trim(),
+      type: type || 'Home',
+      label: resolvedLabel,
+      formattedAddress: resolvedAddress,
+      addressLine: resolvedAddress,
       lat: numLat,
       lng: numLng,
       city: String(city || orderingResolution.context?.branchName || '').trim(),
-      street: String(street || '').trim() || null,
-      houseNumber: String(houseNumber || '').trim() || null,
+      street: String(street || streetArea || '').trim() || null,
+      streetArea: String(streetArea || street || '').trim() || null,
+      houseNumber: String(houseNumber || houseFlat || '').trim() || null,
+      houseFlat: String(houseFlat || houseNumber || '').trim() || null,
       landmark: String(landmark || '').trim() || null,
       floor: String(floor || '').trim() || null,
-      building: String(building || '').trim() || null,
-      deliveryInstructions: String(deliveryInstructions || '').trim() || null,
-      isDefault: true,
-      createdAt: now,
+      building: String(building || buildingName || '').trim() || null,
+      buildingName: String(buildingName || building || '').trim() || null,
+      pincode: String(pincode || '').trim() || null,
+      deliveryInstructions: String(deliveryInstructions || instructions || '').trim() || null,
+      instructions: String(instructions || deliveryInstructions || '').trim() || null,
+      recipientName: String(recipientName || '').trim() || null,
+      recipientPhone: String(recipientPhone || '').trim() || null,
+      isDefault: Boolean(isDefault ?? existingAddresses.length === 0),
+      createdAt: isExisting ? (existingAddresses.find((a) => a.id === locationId)?.createdAt || now) : now,
       updatedAt: now,
     };
 
-    // 2. Persist to subcollection users/{uid}/saved_locations/location_1
-    const userRef = adminDb.collection('users').doc(user.uid);
+    // Update addresses array
+    let updatedAddresses: any[];
+    if (isExisting) {
+      updatedAddresses = existingAddresses.map((a) => (a.id === locationId ? locationRecord : a));
+    } else {
+      updatedAddresses = [locationRecord, ...existingAddresses];
+    }
+
+    if (locationRecord.isDefault) {
+      updatedAddresses = updatedAddresses.map((a) => ({
+        ...a,
+        isDefault: a.id === locationId
+      }));
+    }
+
+    // 3. Persist to subcollection users/{uid}/saved_locations/{locationId}
     await userRef.collection('saved_locations').doc(locationId).set(locationRecord, { merge: true });
 
-    // 3. Authoritatively update primary user profile document
+    // 4. Update primary user document across all legacy and canonical fields
     await userRef.set(
       {
         uid: user.uid,
-        defaultLocationId: locationId,
+        defaultLocationId: locationRecord.isDefault ? locationId : existingUserData.defaultLocationId || locationId,
         locationSetupCompleted: true,
-        role: 'customer', // Strictly enforce customer role, never allow privileged escalation
+        role: 'customer',
         location: {
           lat: numLat,
           lng: numLng,
-          address: formattedAddress,
+          address: resolvedAddress,
           city: locationRecord.city,
           landmark: locationRecord.landmark,
           houseNumber: locationRecord.houseNumber,
         },
-        locations: [locationRecord],
+        fullAddress: resolvedAddress,
+        full_address: resolvedAddress,
+        lat: numLat,
+        lng: numLng,
+        addresses: updatedAddresses,
+        savedAddresses: updatedAddresses,
+        locations: updatedAddresses,
         updatedAt: now,
       },
       { merge: true }
@@ -717,13 +825,125 @@ router.post('/save', verifyToken, userLimiter, async (req: AuthRequest, res: Res
 
     res.json({
       success: true,
-      message: 'Delivery location saved successfully as Location 1.',
+      message: 'Delivery location saved successfully.',
       location: locationRecord,
+      addresses: updatedAddresses,
       orderingContext: orderingResolution.context,
     });
   } catch (error: any) {
     console.error('[LocationRoutes] Save location error:', error);
     res.status(500).json({ success: false, error: error?.message || 'Failed to save delivery location.' });
+  }
+});
+
+// DELETE /api/location/saved/:id & /api/location/addresses/:id — Permanently deletes a saved location from DB
+router.delete(['/saved/:id', '/addresses/:id', '/saved-locations/:id'], verifyToken, userLimiter, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const uid = req.user?.uid;
+    const locationId = req.params.id;
+
+    if (!uid || !locationId) {
+      res.status(400).json({ success: false, error: 'User ID and Location ID are required.' });
+      return;
+    }
+
+    const userRef = adminDb.collection('users').doc(uid);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      res.status(404).json({ success: false, error: 'User not found.' });
+      return;
+    }
+
+    const userData = userSnap.data()!;
+    const existing: any[] = userData.addresses || userData.savedAddresses || userData.locations || [];
+    const target = existing.find((a) => a.id === locationId);
+
+    const remaining = existing.filter((a) => a.id !== locationId);
+
+    // If default location was deleted and others remain, make the first remaining address default
+    if (target?.isDefault && remaining.length > 0) {
+      remaining[0].isDefault = true;
+    }
+
+    // 1. Permanently delete from subcollection
+    await userRef.collection('saved_locations').doc(locationId).delete().catch(() => {});
+
+    // 2. Permanently update user document arrays
+    const updates: Record<string, any> = {
+      addresses: remaining,
+      savedAddresses: remaining,
+      locations: remaining,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (remaining.length > 0 && target?.isDefault) {
+      updates.defaultLocationId = remaining[0].id;
+      updates.lat = remaining[0].lat;
+      updates.lng = remaining[0].lng;
+      updates.fullAddress = remaining[0].formattedAddress || remaining[0].addressLine;
+      updates.full_address = updates.fullAddress;
+    }
+
+    await userRef.update(updates);
+
+    res.json({
+      success: true,
+      message: 'Location permanently deleted from database.',
+      deletedId: locationId,
+      remainingCount: remaining.length,
+      addresses: remaining
+    });
+  } catch (error: any) {
+    console.error('[LocationRoutes] Delete address error:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete address.' });
+  }
+});
+
+// ============================================================================
+// 5. POST /api/location/select
+// Authoritatively sets and validates selected delivery coordinates
+// ============================================================================
+router.post('/select', userLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const rawLat = req.body?.lat ?? req.body?.latitude;
+    const rawLng = req.body?.lng ?? req.body?.longitude;
+    const addressLine = String(req.body?.addressLine || req.body?.formattedAddress || '').trim();
+    const customerId = (req as any).user?.uid || req.body?.customerId || 'guest';
+
+    const lat = parseFloat(String(rawLat));
+    const lng = parseFloat(String(rawLng));
+
+    if (isNaN(lat) || isNaN(lng)) {
+      res.status(400).json({ success: false, error: 'Valid latitude and longitude numbers are required.' });
+      return;
+    }
+
+    const resolution = await CustomerOrderingContextService.resolveOrderingContext({
+      customerId,
+      lat,
+      lng,
+      addressLine,
+    });
+
+    res.json({
+      success: true,
+      selectedLocation: {
+        latitude: lat,
+        longitude: lng,
+        formattedAddress: addressLine,
+        isServiceable: resolution.isServiceable,
+        branchId: resolution.context?.branchId,
+        branchName: resolution.context?.branchName,
+        distanceKm: resolution.context?.distanceKm,
+        deliveryFee: resolution.context?.deliveryFee,
+      },
+      orderingContext: resolution.context,
+      isServiceable: resolution.isServiceable,
+      error: resolution.error,
+    });
+  } catch (error: any) {
+    console.error('[LocationRoutes] Location select error:', error);
+    res.status(500).json({ success: false, error: 'Failed to set selected location.' });
   }
 });
 
