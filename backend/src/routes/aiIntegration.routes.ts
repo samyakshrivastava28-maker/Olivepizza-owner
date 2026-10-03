@@ -18,6 +18,7 @@ import { verifyToken, AuthRequest, requireRole } from '../middleware/auth.middle
 import { adminDb } from '../config/firebase.js';
 import kb from '../services/KnowledgeBaseService.js';
 import { aiEventStreamService } from '../services/aiEventStream.js';
+import { redisService } from '../services/redis/RedisService.js';
 
 const router = Router();
 
@@ -30,7 +31,7 @@ function getAIGatewaySecret(): string | undefined {
   return s ? s : undefined;
 }
 
-function requireAISignature(req: Request, res: Response, next: Function): void {
+async function requireAISignature(req: Request, res: Response, next: Function): Promise<void> {
   const secret = getAIGatewaySecret();
   if (!secret) {
     console.error('[AIGateway] AI_GATEWAY_SECRET is not configured — rejecting AI service request.');
@@ -40,6 +41,7 @@ function requireAISignature(req: Request, res: Response, next: Function): void {
 
   const signature = req.headers['x-ai-signature'] as string;
   const timestamp  = req.headers['x-ai-timestamp'] as string;
+  const nonce = (req.headers['x-ai-nonce'] as string) || signature;
 
   if (!signature || !timestamp) {
     res.status(401).json({ error: 'AI_GATEWAY_UNAUTHORIZED: Missing signature headers' });
@@ -65,6 +67,15 @@ function requireAISignature(req: Request, res: Response, next: Function): void {
     }
   } catch {
     res.status(401).json({ error: 'AI_GATEWAY_UNAUTHORIZED: Malformed signature' });
+    return;
+  }
+
+  // Multi-server distributed replay protection (atomic nonce check in Redis)
+  const nonceKey = `ai:nonce:${nonce}`;
+  const isFresh = await redisService.acquireLock(nonceKey, 180, false);
+  if (!isFresh) {
+    console.warn(`[AIGateway] Replay attack detected for AI nonce: ${nonce.slice(0, 16)}...`);
+    res.status(401).json({ error: 'AI_GATEWAY_UNAUTHORIZED: Replay attack detected or duplicate request' });
     return;
   }
 

@@ -1253,15 +1253,6 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
     const emailLower = (req.user?.email || '').toLowerCase();
     const name = (req.user as any)?.name || (req.user as any)?.displayName || req.user?.email || 'Staff';
     const appTarget = ((req.headers['x-app-target'] || req.headers['x-app-source'] || '') as string).toUpperCase();
-
-    // Owner Portal Read-Only Enforcement
-    if (appTarget === 'OWNER') {
-      res.status(403).json({
-        error: 'Forbidden: Owner portal has read-only operational authority. Stage transitions are managed on Restaurant Manager and Delivery terminals.'
-      });
-      return;
-    }
-
     const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
     const isDeliveryApp = appTarget === 'DELIVERY';
 
@@ -1642,15 +1633,12 @@ router.post('/:id/assign-rider', verifyToken, async (req: AuthRequest, res: Resp
     const uid = req.user?.uid;
     const name = (req.user as any)?.name || req.user?.email || 'Manager';
     
-    // Backend-level Owner Read-Only Enforcement
-    if (userRole === 'owner' || userRole === 'admin' || req.user?.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || req.user?.email?.toLowerCase() === 'webhub2811@gmail.com') {
-      return res.status(403).json({
-        error: 'Forbidden: Owner has read-only operational authority. Rider assignment is handled automatically or by restaurant managers.'
-      });
-    }
+    const emailLower = (req.user?.email || '').toLowerCase();
+    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
+    const isAuthorized = ['owner', 'admin', 'manager', 'restaurant_manager'].includes(userRole) || isMasterAccount;
 
-    if (!['manager', 'restaurant_manager'].includes(userRole)) {
-      return res.status(403).json({ error: 'Unauthorized: Restaurant manager role required' });
+    if (!isAuthorized || !uid) {
+      return res.status(403).json({ error: 'Unauthorized: Restaurant manager or owner role required' });
     }
 
     if (!riderId) return res.status(400).json({ error: 'riderId is required' });
@@ -1710,10 +1698,13 @@ router.post('/:id/rating', verifyToken, async (req: AuthRequest, res: Response):
   try {
     const { id } = req.params;
     const userId = req.user?.uid;
-    const { foodRating, deliveryRating, overallRating, comment } = req.body;
+    const { foodRating } = req.body;
+    const overallRating = Number(req.body.overallRating || req.body.score || req.body.rating || 0);
+    const deliveryRating = Number(req.body.deliveryRating || req.body.score || overallRating);
+    const comment = req.body.comment || req.body.review || '';
 
-    if (!overallRating || Number(overallRating) < 1 || Number(overallRating) > 5) {
-      res.status(400).json({ error: 'Valid overallRating (1-5) is required.' });
+    if (!overallRating || overallRating < 1 || overallRating > 5) {
+      res.status(400).json({ error: 'Valid rating (1-5) is required.' });
       return;
     }
 
@@ -1745,8 +1736,8 @@ router.post('/:id/rating', verifyToken, async (req: AuthRequest, res: Response):
       userId,
       customerName: orderData.customerName || 'Customer',
       foodRating: Number(foodRating || overallRating),
-      deliveryRating: Number(deliveryRating || overallRating),
-      overallRating: Number(overallRating),
+      deliveryRating,
+      overallRating,
       comment: comment ? String(comment).trim() : '',
       branchId: orderData.branchId || null,
       deliveryPartnerId: orderData.deliveryPartnerId || null,
@@ -1757,8 +1748,36 @@ router.post('/:id/rating', verifyToken, async (req: AuthRequest, res: Response):
     await orderRef.update({
       isRated: true,
       rating: ratingRecord,
+      deliveryRating: {
+        score: deliveryRating,
+        review: comment,
+        createdAt: ratingRecord.createdAt
+      },
       updatedAt: new Date(),
     });
+
+    // Authoritative Server-Side Delivery Partner Metrics Update
+    if (orderData.deliveryPartnerId) {
+      try {
+        const partnerRef = adminDb.collection('users').doc(orderData.deliveryPartnerId);
+        await adminDb.runTransaction(async (t) => {
+          const pSnap = await t.get(partnerRef);
+          if (pSnap.exists) {
+            const pData = pSnap.data() || {};
+            const currentMetrics = pData.metrics || {};
+            const newRatingSum = (Number(currentMetrics.ratingSum) || 0) + deliveryRating;
+            const newRatingCount = (Number(currentMetrics.ratingCount) || 0) + 1;
+            t.update(partnerRef, {
+              'metrics.ratingSum': newRatingSum,
+              'metrics.ratingCount': newRatingCount,
+              'metrics.averageRating': Number((newRatingSum / newRatingCount).toFixed(1))
+            });
+          }
+        });
+      } catch (pErr: any) {
+        console.warn('[Orders] Partner rating metric update notice:', pErr?.message);
+      }
+    }
 
     res.json({ success: true, message: 'Thank you for your rating!', rating: ratingRecord });
   } catch (err: any) {

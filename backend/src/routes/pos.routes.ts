@@ -304,7 +304,8 @@ router.get('/menu', verifyToken, requirePOSRole, async (req: AuthRequest, res: R
 // ============================================================================
 router.post('/calculate', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { items, orderType, discountAmount, couponCode, deliveryFee } = req.body;
+    const user = req.user!;
+    const { items, orderType, discountAmount, couponCode } = req.body;
     if (!items || !Array.isArray(items)) {
       res.status(400).json({ success: false, error: 'Items array is required' });
       return;
@@ -315,7 +316,7 @@ router.post('/calculate', verifyToken, requirePOSRole, async (req: AuthRequest, 
       orderType: orderType || 'DINE_IN',
       discountAmount,
       couponCode,
-      deliveryFee
+      branchId: user.branchId || undefined
     });
 
     res.json({ success: true, ...calculation });
@@ -352,6 +353,9 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
       return;
     }
 
+    const branchId = user.branchId!;
+    let franchiseId = user.franchiseId!;
+
     // Server-authoritative calculation
     const resolvedOrderType: 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY' = 
       ['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType) ? orderType : 'DINE_IN';
@@ -360,12 +364,11 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
       items,
       orderType: resolvedOrderType,
       discountAmount,
-      couponCode
+      couponCode,
+      branchId
     });
 
     const terminalId = user.terminalId || `pos_${user.franchiseId}`;
-    const branchId = user.branchId!;
-    let franchiseId = user.franchiseId!;
     let branchName = 'Olive Pizza';
 
     try {
@@ -2260,143 +2263,169 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
     for (const bill of bills) {
       const idempotencyKey = bill.idempotencyKey || bill.orderId || `offline_${Date.now()}`;
       
-      // Check if already processed
-      const existingDoc = await adminDb.collection('orders').doc(bill.orderId || idempotencyKey).get();
-      if (existingDoc.exists) {
-        duplicateCount++;
-        processedBills.push({ id: existingDoc.id, status: 'ALREADY_SYNCED', duplicate: true });
-        continue;
-      }
-
-      // Calculate server-authoritative totals
-      const calc = await POSService.calculateBill({
-        items: bill.items || [],
-        orderType: bill.orderSource === 'POS_DINE_IN' ? 'DINE_IN' : (bill.orderSource === 'POS_TAKEAWAY' ? 'TAKEAWAY' : 'DELIVERY'),
-        discountAmount: bill.discountAmount || 0,
-        couponCode: bill.couponCode
-      });
-
-      const orderId = bill.orderId || ('ord_pos_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
-
-      let permBillNo = bill.permanentBillNo;
-      if (!permBillNo) {
-        try {
-          const alloc = await BillingNumberService.allocateNumbers(new Date(bill.createdAt || Date.now()));
-          permBillNo = alloc.permanentBillNo;
-        } catch (e) {
-          console.warn('[SyncOffline] Bill number allocation fallback:', e);
-        }
-      }
-
-      const orderData = {
-        id: orderId,
-        orderId,
-        idempotencyKey,
-        permanentBillNo: permBillNo || null,
-        billNumber: permBillNo ? `#${permBillNo}` : (bill.billNumber || `#${orderId.slice(-6).toUpperCase()}`),
-        orderNumber: bill.billNumber || `#${orderId.slice(-6).toUpperCase()}`,
-        orderDateLocal: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(bill.createdAt || Date.now())),
-        userId: user.uid,
-        customerName: bill.customerName || 'Walk-in Customer',
-        contactPhone: bill.customerPhone || 'N/A',
-        items: calc.items,
-        totalAmount: calc.finalTotal,
-        subtotal: calc.subtotal,
-        discountAmount: calc.discountAmount,
-        taxAmount: calc.taxes,
-        deliveryFee: calc.deliveryFee,
-        paymentMethod: bill.payment?.method || 'CASH',
-        paymentStatus: 'PAID',
-        status: 'completed',
-        source: 'POS',
-        orderType: bill.orderSource || 'POS_DINE_IN',
-        orderSource: bill.orderSource || 'POS_DINE_IN',
-        tableNumber: bill.tableNumber || null,
-        terminalId: bill.session?.terminalId || user.terminalId || `pos_${user.franchiseId}`,
-        branchId,
-        franchiseId,
-        cashierName: bill.session?.cashierName || user.email?.split('@')[0],
-        cashierUid: user.uid,
-        isOfflineSync: true,
-        offlineCreatedAt: bill.createdAt || new Date().toISOString(),
-        syncedAt: new Date().toISOString(),
-        createdAt: bill.createdAt || new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-
-      await adminDb.collection('orders').doc(orderId).set(orderData, { merge: true });
-
-      // Authoritative Canonical PostgreSQL Order & Items commit
       try {
-        await CanonicalOrderService.createCanonicalOrder({
+        // Check if already processed
+        const existingDoc = await adminDb.collection('orders').doc(bill.orderId || idempotencyKey).get();
+        if (existingDoc.exists) {
+          duplicateCount++;
+          processedBills.push({
+            id: existingDoc.id,
+            idempotencyKey,
+            status: 'ALREADY_SYNCED',
+            success: true,
+            duplicate: true
+          });
+          continue;
+        }
+
+        // Calculate server-authoritative totals
+        const calc = await POSService.calculateBill({
+          items: bill.items || [],
+          orderType: bill.orderSource === 'POS_DINE_IN' ? 'DINE_IN' : (bill.orderSource === 'POS_TAKEAWAY' ? 'TAKEAWAY' : 'DELIVERY'),
+          discountAmount: bill.discountAmount || 0,
+          couponCode: bill.couponCode,
+          branchId
+        });
+
+        const orderId = bill.orderId || ('ord_pos_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
+
+        let permBillNo = bill.permanentBillNo;
+        if (!permBillNo) {
+          try {
+            const alloc = await BillingNumberService.allocateNumbers(new Date(bill.createdAt || Date.now()));
+            permBillNo = alloc.permanentBillNo;
+          } catch (e) {
+            console.warn('[SyncOffline] Bill number allocation fallback:', e);
+          }
+        }
+
+        const orderData = {
           id: orderId,
-          orderSource: 'POS',
-          orderType: orderData.orderType,
-          customerName: orderData.customerName,
-          customerPhone: orderData.contactPhone,
-          items: (calc.items || []).map((it: any) => ({
-            name: it.name,
-            price: it.price,
-            quantity: it.quantity,
-            size: it.size,
-            crust: it.crust,
-            addons: it.addons
-          })),
+          orderId,
+          idempotencyKey,
+          permanentBillNo: permBillNo || null,
+          billNumber: permBillNo ? `#${permBillNo}` : (bill.billNumber || `#${orderId.slice(-6).toUpperCase()}`),
+          orderNumber: bill.billNumber || `#${orderId.slice(-6).toUpperCase()}`,
+          orderDateLocal: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(bill.createdAt || Date.now())),
+          userId: user.uid,
+          customerName: bill.customerName || 'Walk-in Customer',
+          contactPhone: bill.customerPhone || 'N/A',
+          items: calc.items,
+          totalAmount: calc.finalTotal,
           subtotal: calc.subtotal,
           discountAmount: calc.discountAmount,
           taxAmount: calc.taxes,
-          totalAmount: calc.finalTotal,
-          paymentMethod: orderData.paymentMethod,
-          paymentStatus: 'PAID',
-          orderStatus: 'completed',
-          franchiseId,
-          branchId,
-          cashierId: user.uid,
-          cashierName: orderData.cashierName,
-          terminalId: orderData.terminalId
-        });
-      } catch (pgErr: any) {
-        console.warn('[SyncOffline] Canonical PostgreSQL order commit notice:', pgErr?.message);
-      }
-
-      if (permBillNo) {
-        billingRepository.saveBill({
-          permanentBillNumber: permBillNo,
-          billFormattedNumber: `#${permBillNo}`,
-          orderId,
-          source: 'POS',
-          franchiseId,
-          branchId,
-          terminalId: bill.session?.terminalId || user.terminalId || `pos_${user.franchiseId}`,
-          totalAmount: calc.finalTotal,
+          deliveryFee: calc.deliveryFee,
           paymentMethod: bill.payment?.method || 'CASH',
           paymentStatus: 'PAID',
-          createdAt: bill.createdAt || new Date().toISOString()
-        }).catch(err => console.warn('[SyncOffline] Billing repo save warning:', err));
+          status: 'completed',
+          source: 'POS',
+          orderType: bill.orderSource || 'POS_DINE_IN',
+          orderSource: bill.orderSource || 'POS_DINE_IN',
+          tableNumber: bill.tableNumber || null,
+          terminalId: bill.session?.terminalId || user.terminalId || `pos_${user.franchiseId}`,
+          branchId,
+          franchiseId,
+          cashierName: bill.session?.cashierName || user.email?.split('@')[0],
+          cashierUid: user.uid,
+          isOfflineSync: true,
+          offlineCreatedAt: bill.createdAt || new Date().toISOString(),
+          syncedAt: new Date().toISOString(),
+          createdAt: bill.createdAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+
+        await adminDb.collection('orders').doc(orderId).set(orderData, { merge: true });
+
+        // Authoritative Canonical PostgreSQL Order & Items commit
+        try {
+          await CanonicalOrderService.createCanonicalOrder({
+            id: orderId,
+            orderSource: 'POS',
+            orderType: orderData.orderType,
+            customerName: orderData.customerName,
+            customerPhone: orderData.contactPhone,
+            items: (calc.items || []).map((it: any) => ({
+              name: it.name,
+              price: it.price,
+              quantity: it.quantity,
+              size: it.size,
+              crust: it.crust,
+              addons: it.addons
+            })),
+            subtotal: calc.subtotal,
+            discountAmount: calc.discountAmount,
+            taxAmount: calc.taxes,
+            totalAmount: calc.finalTotal,
+            paymentMethod: orderData.paymentMethod,
+            paymentStatus: 'PAID',
+            orderStatus: 'completed',
+            franchiseId,
+            branchId,
+            cashierId: user.uid,
+            cashierName: orderData.cashierName,
+            terminalId: orderData.terminalId
+          });
+        } catch (pgErr: any) {
+          console.warn('[SyncOffline] Canonical PostgreSQL order commit notice:', pgErr?.message);
+        }
+
+        if (permBillNo) {
+          billingRepository.saveBill({
+            permanentBillNumber: permBillNo,
+            billFormattedNumber: `#${permBillNo}`,
+            orderId,
+            source: 'POS',
+            franchiseId,
+            branchId,
+            terminalId: bill.session?.terminalId || user.terminalId || `pos_${user.franchiseId}`,
+            totalAmount: calc.finalTotal,
+            paymentMethod: bill.payment?.method || 'CASH',
+            paymentStatus: 'PAID',
+            createdAt: bill.createdAt || new Date().toISOString()
+          }).catch(err => console.warn('[SyncOffline] Billing repo save warning:', err));
+        }
+
+        // Async Google Sheets reporting queue (non-blocking)
+        SheetsSyncWorker.queueOrder(orderId, {
+          id: orderId,
+          franchiseId,
+          branchId,
+          totalAmount: calc.finalTotal,
+          customerName: orderData.customerName,
+          paymentMethod: orderData.paymentMethod,
+          orderType: orderData.orderType,
+          items: calc.items,
+          createdAt: orderData.createdAt
+        }).catch((sheetsErr) => {
+          console.warn('[OfflineSync] Sheets sync queue warning (non-fatal):', sheetsErr?.message);
+        });
+
+        processedBills.push({
+          id: orderId,
+          idempotencyKey,
+          status: 'SYNCED',
+          success: true,
+          permanentBillNo: permBillNo || null,
+          duplicate: false
+        });
+      } catch (billErr: any) {
+        console.error(`[SyncOffline] Error syncing offline bill ${idempotencyKey}:`, billErr?.message);
+        processedBills.push({
+          idempotencyKey,
+          status: 'FAILED',
+          success: false,
+          error: billErr?.message || 'Bill synchronization error'
+        });
       }
-
-      // Async Google Sheets reporting queue (non-blocking)
-      SheetsSyncWorker.queueOrder(orderId, {
-        id: orderId,
-        franchiseId,
-        branchId,
-        totalAmount: calc.finalTotal,
-        customerName: orderData.customerName,
-        paymentMethod: orderData.paymentMethod,
-        orderType: orderData.orderType,
-        items: calc.items,
-        createdAt: orderData.createdAt
-      }).catch((sheetsErr) => {
-        console.warn('[OfflineSync] Sheets sync queue warning (non-fatal):', sheetsErr?.message);
-      });
-
-      processedBills.push({ id: orderId, status: 'SYNCED', duplicate: false });
     }
 
+    const successCount = processedBills.filter(b => b.success).length;
     res.json({
       success: true,
-      message: `Successfully synchronized ${processedBills.length} offline transactions (${duplicateCount} duplicates suppressed)`,
+      message: `Processed ${processedBills.length} offline transactions (${successCount} succeeded, ${duplicateCount} duplicates suppressed)`,
       processedCount: processedBills.length,
+      successCount,
       duplicateCount,
       results: processedBills
     });

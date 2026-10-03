@@ -122,27 +122,98 @@ class RedisService {
   }
 
   /**
-   * Cached Menu with Firestore Fallback
-   * TTL: 5 minutes (300 seconds)
+  /**
+   * Fetch with Cache Stampede Protection (Distributed Mutex Lock + TTL Jitter + Retry Backoff)
+   * Prevents dog-piling and simultaneous backend load when cached hot-keys expire.
+   */
+  public async fetchWithStampedeProtection<T>(
+    cacheKey: string,
+    loader: () => Promise<T>,
+    options?: {
+      ttlSeconds?: number;
+      jitterSeconds?: number;
+      lockTimeoutSeconds?: number;
+      maxRetries?: number;
+      retryDelayMs?: number;
+    }
+  ): Promise<T> {
+    const baseTtl = options?.ttlSeconds ?? 300;
+    const jitter = options?.jitterSeconds ?? 30;
+    const lockTtl = options?.lockTimeoutSeconds ?? 10;
+    const maxRetries = options?.maxRetries ?? 5;
+    const retryDelay = options?.retryDelayMs ?? 80;
+
+    // 1. Try reading from cache first
+    const cached = await this.get<T>(cacheKey);
+    if (cached !== null && cached !== undefined) {
+      return cached;
+    }
+
+    // If Redis is not connected, gracefully execute loader directly
+    if (!this.isConnected || !this.client) {
+      return await loader();
+    }
+
+    // 2. Try acquiring distributed mutex lock
+    const lockKey = `stampede:${cacheKey}`;
+    const acquired = await this.acquireLock(lockKey, lockTtl, false);
+
+    if (acquired) {
+      try {
+        // Double-check cache after acquiring lock
+        const doubleCheck = await this.get<T>(cacheKey);
+        if (doubleCheck !== null && doubleCheck !== undefined) {
+          return doubleCheck;
+        }
+
+        // Execute authoritative loader
+        const freshData = await loader();
+
+        // Calculate TTL with random jitter to prevent synchronized expiration
+        const effectiveTtl = baseTtl + Math.floor(Math.random() * jitter);
+        await this.set(cacheKey, freshData, effectiveTtl);
+
+        return freshData;
+      } finally {
+        await this.releaseLock(lockKey);
+      }
+    }
+
+    // 3. Lock was NOT acquired — another worker is actively refreshing the cache.
+    // Poll cache with backoff before falling back.
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelay * attempt));
+      const retryCached = await this.get<T>(cacheKey);
+      if (retryCached !== null && retryCached !== undefined) {
+        return retryCached;
+      }
+    }
+
+    // Fallback: If lock holder timed out, execute loader directly
+    return await loader();
+  }
+
+  /**
+   * Cached Menu with Cache Stampede Protection & Firestore Fallback
+   * Base TTL: 5 minutes (300 seconds) + jitter
    */
   public async getMenu(branchId = 'main_branch'): Promise<any[]> {
     const cacheKey = `cache:menu:${branchId}`;
-    const cached = await this.get<any[]>(cacheKey);
-    if (cached) return cached;
-
-    // Fallback to Firestore
-    try {
-      const snap = await adminDb.collection('products')
-        .where('isActive', '==', true)
-        .get();
-
-      const items = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-      await this.set(cacheKey, items, 300);
-      return items;
-    } catch (e) {
-      console.warn('[RedisService] Firestore menu fetch error:', e);
-      return [];
-    }
+    return this.fetchWithStampedeProtection<any[]>(
+      cacheKey,
+      async () => {
+        try {
+          const snap = await adminDb.collection('products')
+            .where('isActive', '==', true)
+            .get();
+          return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        } catch (e: any) {
+          console.warn('[RedisService] Firestore menu fetch error:', e?.message);
+          return [];
+        }
+      },
+      { ttlSeconds: 300, jitterSeconds: 30 }
+    );
   }
 
   public async invalidateMenu(branchId?: string): Promise<void> {
@@ -160,29 +231,28 @@ class RedisService {
   }
 
   /**
-   * Cached Store Status (isStoreOpen, isAcceptingOrders) with Firestore Fallback
-   * TTL: 1 minute (60 seconds)
+   * Cached Store Status (isStoreOpen, isAcceptingOrders) with Stampede Protection
+   * Base TTL: 1 minute (60 seconds) + jitter
    */
   public async getStoreStatus(branchId = 'main_branch'): Promise<{ isOpen: boolean; acceptingOrders: boolean } | null> {
     const cacheKey = `cache:store_status:${branchId}`;
-    const cached = await this.get<{ isOpen: boolean; acceptingOrders: boolean }>(cacheKey);
-    if (cached) return cached;
-
-    // Fallback to Firestore
-    try {
-      const doc = await adminDb.collection('branches').doc(branchId).get();
-      if (doc.exists) {
-        const data = doc.data()!;
-        const status = {
-          isOpen: data.isOpen !== false,
-          acceptingOrders: data.acceptingOrders !== false && data.isAcceptingOrders !== false
-        };
-        await this.set(cacheKey, status, 60);
-        return status;
-      }
-    } catch {}
-
-    return { isOpen: true, acceptingOrders: true };
+    return this.fetchWithStampedeProtection<{ isOpen: boolean; acceptingOrders: boolean }>(
+      cacheKey,
+      async () => {
+        try {
+          const doc = await adminDb.collection('branches').doc(branchId).get();
+          if (doc.exists) {
+            const data = doc.data()!;
+            return {
+              isOpen: data.isOpen !== false,
+              acceptingOrders: data.acceptingOrders !== false && data.isAcceptingOrders !== false
+            };
+          }
+        } catch {}
+        return { isOpen: true, acceptingOrders: true };
+      },
+      { ttlSeconds: 60, jitterSeconds: 15 }
+    );
   }
 
   public async invalidateStoreStatus(branchId = 'main_branch'): Promise<void> {
@@ -190,25 +260,24 @@ class RedisService {
   }
 
   /**
-   * Cached Franchise Metadata with Firestore Fallback
-   * TTL: 10 minutes (600 seconds)
+   * Cached Franchise Metadata with Stampede Protection
+   * Base TTL: 10 minutes (600 seconds) + jitter
    */
   public async getFranchiseMetadata(franchiseId: string): Promise<any | null> {
     const cacheKey = `cache:franchise:${franchiseId}`;
-    const cached = await this.get<any>(cacheKey);
-    if (cached) return cached;
-
-    // Fallback to Firestore
-    try {
-      const doc = await adminDb.collection('franchises').doc(franchiseId).get();
-      if (doc.exists) {
-        const data = doc.data();
-        await this.set(cacheKey, data, 600);
-        return data;
-      }
-    } catch {}
-
-    return null;
+    return this.fetchWithStampedeProtection<any | null>(
+      cacheKey,
+      async () => {
+        try {
+          const doc = await adminDb.collection('franchises').doc(franchiseId).get();
+          if (doc.exists) {
+            return doc.data();
+          }
+        } catch {}
+        return null;
+      },
+      { ttlSeconds: 600, jitterSeconds: 60 }
+    );
   }
 
   public async invalidateFranchiseMetadata(franchiseId?: string): Promise<void> {

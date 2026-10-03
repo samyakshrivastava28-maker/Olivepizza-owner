@@ -974,20 +974,9 @@ router.post('/location', async (req: AuthRequest, res: Response): Promise<void> 
         console.warn('[RiderLocation] Order driverLocation update notice:', orderErr?.message);
       });
 
-      // Update active_deliveries collection
-      adminDb.collection('active_deliveries').doc(effectiveOrderId).set({
-        order_id: effectiveOrderId,
-        delivery_partner_id: uid,
-        status: 'active',
-        current_lat: numLat,
-        current_lng: numLng,
-        speed: numSpeed,
-        heading: numHeading,
-        updated_at: timestamp
-      }, { merge: true }).catch(() => {});
     }
 
-    // 3. Authoritative Supabase delivery_locations update (triggers Supabase Realtime for public.delivery_locations)
+    // 2. Authoritative Supabase delivery_locations update (triggers Supabase Realtime for public.delivery_locations)
     await SupabaseGpsService.upsertLatestLocation({
       deliveryPartnerId: uid,
       activeOrderId: effectiveOrderId,

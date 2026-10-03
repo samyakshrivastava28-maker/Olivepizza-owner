@@ -53,46 +53,55 @@ export class BillingNumberService {
 
   /**
    * Atomically acquires the next Permanent Bill Number and Daily Order Number
-   * directly from billing repository (Firestore transactional counter source of truth),
-   * with asynchronous best-effort PostgreSQL sequence synchronization.
+   * directly from PostgreSQL sequence ('permanent_bill_seq') and atomic daily counter.
+   * 
+   * GUARANTEES:
+   * - Globally unique permanent bill number across all online and POS orders.
+   * - Monotonically increasing sequence under concurrent execution.
+   * - Daily order number strictly reset and scoped per calendar day in Asia/Kolkata.
+   * - Standard PostgreSQL sequence semantics apply: gaps may legally occur if a transaction
+   *   aborts or after unclean shutdown, preventing serialization bottlenecks.
    */
   public static async allocateNumbers(date: Date = new Date()): Promise<AllocatedBillNumbers> {
     const orderDate = this.getLocalDateString(date);
     const orderTime = this.getLocalTimeString(date);
 
-    try {
-      // 1. Transactional source of truth: BillingRepository (Firestore atomic counter)
-      const allocated = await billingRepository.allocateNextBillNumbers(date);
+    // PostgreSQL is the single authoritative source of truth
+    return await withTransaction(async (client) => {
+      const seqRes = await client.query(`SELECT nextval('permanent_bill_seq') AS bill_no;`);
+      const permanentBillNo = parseInt(seqRes.rows[0].bill_no, 10);
 
-      // 2. Best-effort PostgreSQL synchronization (non-blocking for Postgres FUTURE status)
-      withTransaction(async (client) => {
-        await client.query(`SELECT nextval('permanent_bill_seq') AS bill_no;`).catch(() => {});
-        await client.query(`SELECT get_next_daily_order_number($1::date) AS daily_no;`, [orderDate]).catch(() => {});
-      }).catch(() => {
-        // Safe: Postgres is secondary / future sync
+      const dailyRes = await client.query(
+        `SELECT get_next_daily_order_number($1::date) AS daily_no;`,
+        [orderDate]
+      );
+      const dailyOrderNo = parseInt(dailyRes.rows[0].daily_no, 10);
+
+      const allocated: AllocatedBillNumbers = {
+        permanentBillNo,
+        dailyOrderNo,
+        orderDate,
+        orderTime
+      };
+
+      // Non-blocking mirror to billing repository for downstream projections
+      billingRepository.saveBill({
+        permanentBillNumber: permanentBillNo,
+        billFormattedNumber: `BILL-${String(permanentBillNo).padStart(6, '0')}`,
+        orderId: `ALLOCATED_${permanentBillNo}`,
+        source: 'POS',
+        franchiseId: 'fra_primary',
+        branchId: 'main_branch',
+        totalAmount: 0,
+        paymentMethod: 'PENDING',
+        paymentStatus: 'PENDING',
+        createdAt: new Date().toISOString()
+      }).catch((e) => {
+        console.warn('[BillingNumberService] Non-blocking projection sync notice:', e?.message || e);
       });
 
       return allocated;
-    } catch (firestoreErr) {
-      console.warn('[BillingNumberService] Primary billingRepository allocation warning, attempting Postgres fallback:', firestoreErr);
-      // Fallback to PostgreSQL if Firestore counters are temporarily unreachable
-      return await withTransaction(async (client) => {
-        const seqRes = await client.query(`SELECT nextval('permanent_bill_seq') AS bill_no;`);
-        const permanentBillNo = parseInt(seqRes.rows[0].bill_no, 10);
-        const dailyRes = await client.query(
-          `SELECT get_next_daily_order_number($1::date) AS daily_no;`,
-          [orderDate]
-        );
-        const dailyOrderNo = parseInt(dailyRes.rows[0].daily_no, 10);
-
-        return {
-          permanentBillNo,
-          dailyOrderNo,
-          orderDate,
-          orderTime
-        };
-      });
-    }
+    });
   }
 
   /**

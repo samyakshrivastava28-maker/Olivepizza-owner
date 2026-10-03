@@ -102,6 +102,28 @@ export class SupabaseGpsService {
   }
 
   /**
+   * Retrieve the latest GPS location for an active order from Supabase.
+   */
+  public static async getLatestLocationByOrder(orderId: string): Promise<any | null> {
+    if (!supabaseNav) return null;
+    try {
+      const { data, error } = await supabaseNav
+        .from('delivery_locations')
+        .select('*')
+        .eq('active_order_id', orderId)
+        .maybeSingle();
+
+      if (error) {
+        console.warn('[SupabaseGpsService] Error fetching location by order:', error.message);
+        return null;
+      }
+      return data;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
    * Retrieve all currently online rider locations.
    */
   public static async getActiveLocations(): Promise<any[]> {

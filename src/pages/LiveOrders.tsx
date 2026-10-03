@@ -5,10 +5,9 @@ import {
   query,
   orderBy,
   onSnapshot,
-  doc,
-  updateDoc,
   getDocs,
 } from 'firebase/firestore';
+import { fetchApi } from '../lib/api';
 import { Order, DeliveryPartner, OrderStatus } from '../types/models';
 import { TableSkeleton } from '../components/ui/Skeleton';
 import { ErrorState } from '../components/ui/ErrorState';
@@ -84,10 +83,15 @@ export default function LiveOrders() {
 
   const handleUpdateStatus = async (orderId: string, newStatus: OrderStatus) => {
     try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        status: newStatus,
-        updatedAt: new Date(),
+      const res = await fetchApi(`/api/orders/${orderId}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
       soundPlayer.playStatusUpdate();
       toast.success(`Order status updated to "${newStatus.replace('_', ' ')}"`);
     } catch (e: any) {
@@ -98,13 +102,15 @@ export default function LiveOrders() {
   const handleAssignPartner = async (orderId: string, partnerId: string) => {
     const selected = partners.find((p) => p.id === partnerId);
     try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        deliveryPartnerId: partnerId || null,
-        deliveryPartnerName: selected?.name || null,
-        deliveryPartnerPhone: selected?.phone || null,
-        status: 'out_for_delivery',
-        updatedAt: new Date(),
+      const res = await fetchApi(`/api/orders/${orderId}/assign-rider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ riderId: partnerId }),
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
       toast.success(`Assigned to ${selected?.name || 'partner'} & moved to Out for Delivery.`);
     } catch (e: any) {
       toast.error('Partner assignment failed: ' + e.message);
@@ -114,11 +120,18 @@ export default function LiveOrders() {
   const handleConfirmCancel = async (reason: string) => {
     if (!cancelOrderTarget) return;
     try {
-      await updateDoc(doc(db, 'orders', cancelOrderTarget.id), {
-        status: 'cancelled',
-        cancelReason: reason,
-        updatedAt: new Date(),
+      const res = await fetchApi(`/api/orders/${cancelOrderTarget.id}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'cancelled',
+          cancellationReason: reason,
+        }),
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
       setCancelOrderTarget(null);
       toast.success('Order cancelled successfully.');
     } catch (e: any) {

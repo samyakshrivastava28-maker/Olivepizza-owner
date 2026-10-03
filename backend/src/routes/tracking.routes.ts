@@ -163,22 +163,6 @@ router.post('/location/update', verifyToken, requireRole(['delivery', 'delivery_
           `, [distance, eta, orderId, actualPartnerId]);
         }
       }
-
-      // Also update Firestore active_deliveries asynchronously
-      try {
-        await adminDb.collection('active_deliveries').doc(orderId).set({
-          order_id: orderId,
-          delivery_partner_id: actualPartnerId,
-          status: 'active',
-          current_lat: actualLat,
-          current_lng: actualLng,
-          speed: speed || 0,
-          heading: heading || 0,
-          updated_at: new Date().toISOString()
-        }, { merge: true });
-      } catch (fErr: any) {
-        console.warn('[TrackingRoute] Firestore update warning:', fErr.message);
-      }
     }
 
     client.release();

@@ -54,19 +54,24 @@ router.get('/orders/:id/location', async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const doc = await adminDb.collection('active_deliveries').doc(id).get();
-    
-    if (!doc.exists) {
-      res.status(404).json({ error: 'Delivery tracking not found' });
+    // Query Authoritative Supabase GPS Telemetry
+    let location = await SupabaseGpsService.getLatestLocationByOrder(id);
+    if (!location && orderDoc.exists && orderDoc.data()?.deliveryPartnerId) {
+      location = await SupabaseGpsService.getLatestLocation(orderDoc.data()!.deliveryPartnerId);
+    }
+
+    if (!location) {
+      res.status(404).json({ error: 'Delivery tracking not found or rider offline' });
       return;
     }
     
-    const data = doc.data()!;
     res.json({
-      currentLat: data.current_lat,
-      currentLng: data.current_lng,
-      status: data.status,
-      updatedAt: data.updated_at
+      currentLat: Number(location.latitude),
+      currentLng: Number(location.longitude),
+      status: location.online_status ? 'active' : 'offline',
+      speed: location.speed || 0,
+      heading: location.heading || 0,
+      updatedAt: location.last_updated
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch tracking' });
@@ -352,20 +357,7 @@ const handleLocationUpdate = async (req: AuthRequest, res: Response) => {
       onlineStatus: true
     });
 
-    // 2. Update Firestore active_deliveries (Triggers Firestore Polling Fallback)
-    const docId = targetOrderId || deliveryPartnerId;
-    await adminDb.collection('active_deliveries').doc(docId).set({
-      order_id: targetOrderId,
-      delivery_partner_id: deliveryPartnerId,
-      status: 'active',
-      current_lat: actualLat,
-      current_lng: actualLng,
-      speed: speed || 0,
-      heading: heading || 0,
-      updated_at: new Date().toISOString()
-    }, { merge: true });
-
-    // 3. Check Delivery Radius Warning
+    // 2. Check Delivery Radius Warning
     const settingsSnap = await adminDb.collection('settings').doc('store').get();
     const settings = settingsSnap.data() || {};
     const storeLat = settings.restaurantLat || 28.6139; // Default fallback

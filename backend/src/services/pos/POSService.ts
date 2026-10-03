@@ -31,6 +31,7 @@ export interface POSCalculateRequest {
   discountAmount?: number;
   couponCode?: string;
   deliveryFee?: number;
+  branchId?: string;
 }
 
 export interface POSCalculateResponse {
@@ -91,37 +92,141 @@ export interface POSShift {
 }
 
 export class POSService {
+  private static catalogCache = new Map<string, { item: any; timestamp: number }>();
+  private static readonly CATALOG_CACHE_TTL_MS = 60 * 1000; // 60s TTL
+
+  /**
+   * Authoritative catalog item lookup across products, menu_items, and combos.
+   */
+  public static async getCatalogItem(itemId: string): Promise<any | null> {
+    if (!itemId || typeof itemId !== 'string') return null;
+    const now = Date.now();
+    const cached = this.catalogCache.get(itemId);
+    if (cached && (now - cached.timestamp) < this.CATALOG_CACHE_TTL_MS) {
+      return cached.item;
+    }
+
+    try {
+      // 1. Check products collection
+      let docSnap = await adminDb.collection('products').doc(itemId).get();
+      if (docSnap.exists) {
+        const item = docSnap.data();
+        this.catalogCache.set(itemId, { item, timestamp: now });
+        return item;
+      }
+
+      // 2. Check menu_items collection
+      docSnap = await adminDb.collection('menu_items').doc(itemId).get();
+      if (docSnap.exists) {
+        const item = docSnap.data();
+        this.catalogCache.set(itemId, { item, timestamp: now });
+        return item;
+      }
+
+      // 3. Check combos collection
+      docSnap = await adminDb.collection('combos').doc(itemId).get();
+      if (docSnap.exists) {
+        const item = docSnap.data();
+        this.catalogCache.set(itemId, { item, timestamp: now });
+        return item;
+      }
+    } catch (e: any) {
+      console.warn('[POSService] Catalog lookup error:', e?.message);
+    }
+
+    return null;
+  }
+
   /**
    * Recalculates subtotal, discounts, 5% GST, and grand total server-authoritatively.
+   * Client-supplied prices and delivery fees are NEVER blindly trusted.
    */
   public static async calculateBill(req: POSCalculateRequest): Promise<POSCalculateResponse> {
     let subtotal = 0;
     const validatedItems: POSCartItem[] = [];
 
     for (const item of req.items) {
-      const qty = Math.max(1, Number(item.quantity) || 1);
-      let unitPrice = Math.max(0, Number(item.price) || 0);
+      const qty = Math.max(1, Math.min(100, Math.floor(Number(item.quantity) || 1)));
+      const itemId = item.menuItemId || item.id;
+      let unitPrice = 0;
+      let itemName = item.name || 'Menu Item';
+      const formattedAddons: string[] = [];
 
-      // Support structured addon objects: { id, name, price }
-      if (Array.isArray(item.addons)) {
-        item.addons.forEach((a: any) => {
-          if (typeof a === 'object' && a?.price) {
-            unitPrice += Number(a.price) || 0;
+      // 1. Resolve authoritative pricing from catalog
+      if (itemId) {
+        const catalogItem = await this.getCatalogItem(itemId);
+        if (catalogItem) {
+          itemName = catalogItem.productName || catalogItem.name || itemName;
+          
+          // Determine size / variant price
+          const selectedSize = (item.size || '').toLowerCase();
+          if (selectedSize && catalogItem.sizes && catalogItem.sizes[selectedSize]?.price) {
+            unitPrice = Number(catalogItem.sizes[selectedSize].price);
+          } else if (selectedSize && Array.isArray(catalogItem.variants)) {
+            const v = catalogItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
+            if (v && v.price) {
+              unitPrice = Number(v.price);
+            }
           }
-        });
+
+          if (!unitPrice || unitPrice <= 0) {
+            unitPrice = Number(catalogItem.offerPrice || catalogItem.basePrice || catalogItem.price || 0);
+          }
+
+          // Authoritative Addon Pricing
+          if (Array.isArray(item.addons) && item.addons.length > 0) {
+            for (const a of item.addons) {
+              const rawAddon: any = a;
+              if (!rawAddon) continue;
+              let addonPrice = typeof rawAddon === 'object' && rawAddon.price ? Number(rawAddon.price) : 0;
+              let addonName = typeof rawAddon === 'object' ? (rawAddon.name || rawAddon.id || 'Addon') : String(rawAddon);
+
+              if (Array.isArray(catalogItem.addons)) {
+                const authoritativeAddon = catalogItem.addons.find(
+                  (ca: any) =>
+                    ca.id === rawAddon.id ||
+                    ca.name === rawAddon.name ||
+                    ca.id === rawAddon ||
+                    ca.name === rawAddon
+                );
+                if (authoritativeAddon && authoritativeAddon.price != null) {
+                  addonPrice = Number(authoritativeAddon.price);
+                  addonName = authoritativeAddon.name || addonName;
+                }
+              }
+              unitPrice += Math.max(0, addonPrice);
+              formattedAddons.push(addonName);
+            }
+          }
+        }
+      }
+
+      // Fallback for custom / non-catalog POS ad-hoc line items: clamp to non-negative
+      if (unitPrice <= 0) {
+        unitPrice = Math.max(0, Number(item.price) || 0);
+        if (Array.isArray(item.addons)) {
+          item.addons.forEach((a: any) => {
+            if (typeof a === 'object' && a?.price) {
+              unitPrice += Math.max(0, Number(a.price) || 0);
+              formattedAddons.push(a.name || a.id || 'Addon');
+            } else if (a) {
+              formattedAddons.push(String(a));
+            }
+          });
+        }
       }
 
       subtotal += unitPrice * qty;
 
       validatedItems.push({
         id: item.id || `item_${crypto.randomUUID().slice(0, 8)}`,
-        menuItemId: item.menuItemId || item.id,
-        name: item.name || 'Menu Item',
+        menuItemId: itemId,
+        name: itemName,
         price: unitPrice,
         quantity: qty,
         size: item.size || 'Regular',
         crust: item.crust || 'Classic',
-        addons: Array.isArray(item.addons) ? item.addons.map((a: any) => typeof a === 'object' ? a.name || a.id : String(a)) : [],
+        addons: formattedAddons,
         notes: item.notes || '',
         image: item.image || ''
       });
@@ -136,7 +241,25 @@ export class POSService {
     const cgst = Number((taxes / 2).toFixed(2));
     const sgst = Number((taxes / 2).toFixed(2));
 
-    const deliveryFee = req.orderType === 'DELIVERY' ? Math.max(0, Number(req.deliveryFee ?? 40)) : 0;
+    // Server-authoritative delivery fee calculation
+    let deliveryFee = 0;
+    if (req.orderType === 'DELIVERY') {
+      deliveryFee = 40; // Standard base delivery fee
+      if (req.branchId) {
+        try {
+          const bDoc = await adminDb.collection('franchises').doc(req.branchId).get();
+          if (bDoc.exists) {
+            const bData = bDoc.data()!;
+            if (bData.deliverySettings?.deliveryFee != null) {
+              deliveryFee = Math.max(0, Number(bData.deliverySettings.deliveryFee));
+            }
+          }
+        } catch (bErr) {
+          console.warn('[POSService] Branch delivery fee lookup notice:', bErr);
+        }
+      }
+    }
+
     const finalTotal = taxableAmount + taxes + deliveryFee;
 
     return {

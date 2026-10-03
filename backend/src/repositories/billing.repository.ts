@@ -1,4 +1,5 @@
 import { adminDb } from '../config/firebase.js';
+import { query, withTransaction } from '../config/postgres.js';
 
 export interface PermanentBillRecord {
   permanentBillNumber: number;
@@ -247,5 +248,203 @@ export class InMemoryBillingRepository implements IBillingRepository {
   }
 }
 
-export const billingRepository: IBillingRepository = new FirestoreBillingRepository();
+/**
+ * PostgresBillingRepository — Primary Authoritative Bill Repository
+ * All sequential allocation, persistent record queries, and counter states
+ * are strictly sourced from PostgreSQL transactions and sequences.
+ */
+export class PostgresBillingRepository implements IBillingRepository {
+  private static RESTAURANT_TIMEZONE = 'Asia/Kolkata';
+
+  private getLocalDateString(date: Date = new Date()): string {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: PostgresBillingRepository.RESTAURANT_TIMEZONE,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).format(date);
+  }
+
+  private getLocalTimeString(date: Date = new Date()): string {
+    return new Intl.DateTimeFormat('en-GB', {
+      timeZone: PostgresBillingRepository.RESTAURANT_TIMEZONE,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(date);
+  }
+
+  /**
+   * Atomically allocates the next Permanent Bill Number and Daily Order Number
+   * directly from PostgreSQL sequence and atomic function.
+   * Guaranteed concurrency-safe with zero duplicate sequence numbers.
+   */
+  async allocateNextBillNumbers(date: Date = new Date()): Promise<{
+    permanentBillNo: number;
+    dailyOrderNo: number;
+    orderDate: string;
+    orderTime: string;
+  }> {
+    const orderDate = this.getLocalDateString(date);
+    const orderTime = this.getLocalTimeString(date);
+
+    return await withTransaction(async (client) => {
+      // 1. Permanent Bill Number from Postgres sequence
+      const seqRes = await client.query(`SELECT nextval('permanent_bill_seq') AS bill_no;`);
+      const permanentBillNo = parseInt(seqRes.rows[0].bill_no, 10);
+
+      // 2. Daily Order Number from Postgres atomic function
+      const dailyRes = await client.query(
+        `SELECT get_next_daily_order_number($1::date) AS daily_no;`,
+        [orderDate]
+      );
+      const dailyOrderNo = parseInt(dailyRes.rows[0].daily_no, 10);
+
+      // Async Firestore projection mirror (non-blocking, never authoritative)
+      adminDb.collection('counters').doc('permanent_billing').set({
+        currentCount: permanentBillNo,
+        lastAllocatedAt: new Date().toISOString()
+      }, { merge: true }).catch(() => {});
+
+      adminDb.collection('counters').doc('dailyOrders').set({
+        date: orderDate,
+        count: dailyOrderNo,
+        lastAllocatedAt: new Date().toISOString()
+      }, { merge: true }).catch(() => {});
+
+      return {
+        permanentBillNo,
+        dailyOrderNo,
+        orderDate,
+        orderTime
+      };
+    });
+  }
+
+  async saveBill(record: PermanentBillRecord): Promise<void> {
+    // 1. Authoritative PostgreSQL write
+    await query(`
+      INSERT INTO canonical_bills (
+        id, permanent_bill_no, order_id, bill_date,
+        subtotal, discount, tax, net_amount,
+        payment_method, payment_status, created_at
+      ) VALUES (
+        $1, $2, $3, $4::date,
+        $5, $6, $7, $8,
+        $9, $10, $11::timestamptz
+      )
+      ON CONFLICT (permanent_bill_no) DO UPDATE SET
+        payment_method = EXCLUDED.payment_method,
+        payment_status = EXCLUDED.payment_status,
+        net_amount = EXCLUDED.net_amount;
+    `, [
+      `bill_${record.permanentBillNumber}`,
+      record.permanentBillNumber,
+      record.orderId,
+      record.createdAt.split('T')[0] || new Date().toISOString().split('T')[0],
+      record.totalAmount,
+      0,
+      0,
+      record.totalAmount,
+      record.paymentMethod,
+      record.paymentStatus,
+      record.createdAt
+    ]).catch((err) => {
+      console.warn('[PostgresBillingRepository] Postgres saveBill notice:', err.message);
+    });
+
+    // 2. Non-blocking Firestore projection mirror
+    const billDocRef = adminDb.collection('bills').doc(`bill_${record.permanentBillNumber}`);
+    await billDocRef.set({
+      ...record,
+      updatedAt: new Date().toISOString()
+    }).catch(() => {});
+  }
+
+  async findByPermanentNumber(billNumber: number): Promise<PermanentBillRecord | null> {
+    const res = await query(`
+      SELECT b.*, o.franchise_id, o.branch_id, o.terminal_id, o.order_source
+      FROM canonical_bills b
+      LEFT JOIN canonical_orders o ON b.order_id = o.id
+      WHERE b.permanent_bill_no = $1;
+    `, [billNumber]);
+
+    if (res.rows.length > 0) {
+      const r = res.rows[0];
+      return {
+        permanentBillNumber: parseInt(r.permanent_bill_no, 10),
+        billFormattedNumber: `BILL-${String(r.permanent_bill_no).padStart(6, '0')}`,
+        orderId: r.order_id,
+        source: (r.order_source || 'POS') as 'ONLINE' | 'POS',
+        franchiseId: r.franchise_id || 'fra_primary',
+        branchId: r.branch_id || 'main_branch',
+        terminalId: r.terminal_id,
+        totalAmount: parseFloat(r.net_amount),
+        paymentMethod: r.payment_method,
+        paymentStatus: r.payment_status,
+        createdAt: r.created_at?.toISOString() || new Date().toISOString()
+      };
+    }
+
+    // Fallback to Firestore projection if historic bill was only in Firestore
+    const doc = await adminDb.collection('bills').doc(`bill_${billNumber}`).get();
+    if (!doc.exists) return null;
+    return doc.data() as PermanentBillRecord;
+  }
+
+  async findByOrderId(orderId: string): Promise<PermanentBillRecord | null> {
+    const res = await query(`
+      SELECT b.*, o.franchise_id, o.branch_id, o.terminal_id, o.order_source
+      FROM canonical_bills b
+      LEFT JOIN canonical_orders o ON b.order_id = o.id
+      WHERE b.order_id = $1;
+    `, [orderId]);
+
+    if (res.rows.length > 0) {
+      const r = res.rows[0];
+      return {
+        permanentBillNumber: parseInt(r.permanent_bill_no, 10),
+        billFormattedNumber: `BILL-${String(r.permanent_bill_no).padStart(6, '0')}`,
+        orderId: r.order_id,
+        source: (r.order_source || 'POS') as 'ONLINE' | 'POS',
+        franchiseId: r.franchise_id || 'fra_primary',
+        branchId: r.branch_id || 'main_branch',
+        terminalId: r.terminal_id,
+        totalAmount: parseFloat(r.net_amount),
+        paymentMethod: r.payment_method,
+        paymentStatus: r.payment_status,
+        createdAt: r.created_at?.toISOString() || new Date().toISOString()
+      };
+    }
+
+    const snap = await adminDb.collection('bills').where('orderId', '==', orderId).limit(1).get();
+    if (snap.empty) return null;
+    return snap.docs[0].data() as PermanentBillRecord;
+  }
+
+  async getCurrentSequenceStatus(): Promise<{
+    lastPermanentBillNo: number;
+    todayDailyCount: number;
+    todayDate: string;
+  }> {
+    const today = this.getLocalDateString();
+    const seqRes = await query(`SELECT last_value, is_called FROM permanent_bill_seq;`).catch(() => ({ rows: [] }));
+    const dailyRes = await query(
+      `SELECT current_number FROM daily_order_counters WHERE counter_date = $1;`,
+      [today]
+    ).catch(() => ({ rows: [] }));
+
+    const lastVal = seqRes.rows[0] ? (seqRes.rows[0].is_called ? parseInt(seqRes.rows[0].last_value, 10) : 0) : 0;
+    const dailyCount = dailyRes.rows[0] ? parseInt(dailyRes.rows[0].current_number, 10) : 0;
+
+    return {
+      lastPermanentBillNo: lastVal,
+      todayDailyCount: dailyCount,
+      todayDate: today
+    };
+  }
+}
+
+export const billingRepository: IBillingRepository = new PostgresBillingRepository();
 
