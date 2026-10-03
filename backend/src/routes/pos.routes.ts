@@ -2326,6 +2326,39 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
 
       await adminDb.collection('orders').doc(orderId).set(orderData, { merge: true });
 
+      // Authoritative Canonical PostgreSQL Order & Items commit
+      try {
+        await CanonicalOrderService.createCanonicalOrder({
+          id: orderId,
+          orderSource: 'POS',
+          orderType: orderData.orderType,
+          customerName: orderData.customerName,
+          customerPhone: orderData.contactPhone,
+          items: (calc.items || []).map((it: any) => ({
+            name: it.name,
+            price: it.price,
+            quantity: it.quantity,
+            size: it.size,
+            crust: it.crust,
+            addons: it.addons
+          })),
+          subtotal: calc.subtotal,
+          discountAmount: calc.discountAmount,
+          taxAmount: calc.taxes,
+          totalAmount: calc.finalTotal,
+          paymentMethod: orderData.paymentMethod,
+          paymentStatus: 'PAID',
+          orderStatus: 'completed',
+          franchiseId,
+          branchId,
+          cashierId: user.uid,
+          cashierName: orderData.cashierName,
+          terminalId: orderData.terminalId
+        });
+      } catch (pgErr: any) {
+        console.warn('[SyncOffline] Canonical PostgreSQL order commit notice:', pgErr?.message);
+      }
+
       if (permBillNo) {
         billingRepository.saveBill({
           permanentBillNumber: permBillNo,

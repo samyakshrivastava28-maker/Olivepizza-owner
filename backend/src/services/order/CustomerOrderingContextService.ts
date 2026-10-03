@@ -12,6 +12,7 @@ export interface CustomerOrderingContext {
   };
   distanceKm: number;
   deliveryRadiusKm: number;
+  deliveryFee?: number;
   version: number;
   resolvedAt: string;
   expiresAt: number;
@@ -290,6 +291,7 @@ export class CustomerOrderingContextService {
       },
       distanceKm: Math.round(minDistance * 100) / 100,
       deliveryRadiusKm: closestBranch.maxRadius,
+      deliveryFee: minDistance > 5 ? 40 : 30,
       version,
       resolvedAt: new Date().toISOString(),
       expiresAt: now + (60 * 60 * 1000) // 1 hour validity

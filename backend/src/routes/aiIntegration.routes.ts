@@ -24,9 +24,20 @@ const router = Router();
 // ─────────────────────────────────────────────────────────────────────────────
 // HMAC Signature Validation — server-to-server trust
 // ─────────────────────────────────────────────────────────────────────────────
-const AI_GATEWAY_SECRET = process.env.AI_GATEWAY_SECRET || 'olive-ai-gateway-secret-change-in-prod';
+// No default: when AI_GATEWAY_SECRET is unset the gateway rejects every AI service call (fail closed).
+function getAIGatewaySecret(): string | undefined {
+  const s = process.env.AI_GATEWAY_SECRET?.trim();
+  return s ? s : undefined;
+}
 
 function requireAISignature(req: Request, res: Response, next: Function): void {
+  const secret = getAIGatewaySecret();
+  if (!secret) {
+    console.error('[AIGateway] AI_GATEWAY_SECRET is not configured — rejecting AI service request.');
+    res.status(503).json({ error: 'AI_GATEWAY_UNAVAILABLE: gateway secret not configured' });
+    return;
+  }
+
   const signature = req.headers['x-ai-signature'] as string;
   const timestamp  = req.headers['x-ai-timestamp'] as string;
 
@@ -37,16 +48,18 @@ function requireAISignature(req: Request, res: Response, next: Function): void {
 
   // Reject requests older than 2 minutes (replay attack prevention)
   const age = Date.now() - parseInt(timestamp, 10);
-  if (isNaN(age) || age > 2 * 60 * 1000) {
+  if (isNaN(age) || age > 2 * 60 * 1000 || age < -30_000) {
     res.status(401).json({ error: 'AI_GATEWAY_UNAUTHORIZED: Request timestamp expired' });
     return;
   }
 
   const payload = `${timestamp}:${JSON.stringify(req.body)}`;
-  const expected = crypto.createHmac('sha256', AI_GATEWAY_SECRET).update(payload).digest('hex');
+  const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
 
   try {
-    if (!crypto.timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex'))) {
+    const a = Buffer.from(signature, 'hex');
+    const b = Buffer.from(expected, 'hex');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
       res.status(401).json({ error: 'AI_GATEWAY_UNAUTHORIZED: Invalid signature' });
       return;
     }

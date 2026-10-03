@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import { RecaptchaEnterpriseServiceClient } from '@google-cloud/recaptcha-enterprise';
 
 const router = Router();
@@ -220,7 +221,15 @@ router.post('/context-session', verifyToken, async (req: AuthRequest, res: Respo
       expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString() // 8 hour session
     };
 
-    const sessionKey = Buffer.from(JSON.stringify(tokenPayload)).toString('base64url');
+    const secret = process.env.JWT_SECRET || process.env.TRACKING_TOKEN_SECRET || process.env.SESSION_SECRET;
+    if (!secret) {
+      res.status(500).json({ error: 'Server security configuration missing: signing secret is required.' });
+      return;
+    }
+
+    const payloadB64 = Buffer.from(JSON.stringify(tokenPayload)).toString('base64url');
+    const signature = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+    const sessionKey = `${payloadB64}.${signature}`;
 
     const franchiseBaseUrl = process.env.FRANCHISE_URL || 'https://franchise.olivepizza.in';
     const managerBaseUrl = process.env.MANAGER_URL || 'https://manager.olivepizza.in';
@@ -241,6 +250,55 @@ router.post('/context-session', verifyToken, async (req: AuthRequest, res: Respo
   } catch (error: any) {
     console.error('[Auth] Error generating context session:', error);
     res.status(500).json({ error: error?.message || 'Failed to generate context session' });
+  }
+});
+
+// POST /api/auth/verify-context-session - Cryptographically verify scoped context token
+router.post('/verify-context-session', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { sessionKey } = req.body;
+    if (!sessionKey || typeof sessionKey !== 'string') {
+      res.status(400).json({ valid: false, error: 'sessionKey is required' });
+      return;
+    }
+
+    const secret = process.env.JWT_SECRET || process.env.TRACKING_TOKEN_SECRET || process.env.SESSION_SECRET;
+    if (!secret) {
+      res.status(500).json({ valid: false, error: 'Server security configuration missing: secret is required.' });
+      return;
+    }
+
+    const parts = sessionKey.split('.');
+    if (parts.length !== 2) {
+      res.status(401).json({ valid: false, error: 'Invalid sessionKey format: signature missing.' });
+      return;
+    }
+
+    const [payloadB64, sig] = parts;
+    const expectedSig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+
+    const sigBuf = Buffer.from(sig);
+    const expectedBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+      res.status(401).json({ valid: false, error: 'Invalid sessionKey signature.' });
+      return;
+    }
+
+    const decodedStr = Buffer.from(payloadB64, 'base64url').toString('utf8');
+    const payload = JSON.parse(decodedStr);
+
+    if (!payload.expiresAt || new Date(payload.expiresAt).getTime() < Date.now()) {
+      res.status(401).json({ valid: false, error: 'Context session has expired.' });
+      return;
+    }
+
+    res.json({
+      valid: true,
+      context: payload
+    });
+  } catch (error: any) {
+    console.error('[Auth] Error verifying context session:', error);
+    res.status(500).json({ valid: false, error: error?.message || 'Verification failed' });
   }
 });
 

@@ -12,7 +12,6 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const OLIVE_PIZZA_AI_URL = process.env.OLIVE_PIZZA_AI_URL || 'https://olive-pizza-ai.onrender.com';
-const AI_GATEWAY_SECRET = process.env.AI_GATEWAY_SECRET || 'olive-ai-gateway-secret-change-in-prod';
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
@@ -65,9 +64,14 @@ export class OlivePizzaAISDK {
   }
 
   private static generateHeaders(bodyPayload: any, authToken?: string): Record<string, string> {
+    const secret = process.env.AI_GATEWAY_SECRET?.trim();
+    if (!secret) {
+      // Never sign with a known default. Surface the real configuration error to the caller.
+      throw new Error('AI_GATEWAY_SECRET is not configured; cannot sign requests to Olive Pizza AI.');
+    }
     const timestamp = Date.now().toString();
     const payload = `${timestamp}:${JSON.stringify(bodyPayload || {})}`;
-    const signature = crypto.createHmac('sha256', AI_GATEWAY_SECRET).update(payload).digest('hex');
+    const signature = crypto.createHmac('sha256', secret).update(payload).digest('hex');
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
