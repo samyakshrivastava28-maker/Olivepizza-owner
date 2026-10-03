@@ -196,31 +196,59 @@ export class MonthlyReportJob {
       const reportKey = `${franchiseId}_${branchId}_${year}_${monthNum}`;
       console.log(`[MonthlyReportJob] Generating report for: ${reportKey} (${branchName})`);
 
-      // 3.1 Generate PDF Buffer from PostgreSQL canonical data
+      // 3.1 Generate Consolidated PDF Buffer from PostgreSQL canonical data
       const pdfBuffer = await MonthlyPdfReportService.generateMonthlyReportBuffer({
         monthName,
         year,
         branchId,
         branchName,
         franchiseId,
-        franchiseName
+        franchiseName,
+        channel: 'ALL'
       });
 
-      // 3.2 Upload PDF to Cloudflare R2 with unique deterministic branch path
+      // 3.2 Upload Consolidated PDF to Cloudflare R2
       const uploadRes = await CloudflareReportService.uploadPdfReport(
         year,
         monthName,
         pdfBuffer,
         franchiseId,
-        branchId
+        branchId,
+        'ALL'
       );
       const cloudflarePath = uploadRes.cloudflarePath;
 
-      // 3.3 Generate secure View and Download URLs
+      // 3.3 Generate secure View and Download URLs for Consolidated
       const urls = await CloudflareReportService.getReportUrls(cloudflarePath, reportKey);
       const pdfUrl = uploadRes.publicUrl || urls.downloadUrl;
       const viewUrl = urls.viewUrl;
       const downloadUrl = urls.downloadUrl;
+
+      // 3.3.1 Generate and upload Channel-Specific PDFs (Online Orders & POS Direct Billing)
+      let onlinePdfUrl = '';
+      let posPdfUrl = '';
+      try {
+        const [onlineBuffer, posBuffer] = await Promise.all([
+          MonthlyPdfReportService.generateMonthlyReportBuffer({
+            monthName, year, branchId, branchName, franchiseId, franchiseName, channel: 'ONLINE'
+          }),
+          MonthlyPdfReportService.generateMonthlyReportBuffer({
+            monthName, year, branchId, branchName, franchiseId, franchiseName, channel: 'POS'
+          })
+        ]);
+
+        const [onlineUpload, posUpload] = await Promise.all([
+          CloudflareReportService.uploadPdfReport(year, monthName, onlineBuffer, franchiseId, branchId, 'ONLINE'),
+          CloudflareReportService.uploadPdfReport(year, monthName, posBuffer, franchiseId, branchId, 'POS')
+        ]);
+
+        const onlineUrls = await CloudflareReportService.getReportUrls(onlineUpload.cloudflarePath, `${reportKey}_online`);
+        const posUrls = await CloudflareReportService.getReportUrls(posUpload.cloudflarePath, `${reportKey}_pos`);
+        onlinePdfUrl = onlineUpload.publicUrl || onlineUrls.downloadUrl;
+        posPdfUrl = posUpload.publicUrl || posUrls.downloadUrl;
+      } catch (chErr: any) {
+        console.warn(`[MonthlyReportJob] Channel-specific PDF generation notice for ${reportKey}:`, chErr.message);
+      }
 
       // 3.4 Sync Google Sheets
       let sheetsUrl = '';
@@ -314,6 +342,8 @@ export class MonthlyReportJob {
         reportUrl: viewUrl,
         viewUrl,
         downloadUrl,
+        onlinePdfUrl,
+        posPdfUrl,
         sheetsUrl,
         pdfSize: uploadRes.sizeFormatted,
         status: 'COMPLETED',

@@ -42,10 +42,12 @@ export class CloudflareReportService {
     monthName: string,
     pdfBuffer: Buffer,
     franchiseId: string = 'fra_primary',
-    branchId: string = 'main_branch'
+    branchId: string = 'main_branch',
+    channel: 'ALL' | 'ONLINE' | 'POS' = 'ALL'
   ): Promise<{ cloudflarePath: string; publicUrl?: string; sizeFormatted: string }> {
     const monthNum = String(new Date(Date.parse(`${monthName} 1, ${year}`)).getMonth() + 1).padStart(2, '0');
-    const key = `reports/${year}/olive-pizza/${franchiseId}/${branchId}/monthly/${year}-${monthNum}.pdf`;
+    const suffix = channel === 'ONLINE' ? '-online' : channel === 'POS' ? '-pos' : '';
+    const key = `reports/${year}/olive-pizza/${franchiseId}/${branchId}/monthly/${year}-${monthNum}${suffix}.pdf`;
     const sizeKb = (pdfBuffer.length / 1024).toFixed(1);
     const sizeFormatted = pdfBuffer.length > 1024 * 1024
       ? `${(pdfBuffer.length / (1024 * 1024)).toFixed(2)} MB`

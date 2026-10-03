@@ -1,6 +1,7 @@
 import { pgPool } from '../config/postgres.js';
 import { adminDb as db } from '../config/firebase.js';
 import cron from 'node-cron';
+import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 
 export class DataRetentionJob {
   public static async run(): Promise<void> {
@@ -129,6 +130,16 @@ export class DataRetentionJob {
         }
       } finally {
         client.release();
+      }
+
+      // 3. Purge Supabase live navigation points older than 5 minutes
+      try {
+        const prunedSupabasePoints = await SupabaseGpsService.pruneStaleNavigationPoints(5);
+        if (prunedSupabasePoints > 0) {
+          console.log(`[DataRetentionJob] 5-min Supabase GPS retention: Purged ${prunedSupabasePoints} stale breadcrumbs.`);
+        }
+      } catch (sbErr: any) {
+        console.warn('[DataRetentionJob] Supabase GPS pruning notice:', sbErr.message);
       }
     } catch (e: any) {
       console.warn('[DataRetentionJob] Navigation telemetry cleanup warning:', e.message);

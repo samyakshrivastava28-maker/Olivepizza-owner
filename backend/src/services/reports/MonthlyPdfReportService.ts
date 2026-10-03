@@ -26,6 +26,7 @@ export interface MonthlyPdfOptions {
   branchName?: string;
   franchiseId?: string;
   franchiseName?: string;
+  channel?: 'ALL' | 'ONLINE' | 'POS';
 }
 
 export class MonthlyPdfReportService {
@@ -39,7 +40,8 @@ export class MonthlyPdfReportService {
       branchId = 'main_branch',
       branchName = 'Olive Pizza — Rajnandgaon HQ',
       franchiseId = 'fra_primary',
-      franchiseName = 'Olive Pizza Franchise'
+      franchiseName = 'Olive Pizza Franchise',
+      channel = 'ALL'
     } = options;
 
     // 1. Resolve Month Start and End in IST
@@ -47,15 +49,16 @@ export class MonthlyPdfReportService {
     const startDate = `${year}-${String(monthIndex + 1).padStart(2, '0')}-01`;
     const lastDayNum = new Date(year, monthIndex + 1, 0).getDate();
     const endDate = `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(lastDayNum).padStart(2, '0')}`;
-    const periodLabel = `${monthName.toUpperCase()} ${year}`;
+    const channelSuffix = channel === 'ONLINE' ? ' (ONLINE ORDERS)' : channel === 'POS' ? ' (POS DIRECT BILLING)' : '';
+    const periodLabel = `${monthName.toUpperCase()} ${year}${channelSuffix}`;
 
     // 2. Fetch all real data deterministically from PostgreSQL
     const [summary, dailyLedger, itemSales, cancelledOrders, completeLedger] = await Promise.all([
-      SalesCalculationEngine.getSalesSummary({ branchId, franchiseId, startDate, endDate, periodLabel }),
-      SalesCalculationEngine.getDailySalesLedger({ branchId, franchiseId, startDate, endDate }),
-      SalesCalculationEngine.getItemSalesSummary({ branchId, franchiseId, startDate, endDate, limit: 50 }),
-      SalesCalculationEngine.getCancelledOrders({ branchId, franchiseId, startDate, endDate }),
-      SalesCalculationEngine.getCompleteMonthlyLedger({ branchId, franchiseId, startDate, endDate }),
+      SalesCalculationEngine.getSalesSummary({ branchId, franchiseId, startDate, endDate, periodLabel, channel }),
+      SalesCalculationEngine.getDailySalesLedger({ branchId, franchiseId, startDate, endDate, channel }),
+      SalesCalculationEngine.getItemSalesSummary({ branchId, franchiseId, startDate, endDate, limit: 50, channel }),
+      SalesCalculationEngine.getCancelledOrders({ branchId, franchiseId, startDate, endDate, channel }),
+      SalesCalculationEngine.getCompleteMonthlyLedger({ branchId, franchiseId, startDate, endDate, channel }),
     ]);
 
     // 3. Initialize jsPDF document (Portrait, A4)
@@ -79,8 +82,12 @@ export class MonthlyPdfReportService {
 
     doc.setTextColor(245, 158, 11); // Amber #F59E0B
     doc.setFontSize(18);
-    doc.setFont('helvetica', 'bold');
-    doc.text('OLIVE PIZZA — MONTHLY SALES REPORT', 14, 16);
+    const reportTitle = channel === 'ONLINE' 
+      ? 'OLIVE PIZZA — ONLINE ORDERS MONTHLY REPORT'
+      : channel === 'POS'
+      ? 'OLIVE PIZZA — POS DIRECT BILLING MONTHLY REPORT'
+      : 'OLIVE PIZZA — CONSOLIDATED MONTHLY SALES REPORT';
+    doc.text(reportTitle, 14, 16);
 
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(9);

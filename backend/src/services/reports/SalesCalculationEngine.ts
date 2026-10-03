@@ -197,8 +197,9 @@ export class SalesCalculationEngine {
     startDate: string;
     endDate: string;
     periodLabel?: string;
+    channel?: 'ALL' | 'ONLINE' | 'POS';
   }): Promise<SalesSummaryMetrics> {
-    const { branchId, franchiseId, startDate, endDate, periodLabel = 'Custom Period' } = params;
+    const { branchId, franchiseId, startDate, endDate, periodLabel = 'Custom Period', channel = 'ALL' } = params;
 
     const filterConditions = ['order_date >= $1', 'order_date <= $2'];
     const queryParams: any[] = [startDate, endDate];
@@ -210,6 +211,11 @@ export class SalesCalculationEngine {
     if (franchiseId) {
       queryParams.push(franchiseId);
       filterConditions.push(`franchise_id = $${queryParams.length}`);
+    }
+    if (channel === 'ONLINE') {
+      filterConditions.push("order_source = 'ONLINE'");
+    } else if (channel === 'POS') {
+      filterConditions.push("order_source != 'ONLINE'");
     }
 
     const whereClause = filterConditions.join(' AND ');
@@ -356,8 +362,9 @@ export class SalesCalculationEngine {
     franchiseId?: string;
     startDate: string;
     endDate: string;
+    channel?: 'ALL' | 'ONLINE' | 'POS';
   }): Promise<DailyLedgerRow[]> {
-    const { branchId, franchiseId, startDate, endDate } = params;
+    const { branchId, franchiseId, startDate, endDate, channel = 'ALL' } = params;
     const filterConditions = ['order_date >= $1', 'order_date <= $2'];
     const queryParams: any[] = [startDate, endDate];
 
@@ -368,6 +375,11 @@ export class SalesCalculationEngine {
     if (franchiseId) {
       queryParams.push(franchiseId);
       filterConditions.push(`franchise_id = $${queryParams.length}`);
+    }
+    if (channel === 'ONLINE') {
+      filterConditions.push("order_source = 'ONLINE'");
+    } else if (channel === 'POS') {
+      filterConditions.push("order_source != 'ONLINE'");
     }
 
     const sql = `
@@ -414,8 +426,9 @@ export class SalesCalculationEngine {
     startDate: string;
     endDate: string;
     limit?: number;
+    channel?: 'ALL' | 'ONLINE' | 'POS';
   }): Promise<ItemSalesRow[]> {
-    const { branchId, franchiseId, startDate, endDate, limit = 100 } = params;
+    const { branchId, franchiseId, startDate, endDate, limit = 100, channel = 'ALL' } = params;
     const filterConditions = ['o.order_date >= $1', 'o.order_date <= $2', "o.order_status NOT IN ('CANCELLED', 'cancelled', 'VOIDED', 'voided')"];
     const queryParams: any[] = [startDate, endDate];
 
@@ -426,6 +439,11 @@ export class SalesCalculationEngine {
     if (franchiseId) {
       queryParams.push(franchiseId);
       filterConditions.push(`o.franchise_id = $${queryParams.length}`);
+    }
+    if (channel === 'ONLINE') {
+      filterConditions.push("o.order_source = 'ONLINE'");
+    } else if (channel === 'POS') {
+      filterConditions.push("o.order_source != 'ONLINE'");
     }
 
     const sql = `
@@ -459,8 +477,9 @@ export class SalesCalculationEngine {
     franchiseId?: string;
     startDate: string;
     endDate: string;
+    channel?: 'ALL' | 'ONLINE' | 'POS';
   }): Promise<CancelledOrderRow[]> {
-    const { branchId, franchiseId, startDate, endDate } = params;
+    const { branchId, franchiseId, startDate, endDate, channel = 'ALL' } = params;
     const filterConditions = ['order_date >= $1', 'order_date <= $2', "(order_status IN ('CANCELLED', 'cancelled', 'VOIDED', 'voided') OR refund_amount > 0)"];
     const queryParams: any[] = [startDate, endDate];
 
@@ -471,6 +490,11 @@ export class SalesCalculationEngine {
     if (franchiseId) {
       queryParams.push(franchiseId);
       filterConditions.push(`franchise_id = $${queryParams.length}`);
+    }
+    if (channel === 'ONLINE') {
+      filterConditions.push("order_source = 'ONLINE'");
+    } else if (channel === 'POS') {
+      filterConditions.push("order_source != 'ONLINE'");
     }
 
     const sql = `
@@ -511,8 +535,9 @@ export class SalesCalculationEngine {
     franchiseId?: string;
     startDate: string;
     endDate: string;
+    channel?: 'ALL' | 'ONLINE' | 'POS';
   }): Promise<CompleteBillLedgerRow[]> {
-    const { branchId, franchiseId, startDate, endDate } = params;
+    const { branchId, franchiseId, startDate, endDate, channel = 'ALL' } = params;
     const filterConditions = ['o.order_date >= $1', 'o.order_date <= $2'];
     const queryParams: any[] = [startDate, endDate];
 
@@ -523,6 +548,11 @@ export class SalesCalculationEngine {
     if (franchiseId) {
       queryParams.push(franchiseId);
       filterConditions.push(`o.franchise_id = $${queryParams.length}`);
+    }
+    if (channel === 'ONLINE') {
+      filterConditions.push("o.order_source = 'ONLINE'");
+    } else if (channel === 'POS') {
+      filterConditions.push("o.order_source != 'ONLINE'");
     }
 
     const sql = `
