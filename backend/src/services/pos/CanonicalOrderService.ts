@@ -150,9 +150,8 @@ export class CanonicalOrderService {
         }
       }
 
-      // Safe fallback only if item was not found in catalog
       if (unitPrice <= 0) {
-        unitPrice = Math.max(0, Number((item as any).unitPrice || item.price) || 0);
+        throw new Error(`Item "${itemId || itemName}" does not have an authoritative catalog price configured. Client prices are strictly rejected.`);
       }
 
       const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
@@ -169,14 +168,18 @@ export class CanonicalOrderService {
       });
     }
 
-    const subtotal = computedSubtotal > 0 ? parseFloat(computedSubtotal.toFixed(2)) : Math.max(0, Number(params.subtotal) || 0);
+    if (computedSubtotal <= 0) {
+      throw new Error('Order subtotal could not be calculated from authoritative catalog items.');
+    }
+
+    const subtotal = parseFloat(computedSubtotal.toFixed(2));
     const discountAmount = Math.min(subtotal, Math.max(0, Number(params.discountAmount) || 0));
     const taxableBase = Math.max(0, subtotal - discountAmount);
-    const taxAmount = params.taxAmount != null ? Math.max(0, Number(params.taxAmount)) : Math.round(taxableBase * 0.05);
-    const cgst = params.cgst ?? parseFloat((taxAmount / 2).toFixed(2));
-    const sgst = params.sgst ?? parseFloat((taxAmount - cgst).toFixed(2));
+    const taxAmount = parseFloat((taxableBase * 0.05).toFixed(2)); // Authoritative 5% GST
+    const cgst = parseFloat((taxAmount / 2).toFixed(2));
+    const sgst = parseFloat((taxAmount - cgst).toFixed(2));
     const deliveryFee = Math.max(0, Number(params.deliveryFee) || 0);
-    const totalAmount = parseFloat((subtotal - discountAmount + taxAmount + deliveryFee).toFixed(2));
+    const totalAmount = parseFloat((taxableBase + taxAmount + deliveryFee).toFixed(2));
 
     const paymentMethod = (params.paymentMethod || 'CASH').toUpperCase();
     const paymentStatus = (params.paymentStatus || (paymentMethod === 'COD' ? 'PENDING' : 'PAID')).toUpperCase();

@@ -79,15 +79,13 @@ CREATE TABLE order_items (
 );
 
 -- =========================================
--- 5. LIVE DELIVERIES TRACKING
+-- 5. LIVE GPS TELEMETRY IS SUPABASE-EXCLUSIVE
+-- Note: Live rider coordinates & breadcrumbs are strictly stored in Supabase Realtime
+-- (delivery_locations, navigation_points). PostgreSQL does NOT store live GPS.
+-- Legacy active_deliveries and delivery_locations tables are dropped.
 -- =========================================
-CREATE TABLE active_deliveries (
-    order_id UUID PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
-    delivery_partner_id UUID REFERENCES users(id),
-    current_lat DECIMAL(10, 8) NOT NULL,
-    current_lng DECIMAL(11, 8) NOT NULL,
-    last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
+DROP TABLE IF EXISTS active_deliveries CASCADE;
+DROP TABLE IF EXISTS delivery_locations CASCADE;
 
 -- =========================================
 -- 6. DEVICE HEARTBEATS

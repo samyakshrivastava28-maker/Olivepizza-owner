@@ -76,4 +76,46 @@ test('Payment & Financial Security Authority Test Suite', async (t) => {
     assert.strictEqual(hash1, hash2, 'Identical payloads must yield identical idempotency hash');
     assert.notStrictEqual(hash1, hash3, 'Modified payloads must yield completely different hash, preventing replay conflict');
   });
+
+  await t.test('POS Catalog Authority: Strictly rejects client-supplied prices when item is uncataloged or missing id', async () => {
+    const { POSService } = await import('../services/pos/POSService.js');
+    await assert.rejects(
+      async () => {
+        await POSService.calculateBill({
+          items: [{ name: 'Fake Pizza', price: 99, quantity: 1 } as any],
+          orderType: 'DINE_IN'
+        });
+      },
+      (err: any) => err instanceof Error && err.message.includes('Menu item identifier is required'),
+      'Must strictly reject bill calculation without menuItemId'
+    );
+
+    await assert.rejects(
+      async () => {
+        await POSService.calculateBill({
+          items: [{ menuItemId: 'non_existent_fake_id', name: 'Fake Pizza', price: 99, quantity: 1 } as any],
+          orderType: 'DINE_IN'
+        });
+      },
+      (err: any) => err instanceof Error && err.message.includes('not found in authoritative catalog'),
+      'Must strictly reject bill calculation for items not found in catalog'
+    );
+  });
+
+  await t.test('Canonical Order Pricing Authority: Strictly rejects uncataloged items and calculates total server-authoritatively', async () => {
+    const { CanonicalOrderService } = await import('../services/pos/CanonicalOrderService.js');
+    await assert.rejects(
+      async () => {
+        await CanonicalOrderService.createCanonicalOrder({
+          orderSource: 'ONLINE',
+          items: [{ menuItemId: 'non_existent_item_canon', name: 'Fake Pizza', price: 99, quantity: 1 }],
+          subtotal: 99,
+          totalAmount: 99,
+          paymentMethod: 'CASH'
+        });
+      },
+      (err: any) => err instanceof Error && err.message.includes('authoritative catalog price'),
+      'Must reject order creation when item is not in catalog'
+    );
+  });
 });

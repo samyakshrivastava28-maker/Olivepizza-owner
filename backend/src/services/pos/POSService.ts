@@ -139,6 +139,14 @@ export class POSService {
   }
 
   /**
+   * For testing & local cache priming: registers an authoritative catalog item into memory cache.
+   */
+  public static seedCatalogItem(itemId: string, itemData: any): void {
+    if (!itemId) return;
+    this.catalogCache.set(itemId, { item: itemData, timestamp: Date.now() });
+  }
+
+  /**
    * Recalculates subtotal, discounts, 5% GST, and grand total server-authoritatively.
    * Client-supplied prices and delivery fees are NEVER blindly trusted.
    */
@@ -153,41 +161,35 @@ export class POSService {
       let itemName = item.name || 'Menu Item';
       const formattedAddons: string[] = [];
 
-      // 1. Resolve authoritative pricing from catalog
-      const isTestEnv = process.env.NODE_ENV === 'test' || 
-                        process.env.npm_lifecycle_event === 'test' || 
-                        Boolean(process.env.NODE_TEST_CONTEXT) ||
-                        process.argv.some(arg => arg.includes('test'));
+      // 1. Resolve authoritative pricing strictly from catalog
+      if (!itemId) {
+        throw new Error(`Menu item identifier is required for "${itemName}". Client prices are strictly rejected.`);
+      }
 
-      let catalogItem = itemId ? await this.getCatalogItem(itemId) : null;
+      const catalogItem = await this.getCatalogItem(itemId);
+      if (!catalogItem) {
+        throw new Error(`Item "${itemId || itemName}" not found in authoritative catalog. Client-controlled prices are strictly rejected.`);
+      }
 
-      if (!catalogItem && !itemId && isTestEnv && item.price != null) {
-        unitPrice = Math.max(0, Number(item.price));
-      } else if (!itemId) {
-        throw new Error('Menu item identifier is required for all line items. Client prices are not accepted.');
-      } else if (!catalogItem) {
-        if (isTestEnv && item.price != null) {
-          unitPrice = Math.max(0, Number(item.price));
-        } else {
-          throw new Error(`Item "${itemId || itemName}" not found in authoritative catalog. Client-controlled prices are strictly rejected.`);
+      itemName = catalogItem.productName || catalogItem.name || itemName;
+      
+      // Determine size / variant price
+      const selectedSize = (item.size || '').toLowerCase();
+      if (selectedSize && catalogItem.sizes && catalogItem.sizes[selectedSize]?.price) {
+        unitPrice = Number(catalogItem.sizes[selectedSize].price);
+      } else if (selectedSize && Array.isArray(catalogItem.variants)) {
+        const v = catalogItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
+        if (v && v.price) {
+          unitPrice = Number(v.price);
         }
-      } else {
-        itemName = catalogItem.productName || catalogItem.name || itemName;
-        
-        // Determine size / variant price
-        const selectedSize = (item.size || '').toLowerCase();
-        if (selectedSize && catalogItem.sizes && catalogItem.sizes[selectedSize]?.price) {
-          unitPrice = Number(catalogItem.sizes[selectedSize].price);
-        } else if (selectedSize && Array.isArray(catalogItem.variants)) {
-          const v = catalogItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
-          if (v && v.price) {
-            unitPrice = Number(v.price);
-          }
-        }
+      }
 
-        if (!unitPrice || unitPrice <= 0) {
-          unitPrice = Number(catalogItem.offerPrice || catalogItem.basePrice || catalogItem.price || 0);
-        }
+      if (!unitPrice || unitPrice <= 0) {
+        unitPrice = Number(catalogItem.offerPrice || catalogItem.basePrice || catalogItem.price || 0);
+      }
+
+      if (!unitPrice || unitPrice <= 0) {
+        throw new Error(`Authoritative price for item "${itemId}" (${itemName}) is invalid or not configured in catalog.`);
       }
 
       // Authoritative Addon Pricing

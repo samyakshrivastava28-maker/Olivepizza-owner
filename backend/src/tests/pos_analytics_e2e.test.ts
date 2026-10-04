@@ -8,10 +8,21 @@ async function runPOSAnalyticsVerification() {
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 
   console.log('[TEST 1] Testing Server-Authoritative Bill Calculation...');
+  POSService.seedCatalogItem('prod_classic_margherita', {
+    id: 'prod_classic_margherita',
+    name: 'Classic Margherita',
+    basePrice: 199
+  });
+  POSService.seedCatalogItem('prod_garlic_breadsticks', {
+    id: 'prod_garlic_breadsticks',
+    name: 'Garlic Breadsticks',
+    basePrice: 149
+  });
+
   const calc = await POSService.calculateBill({
     items: [
-      { name: 'Classic Margherita', price: 199, quantity: 2 },
-      { name: 'Garlic Breadsticks', price: 149, quantity: 1 }
+      { menuItemId: 'prod_classic_margherita', name: 'Classic Margherita', price: 1, quantity: 2 }, // Tampered client price ₹1 should be ignored
+      { menuItemId: 'prod_garlic_breadsticks', name: 'Garlic Breadsticks', price: 999, quantity: 1 } // Tampered client price ₹999 should be ignored
     ],
     orderType: 'DINE_IN',
     discountAmount: 47

@@ -106,12 +106,10 @@ export class DataLifecycleService {
     // 0. Authoritative Supabase GPS Cleanup (Single Source of Truth)
     await SupabaseGpsService.cleanupDeliveredGps(orderId).catch(() => {});
 
-    // 1. PostgreSQL Cleanup
+    // 1. PostgreSQL Cleanup (Business delivery route history)
     let client: any = null;
     try {
       client = await pgPool.connect();
-      await client.query(`DELETE FROM active_deliveries WHERE order_id::text = $1`, [orderId]).catch(() => {});
-      await client.query(`DELETE FROM delivery_locations WHERE active_order_id::text = $1`, [orderId]).catch(() => {});
       await client.query(`DELETE FROM location_history WHERE order_id::text = $1`, [orderId]).catch(() => {});
     } catch (err: any) {
       console.warn(`[DataLifecycle] Postgres tracking purge notice for "${orderId}":`, err.message);
@@ -234,11 +232,9 @@ export class DataLifecycleService {
       const resCron2 = await client.query(`DELETE FROM job_run_details WHERE start_time < NOW() - INTERVAL '1 hour'`).catch(() => ({ rowCount: 0 }));
       cronJobLogsDeleted = (resCron1.rowCount || 0) + (resCron2.rowCount || 0);
 
-      // 2. Delete realtime tracking logs
-      const resDeliv = await client.query(`DELETE FROM active_deliveries WHERE last_updated < NOW() - INTERVAL '5 minutes'`).catch(() => ({ rowCount: 0 }));
-      const resLoc = await client.query(`DELETE FROM delivery_locations WHERE updated_at < NOW() - INTERVAL '15 minutes'`).catch(() => ({ rowCount: 0 }));
+      // 2. Delete route history logs in PostgreSQL (live GPS is managed in Supabase)
       const resHist = await client.query(`DELETE FROM location_history WHERE timestamp < NOW() - INTERVAL '12 hours'`).catch(() => ({ rowCount: 0 }));
-      realtimeTrackingDeleted = (resDeliv.rowCount || 0) + (resLoc.rowCount || 0) + (resHist.rowCount || 0);
+      realtimeTrackingDeleted = resHist.rowCount || 0;
 
       // 3. Delete sent email queue records
       const resEmail = await client.query(`DELETE FROM email_queue WHERE status = 'sent' AND created_at < NOW() - INTERVAL '1 day'`).catch(() => ({ rowCount: 0 }));

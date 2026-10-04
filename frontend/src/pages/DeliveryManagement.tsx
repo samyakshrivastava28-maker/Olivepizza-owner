@@ -28,7 +28,6 @@ import {
   where,
   doc,
   setDoc,
-  updateDoc,
 } from 'firebase/firestore';
 import { DeliveryPartner, Order } from '../types/models';
 import { fetchApi } from '../lib/api';
@@ -432,23 +431,19 @@ export default function DeliveryManagement() {
 
     const toastId = toast.loading(`Assigning ${partner.name} to order...`);
     try {
-      await updateDoc(doc(db, 'orders', orderId), {
-        deliveryPartnerId: partner.id,
-        deliveryPartner: {
-          id: partner.id,
-          name: partner.name,
-          phone: partner.phone,
-          vehicleNumber: partner.vehicleNumber || '',
-        },
-        status: 'out_for_delivery',
-        updatedAt: new Date().toISOString(),
+      const res = await fetchApi(`/api/delivery/orders/${orderId}/assign-partner`, {
+        method: 'POST',
+        body: JSON.stringify({
+          deliveryPartnerId: partner.id,
+          deliveryPartnerName: partner.name,
+          deliveryPartnerPhone: partner.phone,
+        }),
       });
 
-      await setDoc(
-        doc(db, 'delivery_partners', partner.id),
-        { status: 'busy', currentOrderId: orderId, updatedAt: new Date().toISOString() },
-        { merge: true }
-      ).catch(() => {});
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Server rejected rider assignment');
+      }
 
       toast.success(`Order assigned to ${partner.name}!`, { id: toastId });
     } catch (err: any) {

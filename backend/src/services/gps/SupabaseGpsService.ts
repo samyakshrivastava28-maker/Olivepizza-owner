@@ -221,6 +221,24 @@ export class SupabaseGpsService {
   }
 
   /**
+   * Set active order for rider in Supabase live GPS delivery_locations.
+   */
+  public static async setActiveOrder(deliveryPartnerId: string, orderId: string): Promise<void> {
+    if (!supabaseNav) return;
+    try {
+      await supabaseNav
+        .from('delivery_locations')
+        .update({
+          active_order_id: orderId,
+          last_updated: new Date().toISOString()
+        })
+        .eq('delivery_partner_id', deliveryPartnerId);
+    } catch (err: any) {
+      console.warn('[SupabaseGpsService] Notice setting active order:', err?.message);
+    }
+  }
+
+  /**
    * Clear active order on rider location upon order delivery or cancellation.
    */
   public static async clearActiveOrder(deliveryPartnerId: string, orderId?: string): Promise<void> {

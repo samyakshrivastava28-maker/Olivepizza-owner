@@ -342,13 +342,11 @@ router.post('/navigation/start', verifyToken, requireRole(['delivery_partner']),
       VALUES ($1, $2, $3, $4, $5, $6)
     `, [orderId, partnerId, customerLat, customerLng, restaurantLat, restaurantLng]);
     
-    await client.query(`
-      UPDATE delivery_locations 
-      SET active_order_id = $1 
-      WHERE delivery_partner_id = $2
-    `, [orderId, partnerId]);
-
     client.release();
+    
+    // Authoritative update in Supabase delivery_locations (Single Source of Truth for live GPS)
+    await SupabaseGpsService.setActiveOrder(partnerId, orderId);
+
     res.json({ success: true });
   } catch (error) {
     console.error('Error starting navigation:', error);
