@@ -1,6 +1,5 @@
 import cron from 'node-cron';
 import crypto from 'crypto';
-import fetch from 'node-fetch';
 
 const AI_BACKEND_URL = process.env.AI_BACKEND_URL || 'https://olive-pizza-ai.onrender.com';
 const TRACKING_TOKEN_SECRET = process.env.TRACKING_TOKEN_SECRET || process.env.JWT_SECRET || '';

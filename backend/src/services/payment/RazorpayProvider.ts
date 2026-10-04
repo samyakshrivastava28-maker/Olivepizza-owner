@@ -1,7 +1,6 @@
 import { PaymentProvider, CreateIntentParams, CreateIntentResult, VerifyPaymentParams, VerifyPaymentResult, CreateRefundParams, RefundResult, ProviderHealthResult } from './PaymentProvider.interface.js';
 import { getPaymentConfig } from '../../config/payment.config.js';
 import crypto from 'crypto';
-import fetch from 'node-fetch';
 
 export class RazorpayProvider implements PaymentProvider {
   public name: 'razorpay' = 'razorpay';

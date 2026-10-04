@@ -42,7 +42,6 @@
     "multer": "^2.2.0",
     "node-cache": "^5.1.2",
     "node-cron": "^4.5.0",
-    "node-fetch": "^3.3.2",
     "nodemailer": "^6.10.0",
     "openai": "^6.44.0",
     "papaparse": "^5.5.4",
