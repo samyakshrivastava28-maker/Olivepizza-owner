@@ -36,7 +36,7 @@ validateEnvironmentVariables();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.get(['/health', '/api/health', '/api/health/ping', '/ping'], (req, res) => {
+app.get(['/health', '/health/live', '/api/health', '/api/health/ping', '/ping'], (req, res) => {
   res.json({
     status: 'ok',
     uptime: process.uptime(),
