@@ -31,20 +31,7 @@ fi
 # 3. Check deployment mode
 MODE="${1:-pm2}"
 
-if [ "$MODE" = "docker" ]; then
-  echo "🐳 Deploying via Docker Compose..."
-  cd ..
-  docker compose build backend
-  docker compose up -d backend
-  echo "🔍 Verifying Docker health..."
-  sleep 5
-  curl -fsS http://127.0.0.1:5000/health/live || {
-    echo "❌ Health check probe failed!"
-    docker compose logs --tail=50 backend
-    exit 1
-  }
-  echo "✅ Docker deployment healthy and active!"
-elif [ "$MODE" = "systemd" ]; then
+if [ "$MODE" = "systemd" ]; then
   echo "⚙️ Deploying via Systemd Service..."
   npm ci --omit=dev
   npm run build || true

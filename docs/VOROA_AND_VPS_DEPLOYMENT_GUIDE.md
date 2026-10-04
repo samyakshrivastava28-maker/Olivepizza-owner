@@ -41,17 +41,6 @@ Voroa connects directly to your GitHub repository and automatically deploys when
 
 ---
 
-### Option B: Docker Container Deployment on Voroa
-
-If you prefer deploying via container:
-1. In Voroa, select **Deploy with Dockerfile**.
-2. **Dockerfile Path**: `backend/Dockerfile` (or root context).
-3. **Port**: `5000`.
-4. **Healthcheck**: `/health/live`.
-5. Enter Environment Variables and deploy.
-
----
-
 ## 2. Deploying to a Linux VPS (Ubuntu / Debian)
 
 ### Prerequisites on VPS
@@ -59,44 +48,14 @@ If you prefer deploying via container:
 # Update system
 sudo apt update && sudo apt upgrade -y
 
-# Install Git, Curl, and Node.js 20 (if using PM2)
+# Install Git, Curl, and Node.js 20 (LTS)
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y git curl build-essential nginx certbot python3-certbot-nginx nodejs
 ```
 
 ---
 
-### Method A: Docker Compose (Easiest & Complete)
-
-The repository includes a production-ready `docker-compose.yml` orchestrating the backend, PostgreSQL, Redis, and Nginx with SSL.
-
-1. **Clone repository onto VPS**:
-   ```bash
-   cd /var/www
-   git clone https://github.com/samyakshrivastava28-maker/Olivepizza-owner.git
-   cd Olivepizza-owner
-   ```
-
-2. **Configure Environment**:
-   ```bash
-   cp backend/.env.example backend/.env
-   nano backend/.env
-   ```
-
-3. **Start all services**:
-   ```bash
-   docker compose up -d --build
-   ```
-
-4. **Verify Health**:
-   ```bash
-   curl http://127.0.0.1:5000/health/live
-   # Returns: {"status":"healthy","service":"olive-pizza-owner-backend",...}
-   ```
-
----
-
-### Method B: PM2 Native Node Process (Highest Performance)
+### Method A: PM2 Native Node Process (Recommended — High Performance & Clustering)
 
 1. **Install PM2 globally**:
    ```bash
