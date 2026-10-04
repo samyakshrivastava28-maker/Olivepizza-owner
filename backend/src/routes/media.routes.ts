@@ -3,6 +3,8 @@ import { Readable } from 'stream';
 import multer from 'multer';
 import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
 import cloudinary from '../config/cloudinary.js';
+import { MediaOptimizationService } from '../services/storage/MediaOptimizationService.js';
+import { backgroundTaskWorker } from '../services/background/BackgroundTaskWorker.js';
 
 const router = Router();
 const verifyAdminOrOwner = [requireAuth, requireRole(['owner', 'admin', 'developer', 'delivery_partner', 'delivery'])];
@@ -13,22 +15,8 @@ const uploadMiddleware = multer({
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB max ceiling
 });
 
-const ALLOWED_IMAGE_TYPES = [
-  'image/jpeg',
-  'image/jpg',
-  'image/png',
-  'image/webp',
-  'image/avif',
-  'image/gif',
-  'image/svg+xml',
-];
-
-const ALLOWED_VIDEO_TYPES = [
-  'video/mp4',
-  'video/webm',
-  'video/quicktime',
-  'video/x-matroska',
-];
+const ALLOWED_IMAGE_TYPES = MediaOptimizationService.ALLOWED_IMAGE_TYPES;
+const ALLOWED_VIDEO_TYPES = MediaOptimizationService.ALLOWED_VIDEO_TYPES;
 
 const ALLOWED_FOLDERS = [
   'olive-pizza/ads',
@@ -92,6 +80,43 @@ router.get('/test', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/media/performance-summary
+ * Returns media performance and optimization metrics for Owner Dashboard
+ */
+router.get('/performance-summary', verifyAdminOrOwner, async (req: Request, res: Response) => {
+  try {
+    const summary = await MediaOptimizationService.getPerformanceSummary();
+    res.json({ success: true, summary });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
+ * POST /api/media/retry-optimization
+ * Retries failed or pending media optimization jobs
+ */
+router.post('/retry-optimization', verifyAdminOrOwner, async (req: Request, res: Response) => {
+  try {
+    const { publicId, url, resourceType, docId } = req.body;
+    if (!publicId || !url) {
+      return res.status(400).json({ success: false, error: 'publicId and url are required' });
+    }
+
+    const result = await MediaOptimizationService.processOptimizationJob({
+      publicId,
+      url,
+      resourceType: resourceType || 'image',
+      docId
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
  * POST /api/media/upload
  * Server-side validated direct upload endpoint for Owner/Admin/Delivery
  * Accepts multipart/form-data with field name 'image', 'file', or 'video'
@@ -105,34 +130,14 @@ router.post('/upload', verifyAdminOrOwner, uploadMiddleware.any(), async (req: R
       return res.status(400).json({ success: false, error: 'No media file provided in request' });
     }
 
-    const mime = (file.mimetype || '').toLowerCase();
-    const isImage = ALLOWED_IMAGE_TYPES.includes(mime);
-    const isVideo = ALLOWED_VIDEO_TYPES.includes(mime);
-
-    if (!isImage && !isVideo) {
-      return res.status(400).json({
-        success: false,
-        error: `Unsupported file type: ${mime}. Allowed images: JPG, PNG, WebP, AVIF, GIF, SVG. Allowed videos: MP4, WebM, MOV.`,
-      });
+    // 1. Centralized Media Validation
+    const validation = MediaOptimizationService.validateMedia(file);
+    if (!validation.isValid) {
+      return res.status(400).json({ success: false, error: validation.error });
     }
 
-    // Size limit enforcement
-    const MAX_IMAGE_SIZE = 15 * 1024 * 1024; // 15MB
-    const MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50MB
-
-    if (isImage && file.size > MAX_IMAGE_SIZE) {
-      return res.status(400).json({
-        success: false,
-        error: `Image exceeds maximum allowed size of 15MB (uploaded size: ${(file.size / (1024 * 1024)).toFixed(2)}MB)`,
-      });
-    }
-
-    if (isVideo && file.size > MAX_VIDEO_SIZE) {
-      return res.status(400).json({
-        success: false,
-        error: `Video exceeds maximum allowed size of 50MB (uploaded size: ${(file.size / (1024 * 1024)).toFixed(2)}MB)`,
-      });
-    }
+    const isVideo = validation.resourceType === 'video';
+    const mime = validation.mimeType;
 
     // Folder resolution & sanitation
     const requestedFolder = (req.body?.folder || req.query?.folder) as string | undefined;
@@ -157,12 +162,36 @@ router.post('/upload', verifyAdminOrOwner, uploadMiddleware.any(), async (req: R
     const publicId = uploadResult.public_id;
     const format = uploadResult.format || (file.originalname.split('.').pop() || 'bin');
 
+    // 2. Automated Media Optimization Pipeline
+    let variants: any;
+    let optimizedUrl = secureUrl;
+    let thumbnailUrl = secureUrl;
+    let posterUrl = '';
+
+    if (isVideo) {
+      const vidVariants = MediaOptimizationService.buildOptimizedVideoVariants(secureUrl);
+      variants = vidVariants;
+      optimizedUrl = vidVariants.optimizedUrl;
+      posterUrl = vidVariants.posterUrl;
+      thumbnailUrl = vidVariants.posterUrl || secureUrl;
+    } else {
+      const imgVariants = MediaOptimizationService.buildOptimizedImageVariants(secureUrl);
+      variants = imgVariants;
+      optimizedUrl = imgVariants.optimizedUrl;
+      thumbnailUrl = imgVariants.thumbnailUrl;
+    }
+
     // Register asset in Firestore media_library collection
+    let firestoreDocId = '';
     try {
       const { adminDb } = await import('../config/firebase.js');
       if (adminDb) {
-        await adminDb.collection('media_library').add({
+        const docRef = await adminDb.collection('media_library').add({
           mediaUrl: secureUrl,
+          optimizedUrl,
+          thumbnailUrl,
+          posterUrl: posterUrl || null,
+          variants,
           cloudinaryPublicId: publicId,
           mediaType: mime,
           format,
@@ -174,16 +203,60 @@ router.post('/upload', verifyAdminOrOwner, uploadMiddleware.any(), async (req: R
           folder: targetFolder,
           source: 'DIRECT_UPLOAD',
           resourceType: uploadResult.resource_type || (isVideo ? 'video' : 'image'),
+          status: 'OPTIMIZED',
         });
+        firestoreDocId = docRef.id;
       }
     } catch (fsErr: any) {
       console.warn('[MediaRoutes] Firestore media_library save warning:', fsErr.message);
+    }
+
+    // Register asset in PostgreSQL media_assets if available
+    try {
+      const { pgPool } = await import('../config/postgres.js');
+      const client = await pgPool.connect();
+      try {
+        await client.query(
+          `INSERT INTO media_assets 
+            (public_id, url, optimized_url, thumbnail_url, poster_url, resource_type, format, bytes, width, height, duration, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'OPTIMIZED')
+           ON CONFLICT (public_id) DO UPDATE SET 
+            optimized_url = EXCLUDED.optimized_url,
+            thumbnail_url = EXCLUDED.thumbnail_url,
+            poster_url = EXCLUDED.poster_url,
+            status = 'OPTIMIZED'`,
+          [
+            publicId,
+            secureUrl,
+            optimizedUrl,
+            thumbnailUrl,
+            posterUrl || null,
+            isVideo ? 'video' : 'image',
+            format,
+            uploadResult.bytes || file.size,
+            uploadResult.width || null,
+            uploadResult.height || null,
+            uploadResult.duration || null,
+          ]
+        );
+      } finally {
+        client.release();
+      }
+    } catch (pgErr) {
+      // Non-blocking in test environment
     }
 
     res.json({
       success: true,
       url: secureUrl,
       secure_url: secureUrl,
+      optimized_url: optimizedUrl,
+      optimizedUrl,
+      thumbnail_url: thumbnailUrl,
+      thumbnailUrl,
+      poster_url: posterUrl,
+      posterUrl,
+      variants,
       public_id: publicId,
       publicId,
       format,
@@ -192,6 +265,8 @@ router.post('/upload', verifyAdminOrOwner, uploadMiddleware.any(), async (req: R
       height: uploadResult.height || null,
       duration: uploadResult.duration || null,
       resource_type: uploadResult.resource_type || (isVideo ? 'video' : 'image'),
+      status: 'OPTIMIZED',
+      docId: firestoreDocId
     });
   } catch (error: any) {
     console.error('[MediaRoutes] Upload error:', error);

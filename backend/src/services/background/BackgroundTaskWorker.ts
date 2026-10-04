@@ -2,6 +2,7 @@ import { pgPool } from '../../config/postgres.js';
 import { adminDb as db } from '../../config/firebase.js';
 import { notificationEngine } from '../notification/NotificationEngine.js';
 import { queueEmail } from '../email.service.js';
+import { MediaOptimizationService } from '../storage/MediaOptimizationService.js';
 
 export class BackgroundTaskWorker {
   private isRunning = false;
@@ -20,12 +21,12 @@ export class BackgroundTaskWorker {
     console.log('[BackgroundWorker] Stopped.');
   }
 
-  public async scheduleTask(orderId: string, taskType: 'push' | 'email', payload: any) {
+  public async scheduleTask(orderId: string | null, taskType: 'push' | 'email' | 'media_optimize', payload: any) {
     const client = await pgPool.connect();
     try {
       await client.query(
         `INSERT INTO background_tasks (order_id, task_type, payload) VALUES ($1, $2, $3)`,
-        [orderId, taskType, JSON.stringify(payload)]
+        [orderId || 'system', taskType, JSON.stringify(payload)]
       );
     } catch (e) {
       console.error('[BackgroundWorker] Failed to schedule task:', e);
@@ -68,6 +69,9 @@ export class BackgroundTaskWorker {
           } else if (task.task_type === 'email') {
             await this.processEmailTask(task.payload);
             success = true;
+          } else if (task.task_type === 'media_optimize') {
+            const res = await MediaOptimizationService.processOptimizationJob(task.payload);
+            success = res.success;
           } else {
             throw new Error(`Unknown task type: ${task.task_type}`);
           }

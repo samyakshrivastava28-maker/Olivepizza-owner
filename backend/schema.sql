@@ -188,3 +188,58 @@ INSERT INTO menu_items (name, description, category, base_price, image_url, is_v
 ('Spicy Paneer Tikka', 'Spicy paneer, crisp capsicum & red paprika', 'pizza', 429.00, 'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?auto=format&fit=crop&w=800&q=80', TRUE),
 ('Garlic Breadsticks', 'Freshly baked garlic bread with cheese dip', 'sides', 149.00, 'https://images.unsplash.com/photo-1573140247632-f8fd74997d5c?auto=format&fit=crop&w=800&q=80', TRUE),
 ('Choco Lava Cake', 'Hot chocolate pudding with a gooey chocolate center', 'dessert', 129.00, 'https://images.unsplash.com/photo-1624353365286-3f8d62daad51?auto=format&fit=crop&w=800&q=80', TRUE);
+
+-- =========================================
+-- HOMEPAGE & MEDIA OPTIMIZATION TABLES
+-- =========================================
+
+CREATE TABLE IF NOT EXISTS homepage_revisions (
+    id SERIAL PRIMARY KEY,
+    version_id VARCHAR(64) NOT NULL UNIQUE,
+    page_id VARCHAR(64) NOT NULL,
+    title VARCHAR(255),
+    schema_json JSONB NOT NULL,
+    published_by VARCHAR(128),
+    is_active BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_homepage_revisions_created_at ON homepage_revisions (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_homepage_revisions_active ON homepage_revisions (is_active) WHERE is_active = TRUE;
+
+CREATE TABLE IF NOT EXISTS media_assets (
+    id SERIAL PRIMARY KEY,
+    public_id VARCHAR(255) NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    optimized_url TEXT,
+    thumbnail_url TEXT,
+    poster_url TEXT,
+    resource_type VARCHAR(32) NOT NULL,
+    format VARCHAR(32),
+    bytes BIGINT,
+    width INT,
+    height INT,
+    duration NUMERIC,
+    status VARCHAR(32) DEFAULT 'OPTIMIZED',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_assets_public_id ON media_assets (public_id);
+CREATE INDEX IF NOT EXISTS idx_media_assets_status ON media_assets (status);
+
+CREATE TABLE IF NOT EXISTS background_tasks (
+    id SERIAL PRIMARY KEY,
+    order_id VARCHAR(128),
+    task_type VARCHAR(64) NOT NULL,
+    payload JSONB NOT NULL,
+    status VARCHAR(32) DEFAULT 'pending',
+    retry_count INT DEFAULT 0,
+    started_at TIMESTAMP WITH TIME ZONE,
+    finished_at TIMESTAMP WITH TIME ZONE,
+    duration_ms INT,
+    last_error TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_tasks_status ON background_tasks (status, retry_count) WHERE status IN ('pending', 'failed');
+

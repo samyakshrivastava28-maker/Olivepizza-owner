@@ -32,10 +32,19 @@ import {
   ShoppingBag,
   Star,
   ArrowRight,
+  HelpCircle,
+  Zap,
+  RotateCcw,
+  MapPin,
+  HeartHandshake,
 } from 'lucide-react';
-import { PageSchema, SimplifiedSectionSchema, SectionType, AnimationType } from '../../types/PageSchema';
+import { PageSchema, SimplifiedSectionSchema, SectionType, AnimationType, ThemePreset, CuratedFontFamily } from '../../types/PageSchema';
 import { fetchApi } from '../../lib/api';
 import toast from 'react-hot-toast';
+import PropertyPanel from './editor/PropertyPanel';
+import InteractiveGuideModal from './editor/InteractiveGuideModal';
+import PerformanceDashboardModal from './editor/PerformanceDashboardModal';
+import { PREDEFINED_TEMPLATES } from '../../utils/HomePageTemplates';
 
 interface HomePageEditorProps {
   initialSchema: PageSchema;
@@ -102,11 +111,25 @@ const AVAILABLE_SECTION_TYPES: { type: SectionType; label: string; description: 
     icon: ImageIcon,
   },
   {
+    type: 'WHY_US',
+    label: 'Why Olive Pizza / Delivery Promise',
+    description: 'Highlights wood-fired oven craft, 100% mozzarella, and 25-minute delivery guarantee.',
+    defaultHeadline: 'Why Foodies Choose Olive Pizza',
+    icon: HeartHandshake,
+  },
+  {
     type: 'TESTIMONIALS',
-    label: 'Customer Reviews',
+    label: 'Customer Reviews & Ratings',
     description: 'Foodie ratings, verified customer feedback, and chef quality badges.',
     defaultHeadline: 'Loved by Foodies Across Rajnandgaon',
     icon: CheckCircle2,
+  },
+  {
+    type: 'DELIVERY_AREA',
+    label: 'Delivery Zones & Store Map',
+    description: 'Interactive radius map showing delivery coverage and branch contact.',
+    defaultHeadline: 'Delivering Piping Hot Across the City',
+    icon: MapPin,
   },
   {
     type: 'DOWNLOAD_APP',
@@ -136,6 +159,13 @@ const AVAILABLE_SECTION_TYPES: { type: SectionType; label: string; description: 
     defaultHeadline: 'From Our Wood-Fired Oven',
     icon: ImageIcon,
   },
+  {
+    type: 'CTA',
+    label: 'Order Now Call to Action',
+    description: 'High-conversion banner with direct menu order button.',
+    defaultHeadline: 'Ready for the Best Slice of Your Life?',
+    icon: Rocket,
+  },
 ];
 
 const ANIMATION_OPTIONS: { value: AnimationType; label: string }[] = [
@@ -159,14 +189,95 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
   const [viewMode, setViewMode] = useState<'mobile' | 'tablet' | 'desktop'>('mobile');
   const [previewLayout, setPreviewLayout] = useState<'fit' | 'unfolded'>('fit');
   const previewScrollContainerRef = useRef<HTMLDivElement>(null);
-  const [activeTab, setActiveTab] = useState<'sections' | 'add_section' | 'settings'>('sections');
+  const [activeTab, setActiveTab] = useState<'sections' | 'customize' | 'add_section' | 'presets'>('sections');
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
+  // New Modals
+  const [showGuideModal, setShowGuideModal] = useState(false);
+  const [showPerfModal, setShowPerfModal] = useState(false);
+
+  // Apply sensible Olive Pizza visual style presets
+  const applyPreset = (preset: ThemePreset) => {
+    setSchema((prev) => {
+      const next = JSON.parse(JSON.stringify(prev));
+      next.metadata = { ...next.metadata, themePreset: preset };
+      next.globalSettings = { ...next.globalSettings, themePreset: preset };
+
+      let fontFamily: CuratedFontFamily = 'Outfit';
+      let animType: AnimationType = 'Fade Up';
+      let duration = 600;
+      let bgColor = '#0F172A';
+      let textColor = '#FFFFFF';
+
+      if (preset === 'Pizza Energy') {
+        fontFamily = 'Poppins';
+        animType = 'Pop';
+        duration = 500;
+        bgColor = '#1A0F0A';
+      } else if (preset === 'Midnight Glow') {
+        fontFamily = 'Outfit';
+        animType = 'Blur In';
+        duration = 700;
+        bgColor = '#070A0F';
+      } else if (preset === 'Minimal') {
+        fontFamily = 'Inter';
+        animType = 'Fade';
+        duration = 450;
+        bgColor = '#111827';
+      } else if (preset === 'Bold Festival') {
+        fontFamily = 'Playfair Display';
+        animType = 'Stagger';
+        duration = 800;
+        bgColor = '#2A0A10';
+      }
+
+      next.sections = (next.sections || []).map((sec: any) => ({
+        ...sec,
+        config: {
+          ...sec.config,
+          animationType: animType,
+          animationSettings: {
+            ...sec.config?.animationSettings,
+            durationMs: duration,
+          },
+          typography: {
+            ...sec.config?.typography,
+            fontFamily,
+          },
+          styleOverrides: {
+            ...sec.config?.styleOverrides,
+            backgroundColor: sec.config?.styleOverrides?.backgroundColor || bgColor,
+            textColor: sec.config?.styleOverrides?.textColor || textColor,
+          },
+        },
+      }));
+
+      return next;
+    });
+    setHasUnsavedChanges(true);
+    toast.success(`Applied "${preset}" visual style!`);
+  };
+
+  // Restore Default Olive Pizza Layout
+  const handleRestoreDefaultLayout = () => {
+    if (!window.confirm('Restore standard default Olive Pizza layout? Any unpublished customizations will be reset.')) {
+      return;
+    }
+    const defaultTemplate = PREDEFINED_TEMPLATES[0];
+    setSchema(JSON.parse(JSON.stringify(defaultTemplate)));
+    setSelectedSectionId(defaultTemplate.sections[0]?.id || '');
+    setHasUnsavedChanges(true);
+    toast.success('Restored default Olive Pizza layout.');
+  };
+
   // Smooth scroll sync between sidebar and preview canvas
-  const handleSelectSection = (sectionId: string) => {
+  const handleSelectSection = (sectionId: string, switchToCustomize = false) => {
     setSelectedSectionId(sectionId);
+    if (switchToCustomize) {
+      setActiveTab('customize');
+    }
     setTimeout(() => {
       const previewEl = document.getElementById(`preview-section-${sectionId}`);
       if (previewEl) {
@@ -411,7 +522,40 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
         </div>
 
         {/* Device Mode Switcher & Primary Actions */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Quick Guide */}
+          <button
+            type="button"
+            onClick={() => setShowGuideModal(true)}
+            className="p-2 sm:px-3 sm:py-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all"
+            title="How to Use Home Page Manager"
+          >
+            <HelpCircle className="w-4 h-4 text-orange-400" />
+            <span className="hidden md:inline">How to Use</span>
+          </button>
+
+          {/* Speed & Health */}
+          <button
+            type="button"
+            onClick={() => setShowPerfModal(true)}
+            className="p-2 sm:px-3 sm:py-2 bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all"
+            title="Page Speed, Health & Media Optimization Summary"
+          >
+            <Zap className="w-4 h-4 text-emerald-400" />
+            <span className="hidden md:inline">Speed & Health</span>
+          </button>
+
+          {/* Restore Default Layout */}
+          <button
+            type="button"
+            onClick={handleRestoreDefaultLayout}
+            className="p-2 sm:px-3 sm:py-2 bg-slate-800/60 hover:bg-slate-700 border border-slate-700/60 text-slate-400 hover:text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all"
+            title="Restore Original Default Layout"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+            <span className="hidden lg:inline">Reset Default</span>
+          </button>
+
           {/* Responsive Viewport Switcher */}
           <div className="hidden sm:flex items-center bg-[#0B0F17] p-1 rounded-xl border border-slate-800">
             <button
@@ -450,7 +594,7 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
             className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-bold rounded-xl text-xs flex items-center gap-1.5 transition-all disabled:opacity-50"
           >
             <Save className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Save to Made by Me</span>
+            <span className="hidden sm:inline">Save Draft</span>
           </button>
 
           {/* Publish Live Button */}
@@ -460,7 +604,7 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
             className="px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded-xl text-xs flex items-center gap-2 transition-all shadow-lg shadow-orange-600/25 disabled:opacity-50"
           >
             <Rocket className="w-4 h-4" />
-            <span>Publish to Homepage</span>
+            <span>Publish Live</span>
           </button>
         </div>
       </header>
@@ -477,15 +621,33 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                 activeTab === 'sections' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-800'
               }`}
             >
-              Page Sections ({sectionsList.length})
+              Sections ({sectionsList.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('customize')}
+              className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${
+                activeTab === 'customize' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              Customize
             </button>
             <button
               onClick={() => setActiveTab('add_section')}
-              className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+              className={`p-2 rounded-xl text-xs font-bold flex items-center justify-center transition-all ${
                 activeTab === 'add_section' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-800'
               }`}
+              title="Add Section"
             >
-              <Plus className="w-3.5 h-3.5" /> Add Section
+              <Plus className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => setActiveTab('presets')}
+              className={`p-2 rounded-xl text-xs font-bold flex items-center justify-center transition-all ${
+                activeTab === 'presets' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+              title="Visual Style Presets"
+            >
+              <Palette className="w-4 h-4" />
             </button>
           </div>
 
@@ -817,6 +979,149 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                         <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">{sec.description}</p>
                       </div>
                     </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 3: CUSTOMIZE SELECTED SECTION */}
+          {activeTab === 'customize' && (
+            <div className="flex-1 overflow-y-auto min-h-0 custom-scrollbar flex flex-col">
+              {selectedSection ? (
+                <PropertyPanel
+                  section={selectedSection}
+                  sectionIndex={sectionsList.findIndex((s) => s.id === selectedSectionId)}
+                  totalSections={sectionsList.length}
+                  onUpdate={(key, val) => updateSectionConfig(selectedSectionId, { [key]: val })}
+                  onAction={(action) => {
+                    const idx = sectionsList.findIndex((s) => s.id === selectedSectionId);
+                    if (action === 'move_up') moveSection(idx, 'up');
+                    if (action === 'move_down') moveSection(idx, 'down');
+                    if (action === 'duplicate' && selectedSection) handleDuplicateSection(selectedSection);
+                    if (action === 'delete') handleRemoveSection(selectedSectionId);
+                    if (action === 'toggle_hide' && selectedSection) updateSectionMeta(selectedSection.id, { isHidden: !selectedSection.isHidden });
+                  }}
+                />
+              ) : (
+                <div className="p-8 text-center text-slate-500 text-xs">
+                  Please select a section from the "Sections" tab to customize.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 4: VISUAL STYLE PRESETS */}
+          {activeTab === 'presets' && (
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
+              <div className="space-y-1">
+                <h4 className="text-xs font-black text-white uppercase tracking-wider flex items-center gap-1.5">
+                  <Palette className="w-4 h-4 text-orange-400" />
+                  Visual Style Presets
+                </h4>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Transform your entire store aesthetic in 1 click. Presets adjust curated typography, entrance animations, and theme colors harmoniously across all sections.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                {[
+                  {
+                    id: 'Clean' as ThemePreset,
+                    name: 'Clean & Modern',
+                    tag: 'Default • High Conversion',
+                    font: 'Outfit',
+                    anim: 'Fade Up',
+                    desc: 'Crisp readability, gentle elevation, and smooth transitions tailored for fast ordering.',
+                    bg: 'from-slate-900 to-slate-950',
+                    badge: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
+                  },
+                  {
+                    id: 'Pizza Energy' as ThemePreset,
+                    name: 'Pizza Energy',
+                    tag: 'Playful • Warm & Appetizing',
+                    font: 'Poppins',
+                    anim: 'Pop & Bounce',
+                    desc: 'Energetic bounce micro-interactions, bold round typography, and appetizing warmth.',
+                    bg: 'from-amber-950/60 to-orange-950/40',
+                    badge: 'bg-orange-500/10 text-orange-400 border-orange-500/30',
+                  },
+                  {
+                    id: 'Midnight Glow' as ThemePreset,
+                    name: 'Midnight Glow',
+                    tag: 'Luxury • Dark Glassmorphic',
+                    font: 'Outfit',
+                    anim: 'Cinematic Blur In',
+                    desc: 'Deep obsidian surfaces with vibrant neon glow accents and sleek motion paths.',
+                    bg: 'from-blue-950/40 to-slate-950',
+                    badge: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30',
+                  },
+                  {
+                    id: 'Minimal' as ThemePreset,
+                    name: 'Minimal & Fast',
+                    tag: 'Ultra Fast • Distraction Free',
+                    font: 'Inter',
+                    anim: 'Instant / Soft Fade',
+                    desc: 'Clean lines, highest loading speed, zero motion fatigue, focused exclusively on food.',
+                    bg: 'from-gray-900 to-slate-950',
+                    badge: 'bg-slate-500/10 text-slate-400 border-slate-500/30',
+                  },
+                  {
+                    id: 'Bold Festival' as ThemePreset,
+                    name: 'Bold Festival',
+                    tag: 'Grand Promotions • High Impact',
+                    font: 'Playfair Display',
+                    anim: 'Dramatic Stagger',
+                    desc: 'Editorial luxury serif headings with dramatic staggered entrances for celebration deals.',
+                    bg: 'from-rose-950/50 to-slate-950',
+                    badge: 'bg-rose-500/10 text-rose-400 border-rose-500/30',
+                  },
+                ].map((preset) => {
+                  const isCurrent = (schema.metadata?.themePreset || schema.globalSettings?.themePreset) === preset.id;
+                  return (
+                    <div
+                      key={preset.id}
+                      className={`p-4 rounded-2xl border bg-gradient-to-br ${preset.bg} transition-all space-y-3 ${
+                        isCurrent
+                          ? 'border-orange-500 shadow-lg shadow-orange-500/10 ring-1 ring-orange-500/50'
+                          : 'border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-extrabold text-sm text-white">{preset.name}</span>
+                            <span className={`px-2 py-0.5 rounded-full border text-[9px] font-bold ${preset.badge}`}>
+                              {preset.tag}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">{preset.desc}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-2 border-t border-white/5">
+                        <div className="flex items-center gap-3 text-[10px] text-slate-400">
+                          <span className="flex items-center gap-1 font-mono">
+                            <Type className="w-3 h-3 text-orange-400" /> {preset.font}
+                          </span>
+                          <span className="flex items-center gap-1 font-mono">
+                            <Sparkles className="w-3 h-3 text-emerald-400" /> {preset.anim}
+                          </span>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => applyPreset(preset.id)}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all ${
+                            isCurrent
+                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 cursor-default'
+                              : 'bg-orange-500 hover:bg-orange-600 text-white shadow-md'
+                          }`}
+                        >
+                          {isCurrent ? '✓ Active Style' : 'Apply Preset'}
+                        </button>
+                      </div>
+                    </div>
                   );
                 })}
               </div>
@@ -1265,8 +1570,64 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                             ))}
                           </div>
                         </div>
+                      ) : sec.type === 'WHY_US' ? (
+                        /* 13. WHY FOODIES CHOOSE OLIVE PIZZA */
+                        <div className="p-5 space-y-3">
+                          <h3 className="text-xs font-black uppercase tracking-wider text-center" style={{ color: textCol }}>
+                            {sec.config?.headline || 'WHY FOODIES CHOOSE OLIVE PIZZA'}
+                          </h3>
+                          <div className="grid grid-cols-3 gap-2">
+                            {[
+                              { title: 'Wood-Fired', icon: '🔥', desc: 'Authentic stone oven' },
+                              { title: '100% Mozzarella', icon: '🧀', desc: 'Pure dairy cheese' },
+                              { title: '25-Min Delivery', icon: '⚡', desc: 'Piping hot guarantee' },
+                            ].map((item, i) => (
+                              <div key={i} className="p-2.5 rounded-xl bg-black/40 border border-white/10 text-center space-y-1">
+                                <span className="text-xl block">{item.icon}</span>
+                                <div className="text-[10px] font-bold text-white leading-tight">{item.title}</div>
+                                <div className="text-[8px] text-slate-400">{item.desc}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : sec.type === 'DELIVERY_AREA' ? (
+                        /* 14. LIVE DELIVERY COVERAGE ZONE */
+                        <div className="p-5 space-y-2">
+                          <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-slate-900 to-black border border-emerald-500/30 flex items-center justify-between">
+                            <div className="space-y-1">
+                              <span className="text-[8px] font-black text-emerald-400 uppercase tracking-wider flex items-center gap-1">
+                                <MapPin className="w-3 h-3" /> LIVE SERVICE AREA
+                              </span>
+                              <h4 className="font-black text-xs text-white">{sec.config?.headline || 'Delivering Across Rajnandgaon'}</h4>
+                              <p className="text-[10px] text-slate-300">{sec.config?.subtitle || 'Average delivery time: 22 minutes'}</p>
+                            </div>
+                            <div className="px-3 py-1.5 bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-black text-[10px] rounded-xl">
+                              Online & Active
+                            </div>
+                          </div>
+                        </div>
+                      ) : sec.type === 'CTA' ? (
+                        /* 15. HIGH CONVERSION CALL TO ACTION */
+                        <div className="p-6 text-center space-y-3 bg-gradient-to-b from-orange-950/40 to-black/60 border-y border-orange-500/20">
+                          <h3 className="text-sm font-black text-white">
+                            {sec.config?.headline || 'Ready for the Best Slice of Your Life?'}
+                          </h3>
+                          <p className="text-xs text-slate-300 max-w-sm mx-auto">
+                            {sec.config?.subtitle || 'Wood-fired crusts, authentic Italian sauces, and fresh toppings delivered hot.'}
+                          </p>
+                          <button className="px-6 py-2 bg-gradient-to-r from-orange-500 to-amber-500 text-white font-extrabold text-xs rounded-xl shadow-lg shadow-orange-500/25">
+                            {sec.config?.buttonText || 'EXPLORE FULL MENU →'}
+                          </button>
+                        </div>
+                      ) : sec.type === 'FOOTER' ? (
+                        /* 16. BRAND FOOTER */
+                        <div className="p-5 text-center space-y-2 border-t border-white/10 bg-black/60">
+                          <div className="font-extrabold text-xs text-orange-400">OLIVE PIZZA & WOOD-FIRED KITCHEN</div>
+                          <p className="text-[10px] text-slate-400">Rajnandgaon, Chhattisgarh • 11:00 AM - 11:00 PM Daily</p>
+                          <div className="text-[9px] text-slate-500">100% Pure Veg • FSSAI Certified • Freshly Baked</div>
+                        </div>
                       ) : (
-                        /* 13. GENERIC SECTION FALLBACK */
+                        /* 17. GENERIC SECTION FALLBACK */
                         <div className="p-6 text-center space-y-1">
                           <h4 className="font-black text-sm" style={{ color: textCol }}>
                             {sec.config?.headline || sec.type}
@@ -1381,6 +1742,12 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
           </div>
         </div>
       )}
+
+      {/* Non-Technical Owner Interactive Guide Modal */}
+      <InteractiveGuideModal isOpen={showGuideModal} onClose={() => setShowGuideModal(false)} />
+
+      {/* Speed, Health & Media Performance Dashboard Modal */}
+      <PerformanceDashboardModal isOpen={showPerfModal} onClose={() => setShowPerfModal(false)} />
     </div>
   );
 }

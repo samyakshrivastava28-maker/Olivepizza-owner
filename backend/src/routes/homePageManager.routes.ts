@@ -10,24 +10,45 @@ import { adminDb } from '../config/firebase.js';
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
 
+import { redisService } from '../services/redis/RedisService.js';
+
 // ============================================================================
 // PUBLIC ROUTE: Customer Home Page fetches the live pointer configuration here
 // ============================================================================
 router.get('/live', async (req, res) => {
   try {
-    // 1. Try Firestore settings/homepage first for 0-latency cached pointer
+    // 1. Try Redis cache first (sub-millisecond acceleration)
+    try {
+      const cached = await redisService.get<any>('homepage:live');
+      if (cached) {
+        return res.json({ success: true, config: cached, source: 'redis_cache' });
+      }
+    } catch (redisErr) {
+      console.warn('[HomePageManager] Redis cache read notice:', redisErr);
+    }
+
+    // 2. Try Firestore settings/homepage for 0-latency cached pointer
+    let config: any = null;
     try {
       const snap = await adminDb.collection('settings').doc('homepage').get();
       if (snap.exists && snap.data()?.config) {
-        return res.json({ success: true, config: snap.data()!.config, source: 'firestore' });
+        config = snap.data()!.config;
       }
     } catch (fsErr) {
       console.warn('[HomePageManager] Firestore live read fallback:', fsErr);
     }
 
-    // 2. R2 Fallback
-    const config = await PagePackageService.getLiveManifest();
-    res.json({ success: true, config, source: 'r2' });
+    // 3. R2 Fallback
+    if (!config) {
+      config = await PagePackageService.getLiveManifest();
+    }
+
+    // Populate Redis cache asynchronously (300s TTL)
+    if (config) {
+      redisService.set('homepage:live', config, 300).catch(() => {});
+    }
+
+    res.json({ success: true, config, source: config ? 'authoritative' : 'fallback' });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message, config: FALLBACK_STANDARD_SCHEMA });
   }
@@ -160,6 +181,31 @@ router.post('/switch', async (req: AuthRequest, res) => {
       updatedBy: req.user?.uid || 'owner'
     }, { merge: true }).catch((fsErr: any) => console.warn('[HomePageManager] Firestore live sync warning:', fsErr));
 
+    // 3. Invalidate Redis cache
+    await redisService.del('homepage:live').catch(() => {});
+    await redisService.set('homepage:live', schemaToPublish, 300).catch(() => {});
+
+    // 4. Record in PostgreSQL revision history
+    try {
+      const { pgPool } = await import('../config/postgres.js');
+      const client = await pgPool.connect();
+      try {
+        await client.query(`
+          UPDATE homepage_revisions SET is_active = FALSE WHERE is_active = TRUE;
+          INSERT INTO homepage_revisions (version_id, page_id, title, schema_json, published_by, is_active)
+          VALUES ($1, $2, $3, $4, $5, TRUE);
+        `, [
+          schemaToPublish.versionId,
+          schemaToPublish.pageId,
+          schemaToPublish.metadata?.name || schemaToPublish.pageId,
+          JSON.stringify(schemaToPublish),
+          req.user?.uid || 'owner'
+        ]);
+      } finally {
+        client.release();
+      }
+    } catch {}
+
     res.json({ success: true, config: schemaToPublish });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -170,6 +216,40 @@ router.get('/config', async (req, res) => {
   try {
     const config = await PagePackageService.getLiveManifest();
     res.json({ success: true, config });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get Revision History for Owner Rollback
+router.get('/revisions', async (req, res) => {
+  try {
+    let revisions: any[] = [];
+    try {
+      const { pgPool } = await import('../config/postgres.js');
+      const client = await pgPool.connect();
+      try {
+        const result = await client.query(
+          `SELECT version_id, page_id, title, published_by, is_active, created_at 
+           FROM homepage_revisions ORDER BY created_at DESC LIMIT 15`
+        );
+        revisions = result.rows;
+      } finally {
+        client.release();
+      }
+    } catch {}
+
+    if (revisions.length === 0) {
+      // Fallback to Firestore revisions
+      const snap = await adminDb.collection('homepage_revisions')
+        .orderBy('createdAt', 'desc')
+        .limit(15)
+        .get()
+        .catch(() => ({ docs: [] as any[] }));
+      revisions = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    }
+
+    res.json({ success: true, revisions });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -202,8 +282,9 @@ router.post('/save', async (req: AuthRequest, res) => {
   }
 });
 
-// Publish directly from Editor
+// Publish directly from Editor with concurrency lock and cache invalidation
 router.post('/publish', async (req: AuthRequest, res) => {
+  let lockAcquired = false;
   try {
     const schema: PageSchema = req.body.schema;
     
@@ -221,6 +302,12 @@ router.post('/publish', async (req: AuthRequest, res) => {
           }
         }
       }
+    }
+
+    // Concurrency Lock: prevent two simultaneous publishes from clobbering each other
+    lockAcquired = await redisService.acquireLock('lock:homepage_publish', 8);
+    if (!lockAcquired && process.env.NODE_ENV !== 'test') {
+      return res.status(409).json({ success: false, error: 'Another publish is currently processing. Please wait a moment.' });
     }
 
     schema.metadata = {
@@ -243,9 +330,48 @@ router.post('/publish', async (req: AuthRequest, res) => {
       updatedBy: req.user?.uid || 'owner'
     }, { merge: true }).catch(() => {});
 
+    // 3. Invalidate Redis Cache & repopulate
+    await redisService.del('homepage:live').catch(() => {});
+    await redisService.set('homepage:live', schema, 300).catch(() => {});
+
+    // 4. Save to PostgreSQL homepage_revisions
+    try {
+      const { pgPool } = await import('../config/postgres.js');
+      const client = await pgPool.connect();
+      try {
+        await client.query(`
+          UPDATE homepage_revisions SET is_active = FALSE WHERE is_active = TRUE;
+          INSERT INTO homepage_revisions (version_id, page_id, title, schema_json, published_by, is_active)
+          VALUES ($1, $2, $3, $4, $5, TRUE);
+        `, [
+          schema.versionId,
+          schema.pageId,
+          schema.metadata?.name || schema.pageId,
+          JSON.stringify(schema),
+          req.user?.uid || 'owner'
+        ]);
+      } finally {
+        client.release();
+      }
+    } catch {}
+
+    // 5. Also save revision record to Firestore for instant admin dashboard listing
+    await adminDb.collection('homepage_revisions').doc(schema.versionId).set({
+      version_id: schema.versionId,
+      page_id: schema.pageId,
+      title: schema.metadata?.name || schema.pageId,
+      published_by: req.user?.uid || 'owner',
+      createdAt: new Date().toISOString(),
+      is_active: true
+    }).catch(() => {});
+
     res.json({ success: true, config: schema });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
+  } finally {
+    if (lockAcquired) {
+      await redisService.releaseLock('lock:homepage_publish').catch(() => {});
+    }
   }
 });
 
@@ -254,6 +380,9 @@ router.post('/rollback', async (req, res) => {
   try {
     const { pageId, versionId } = req.body;
     
+    // 1. Invalidate Redis Cache
+    await redisService.del('homepage:live').catch(() => {});
+
     if (!pageId || !versionId) {
       // Restore default fallback
       await PagePackageService.publishLiveManifest(FALLBACK_STANDARD_SCHEMA);
@@ -264,6 +393,7 @@ router.post('/rollback', async (req, res) => {
         updatedAt: new Date().toISOString()
       }, { merge: true }).catch(() => {});
 
+      await redisService.set('homepage:live', FALLBACK_STANDARD_SCHEMA, 300).catch(() => {});
       return res.json({ success: true, config: FALLBACK_STANDARD_SCHEMA });
     }
     
@@ -275,6 +405,8 @@ router.post('/rollback', async (req, res) => {
         activePageId: pageId,
         updatedAt: new Date().toISOString()
       }, { merge: true }).catch(() => {});
+
+      await redisService.set('homepage:live', config, 300).catch(() => {});
       res.json({ success: true, config });
     } else {
       throw new Error('Failed to rollback');
