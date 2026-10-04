@@ -2,6 +2,7 @@ import { adminDb } from '../../config/firebase.js';
 import { pgPool } from '../../config/postgres.js';
 import { FieldValue } from 'firebase-admin/firestore';
 import { notificationEngine } from '../notification/NotificationEngine.js';
+import { SupabaseGpsService } from '../gps/SupabaseGpsService.js';
 import { CustomerTemplates } from '../notification/NotificationTemplates.js';
 
 export type DeliveryPartnerStatus = 'online' | 'offline' | 'busy' | 'on_delivery' | 'break';
@@ -29,20 +30,19 @@ export class DeliveryCapacityService {
       lastStatusUpdate: FieldValue.serverTimestamp()
     });
 
-    // 2. Update Postgres location table to reflect online status mapping
+    // 2. Authoritative Supabase location update to reflect online status mapping (Section 9 & 10)
     try {
       const isOnline = (status === 'online' || status === 'on_delivery');
-      const client = await pgPool.connect();
-      await client.query(`
-        UPDATE delivery_locations 
-        SET online_status = $1, 
-            active_order_id = COALESCE($2, active_order_id),
-            last_updated = CURRENT_TIMESTAMP
-        WHERE delivery_partner_id = $3
-      `, [isOnline, orderId || null, partnerId]);
-      client.release();
-    } catch (e) {
-      console.error('[DeliveryCapacity] Postgres update error:', e);
+      await SupabaseGpsService.setOnlineStatus(partnerId, isOnline);
+      if (orderId !== undefined) {
+        if (orderId) {
+          await SupabaseGpsService.setActiveOrder(partnerId, orderId);
+        } else {
+          await SupabaseGpsService.clearActiveOrder(partnerId);
+        }
+      }
+    } catch (e: any) {
+      console.warn('[DeliveryCapacity] Supabase location status notice:', e.message);
     }
 
     // 3. If becoming available (online and not assigned), pop the queue

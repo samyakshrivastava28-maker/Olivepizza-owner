@@ -82,10 +82,11 @@ CREATE TABLE order_items (
 -- 5. LIVE GPS TELEMETRY IS SUPABASE-EXCLUSIVE
 -- Note: Live rider coordinates & breadcrumbs are strictly stored in Supabase Realtime
 -- (delivery_locations, navigation_points). PostgreSQL does NOT store live GPS.
--- Legacy active_deliveries and delivery_locations tables are dropped.
+-- Legacy active_deliveries, delivery_locations, and location_history tables are dropped.
 -- =========================================
 DROP TABLE IF EXISTS active_deliveries CASCADE;
 DROP TABLE IF EXISTS delivery_locations CASCADE;
+DROP TABLE IF EXISTS location_history CASCADE;
 
 -- =========================================
 -- 6. DEVICE HEARTBEATS

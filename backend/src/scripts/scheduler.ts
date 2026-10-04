@@ -21,16 +21,13 @@ export function initScheduler() {
   // Initialize hourly 8-hour abandoned cart push reminder
   AbandonedCartJob.init();
 
-  // Daily cleanup of old GPS tracking data (older than 24 hours) at 3:00 AM
+  // Daily cleanup of old GPS tracking data (older than 24 hours) at 3:00 AM via Supabase
   cron.schedule('0 3 * * *', async () => {
     console.log('[Scheduler] Running daily location cleanup...');
     try {
-      const { pgPool } = await import('../config/postgres.js');
-      await pgPool.query(`
-        DELETE FROM delivery_locations 
-        WHERE last_updated < NOW() - INTERVAL '24 hours'
-      `).catch(() => {});
-      console.log('[Scheduler] Location cleanup completed.');
+      const { SupabaseGpsService } = await import('../services/gps/SupabaseGpsService.js');
+      const pruned = await SupabaseGpsService.pruneStaleNavigationPoints(1440); // 24 hours
+      console.log(`[Scheduler] Supabase GPS location cleanup completed (${pruned} points pruned).`);
     } catch (error: any) {
       console.error('[Scheduler] Location cleanup error:', error.message);
     }

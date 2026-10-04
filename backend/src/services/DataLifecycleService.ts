@@ -30,36 +30,10 @@ export class DataLifecycleService {
   public async runMinutelyCleanup() {
     let client: any = null;
     try {
-      // 0. Prune authoritative Supabase GPS breadcrumbs older than 5 minutes
+      // 0. Prune authoritative Supabase GPS breadcrumbs older than 5 minutes (Section 24 & 25)
       await SupabaseGpsService.pruneStaleNavigationPoints(5).catch(() => {});
 
       client = await pgPool.connect();
-      // 1. Delete SQL live navigation data for active deliveries updated > 5 mins ago or completed orders > 5 mins ago
-      await client.query(`
-        DELETE FROM active_deliveries 
-        WHERE last_updated < NOW() - INTERVAL '5 minutes'
-           OR order_id::text IN (
-             SELECT id::text FROM orders WHERE status IN ('delivered', 'completed', 'cancelled') AND updated_at < NOW() - INTERVAL '5 minutes'
-           )
-      `).catch(() => {});
-
-      // 2. Delete stale delivery locations older than 15 minutes or completed orders > 5 mins ago
-      await client.query(`
-        DELETE FROM delivery_locations 
-        WHERE updated_at < NOW() - INTERVAL '15 minutes'
-           OR active_order_id::text IN (
-             SELECT id::text FROM orders WHERE status IN ('delivered', 'completed', 'cancelled') AND updated_at < NOW() - INTERVAL '5 minutes'
-           )
-      `).catch(() => {});
-
-      // 3. Permanently delete GPS location history points for completed deliveries > 5 mins ago
-      await client.query(`
-        DELETE FROM location_history 
-        WHERE timestamp < NOW() - INTERVAL '5 minutes'
-           OR order_id::text IN (
-             SELECT id::text FROM orders WHERE status IN ('delivered', 'completed', 'cancelled') AND updated_at < NOW() - INTERVAL '5 minutes'
-           )
-      `).catch(() => {});
 
       // 4. Prune pg_cron job_run_details older than 12 hours to prevent runaway disk usage
       await client.query(`
@@ -106,16 +80,7 @@ export class DataLifecycleService {
     // 0. Authoritative Supabase GPS Cleanup (Single Source of Truth)
     await SupabaseGpsService.cleanupDeliveredGps(orderId).catch(() => {});
 
-    // 1. PostgreSQL Cleanup (Business delivery route history)
-    let client: any = null;
-    try {
-      client = await pgPool.connect();
-      await client.query(`DELETE FROM location_history WHERE order_id::text = $1`, [orderId]).catch(() => {});
-    } catch (err: any) {
-      console.warn(`[DataLifecycle] Postgres tracking purge notice for "${orderId}":`, err.message);
-    } finally {
-      if (client) client.release();
-    }
+    // 1. Firestore Realtime Projection Cleanup
 
     // 2. Firestore Cleanup
     try {
@@ -155,11 +120,6 @@ export class DataLifecycleService {
       // 4. Clear sent / failed email queue items older than 24 hours (1 day)
       await client.query(`
         DELETE FROM email_queue WHERE created_at < NOW() - INTERVAL '24 hours'
-      `).catch(() => {});
-
-      // 5. Delete old location history points older than 24 hours (1 day)
-      await client.query(`
-        DELETE FROM location_history WHERE timestamp < NOW() - INTERVAL '24 hours'
       `).catch(() => {});
       
     } catch (error: any) {
@@ -232,9 +192,9 @@ export class DataLifecycleService {
       const resCron2 = await client.query(`DELETE FROM job_run_details WHERE start_time < NOW() - INTERVAL '1 hour'`).catch(() => ({ rowCount: 0 }));
       cronJobLogsDeleted = (resCron1.rowCount || 0) + (resCron2.rowCount || 0);
 
-      // 2. Delete route history logs in PostgreSQL (live GPS is managed in Supabase)
-      const resHist = await client.query(`DELETE FROM location_history WHERE timestamp < NOW() - INTERVAL '12 hours'`).catch(() => ({ rowCount: 0 }));
-      realtimeTrackingDeleted = resHist.rowCount || 0;
+      // 2. Prune live navigation points in Supabase (authoritative GPS transport)
+      const resHist = await SupabaseGpsService.pruneStaleNavigationPoints(720).catch(() => 0);
+      realtimeTrackingDeleted = resHist || 0;
 
       // 3. Delete sent email queue records
       const resEmail = await client.query(`DELETE FROM email_queue WHERE status = 'sent' AND created_at < NOW() - INTERVAL '1 day'`).catch(() => ({ rowCount: 0 }));
