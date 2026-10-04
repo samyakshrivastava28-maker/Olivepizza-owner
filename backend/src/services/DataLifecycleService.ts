@@ -103,6 +103,9 @@ export class DataLifecycleService {
       console.warn(`[DataLifecycle] Supabase GPS purge notice for "${orderId}":`, err.message);
     }
 
+    // 0. Authoritative Supabase GPS Cleanup (Single Source of Truth)
+    await SupabaseGpsService.cleanupDeliveredGps(orderId).catch(() => {});
+
     // 1. PostgreSQL Cleanup
     let client: any = null;
     try {

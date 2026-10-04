@@ -29,8 +29,51 @@ validateEnvironmentVariables();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Health & Heartbeat
-app.get('/health', (req, res) => {
+// Enable trusted reverse proxy (NGINX / Cloudflare)
+app.set('trust proxy', 1);
+
+// ── HEALTH & HEARTBEAT ENDPOINTS ──────────────────────────────────────────────
+// Liveness probe (process is running)
+app.get(['/health/live', '/health/liveness'], (_req, res) => {
+  res.status(200).json({
+    status: 'UP',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Readiness probe (verifies PostgreSQL and Redis connectivity)
+app.get(['/health/ready', '/health/readiness'], async (_req, res) => {
+  let pgHealthy = false;
+  let redisHealthy = false;
+
+  try {
+    const { pgPool } = await import('./config/postgres');
+    const pgRes = await pgPool.query('SELECT 1 as healthy').catch(() => null);
+    pgHealthy = pgRes != null && pgRes.rows.length > 0;
+  } catch {}
+
+  try {
+    const { redisService } = await import('./services/redis/RedisService');
+    redisHealthy = await redisService.ping();
+  } catch {}
+
+  const isReady = pgHealthy;
+  const statusCode = isReady ? 200 : 503;
+
+  res.status(statusCode).json({
+    status: isReady ? 'READY' : 'DEGRADED',
+    checks: {
+      postgres: pgHealthy ? 'UP' : 'DOWN',
+      redis: redisHealthy ? 'UP' : 'DOWN'
+    },
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString()
+  });
+});
+
+// General info and legacy heartbeat aliases
+app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'Olive Pizza Standalone Owner Backend',
@@ -39,7 +82,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.get('/keep-alive', (req, res) => {
+app.get('/keep-alive', (_req, res) => {
   res.json({ status: 'alive', timestamp: new Date().toISOString() });
 });
 
@@ -70,6 +113,63 @@ async function startServer() {
     webSocketServer.attach(server);
     console.log('[WebSocketServer] Attached on path /ws');
   });
+
+  // ── GRACEFUL SHUTDOWN HANDLER ──────────────────────────────────────────────
+  let isShuttingDown = false;
+  const gracefulShutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`\n[GracefulShutdown] Received ${signal}. Starting graceful termination sequence...`);
+
+    // 1. Stop receiving new HTTP requests
+    server.close(async () => {
+      console.log('[GracefulShutdown] HTTP server stopped accepting new connections.');
+
+      // 2. Close WebSocket connections
+      try {
+        webSocketServer.close();
+        console.log('[GracefulShutdown] WebSocket connections closed.');
+      } catch (wsErr: any) {
+        console.warn('[GracefulShutdown] WS close notice:', wsErr?.message);
+      }
+
+      // 3. Stop background workers
+      try {
+        storageAnalyzer.stopCronJobs();
+        console.log('[GracefulShutdown] Cron tasks stopped.');
+      } catch {}
+
+      // 4. Close Redis client
+      try {
+        const { redisService } = await import('./services/redis/RedisService');
+        await redisService.disconnect();
+        console.log('[GracefulShutdown] Redis client disconnected.');
+      } catch (rErr: any) {
+        console.warn('[GracefulShutdown] Redis disconnect notice:', rErr?.message);
+      }
+
+      // 5. Close PostgreSQL connection pool
+      try {
+        const { pgPool } = await import('./config/postgres');
+        await pgPool.end();
+        console.log('[GracefulShutdown] PostgreSQL connection pool drained.');
+      } catch (pgErr: any) {
+        console.warn('[GracefulShutdown] PostgreSQL pool close notice:', pgErr?.message);
+      }
+
+      console.log('[GracefulShutdown] Clean termination complete. Exiting with code 0.');
+      process.exit(0);
+    });
+
+    // Force exit after 15 seconds if drain times out
+    setTimeout(() => {
+      console.error('[GracefulShutdown] Forceful exit triggered after 15s timeout.');
+      process.exit(1);
+    }, 15000).unref();
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 startServer().catch(console.error);

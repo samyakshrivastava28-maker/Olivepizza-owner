@@ -128,6 +128,18 @@ class OliveWebSocketServer {
   }
 
   /**
+   * Gracefully close the WebSocket server and terminate active connections.
+   */
+  public close(): void {
+    if (this.wss) {
+      try {
+        this.wss.close();
+      } catch {}
+      this.wss = null;
+    }
+  }
+
+  /**
    * Attach to an existing Node.js HTTP server.
    */
   attach(httpServer: any): void {

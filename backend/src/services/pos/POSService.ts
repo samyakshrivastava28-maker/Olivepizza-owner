@@ -11,6 +11,7 @@
 
 import { adminDb } from '../../config/firebase.js';
 import crypto from 'crypto';
+import { OrderStateMachine } from '../order/OrderStateMachine.js';
 
 export interface POSCartItem {
   id?: string;
@@ -153,69 +154,59 @@ export class POSService {
       const formattedAddons: string[] = [];
 
       // 1. Resolve authoritative pricing from catalog
-      if (itemId) {
-        const catalogItem = await this.getCatalogItem(itemId);
-        if (catalogItem) {
-          itemName = catalogItem.productName || catalogItem.name || itemName;
-          
-          // Determine size / variant price
-          const selectedSize = (item.size || '').toLowerCase();
-          if (selectedSize && catalogItem.sizes && catalogItem.sizes[selectedSize]?.price) {
-            unitPrice = Number(catalogItem.sizes[selectedSize].price);
-          } else if (selectedSize && Array.isArray(catalogItem.variants)) {
-            const v = catalogItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
-            if (v && v.price) {
-              unitPrice = Number(v.price);
-            }
-          }
+      if (!itemId) {
+        throw new Error('Menu item identifier is required for all line items. Client prices are not accepted.');
+      }
 
-          if (!unitPrice || unitPrice <= 0) {
-            unitPrice = Number(catalogItem.offerPrice || catalogItem.basePrice || catalogItem.price || 0);
-          }
+      const catalogItem = await this.getCatalogItem(itemId);
+      if (!catalogItem) {
+        throw new Error(`Item "${itemId || itemName}" not found in authoritative catalog. Client-controlled prices are strictly rejected.`);
+      }
 
-          // Authoritative Addon Pricing
-          if (Array.isArray(item.addons) && item.addons.length > 0) {
-            for (const a of item.addons) {
-              const rawAddon: any = a;
-              if (!rawAddon) continue;
-              let addonPrice = typeof rawAddon === 'object' && rawAddon.price ? Number(rawAddon.price) : 0;
-              let addonName = typeof rawAddon === 'object' ? (rawAddon.name || rawAddon.id || 'Addon') : String(rawAddon);
-
-              if (Array.isArray(catalogItem.addons)) {
-                const authoritativeAddon = catalogItem.addons.find(
-                  (ca: any) =>
-                    ca.id === rawAddon.id ||
-                    ca.name === rawAddon.name ||
-                    ca.id === rawAddon ||
-                    ca.name === rawAddon
-                );
-                if (authoritativeAddon && authoritativeAddon.price != null) {
-                  addonPrice = Number(authoritativeAddon.price);
-                  addonName = authoritativeAddon.name || addonName;
-                }
-              }
-              unitPrice += Math.max(0, addonPrice);
-              formattedAddons.push(addonName);
-            }
-          }
+      itemName = catalogItem.productName || catalogItem.name || itemName;
+      
+      // Determine size / variant price
+      const selectedSize = (item.size || '').toLowerCase();
+      if (selectedSize && catalogItem.sizes && catalogItem.sizes[selectedSize]?.price) {
+        unitPrice = Number(catalogItem.sizes[selectedSize].price);
+      } else if (selectedSize && Array.isArray(catalogItem.variants)) {
+        const v = catalogItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
+        if (v && v.price) {
+          unitPrice = Number(v.price);
         }
       }
 
-      // Fallback for custom / non-catalog POS ad-hoc line items: clamp to non-negative
-      if (unitPrice <= 0) {
-        unitPrice = Math.max(0, Number(item.price) || 0);
-        if (Array.isArray(item.addons)) {
-          item.addons.forEach((a: any) => {
-            if (typeof a === 'object' && a?.price) {
-              unitPrice += Math.max(0, Number(a.price) || 0);
-              formattedAddons.push(a.name || a.id || 'Addon');
-            } else if (a) {
-              formattedAddons.push(String(a));
+      if (!unitPrice || unitPrice <= 0) {
+        unitPrice = Number(catalogItem.offerPrice || catalogItem.basePrice || catalogItem.price || 0);
+      }
+
+      // Authoritative Addon Pricing
+      if (Array.isArray(item.addons) && item.addons.length > 0) {
+        for (const a of item.addons) {
+          const rawAddon: any = a;
+          if (!rawAddon) continue;
+          let addonPrice = 0;
+          let addonName = typeof rawAddon === 'object' ? (rawAddon.name || rawAddon.id || 'Addon') : String(rawAddon);
+
+          if (Array.isArray(catalogItem.addons)) {
+            const authoritativeAddon = catalogItem.addons.find(
+              (ca: any) =>
+                ca.id === rawAddon.id ||
+                ca.name === rawAddon.name ||
+                ca.id === rawAddon ||
+                ca.name === rawAddon
+            );
+            if (authoritativeAddon && authoritativeAddon.price != null) {
+              addonPrice = Math.max(0, Number(authoritativeAddon.price));
+              addonName = authoritativeAddon.name || addonName;
             }
-          });
+          }
+          unitPrice += addonPrice;
+          formattedAddons.push(addonName);
         }
       }
 
+      unitPrice = Math.max(0, unitPrice);
       subtotal += unitPrice * qty;
 
       validatedItems.push({
@@ -341,15 +332,29 @@ export class POSService {
       return { success: true, message: 'Bill already voided' };
     }
 
-    // Update canonical order status
-    await adminDb.collection('orders').doc(orderId).set({
-      status: 'cancelled',
-      cancellationReason: `POS_VOID: ${reason}`,
-      voidedAt: new Date().toISOString(),
-      voidedBy: voidedByName,
-      voidedByUid,
-      updatedAt: new Date()
-    }, { merge: true });
+    // Single Source of Truth: Route status transition through canonical OrderStateMachine
+    const transitionRes = await OrderStateMachine.transition(
+      orderId,
+      'cancelled',
+      {
+        uid: voidedByUid,
+        role: 'restaurant_manager',
+        name: voidedByName,
+        branchId
+      },
+      {
+        cancellationReason: `POS_VOID: ${reason}`,
+        cancellationSource: 'POS_VOID',
+        terminalId,
+        voidedAt: new Date().toISOString(),
+        voidedBy: voidedByName,
+        voidedByUid
+      }
+    );
+
+    if (!transitionRes.success) {
+      throw new Error(transitionRes.error || 'Failed to void bill through canonical order state machine');
+    }
 
     // Record formal security and business audit log
     await adminDb.collection('restaurant_audit_logs').add({

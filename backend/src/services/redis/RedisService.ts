@@ -83,6 +83,20 @@ class RedisService {
     };
   }
 
+  public getClient(): Redis | null {
+    return this.client;
+  }
+
+  public async ping(): Promise<boolean> {
+    if (!this.client) return false;
+    try {
+      const res = await this.client.ping();
+      return res === 'PONG';
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Generic get cache with TTL
    */
@@ -322,6 +336,17 @@ class RedisService {
   public async releaseLock(lockKey: string): Promise<void> {
     await this.del(`lock:${lockKey}`);
   }
+
+  public async disconnect(): Promise<void> {
+    try {
+      await this.client.quit();
+    } catch {
+      try {
+        this.client.disconnect();
+      } catch {}
+    }
+  }
 }
 
+export { RedisService };
 export const redisService = new RedisService();

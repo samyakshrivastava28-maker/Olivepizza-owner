@@ -1,5 +1,6 @@
 import { adminDb } from '../../config/firebase.js';
 import { notificationEngine } from '../notification/NotificationEngine.js';
+import { SupabaseGpsService } from '../gps/SupabaseGpsService.js';
 
 export interface EligibleRider {
   uid: string;
@@ -61,10 +62,13 @@ export class RiderDispatchEngine {
       }
     });
 
-    // 2. Query active locations
-    const locSnap = await adminDb.collection('delivery_locations').get();
+    // 2. Query authoritative live locations from Supabase (Single Source of Truth)
+    const activeLocations = await SupabaseGpsService.getActiveLocations().catch(() => []);
     const locMap = new Map<string, any>();
-    locSnap.forEach((d) => locMap.set(d.id, d.data()));
+    for (const loc of activeLocations) {
+      const pid = loc.delivery_partner_id || loc.id;
+      if (pid) locMap.set(pid, loc);
+    }
 
     const candidates: EligibleRider[] = [];
     const nowMs = Date.now();

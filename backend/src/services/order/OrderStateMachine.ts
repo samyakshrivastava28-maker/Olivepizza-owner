@@ -372,6 +372,15 @@ export class OrderStateMachine {
             adminDb.collection('users').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
             adminDb.collection('delivery_partners').doc(riderId).set({ activeOrderId: null }, { merge: true }).catch(() => {});
           }
+
+          // Single Source of Truth: Schedule Supabase GPS cleanup 5 minutes after delivery completion
+          setTimeout(() => {
+            import('../gps/SupabaseGpsService.js').then(({ SupabaseGpsService }) => {
+              SupabaseGpsService.cleanupDeliveredGps(orderId).catch((err: any) => {
+                console.warn('[OrderStateMachine] Supabase GPS delivered cleanup notice:', err?.message);
+              });
+            }).catch(() => {});
+          }, 5 * 60 * 1000);
           break;
         }
 
@@ -448,6 +457,31 @@ export class OrderStateMachine {
       }
 
       if (client) {
+        // Authoritative canonical PostgreSQL order status update
+        await client.query(`
+          UPDATE canonical_orders
+          SET order_status = $1,
+              updated_at = NOW()
+              ${toState === 'cancelled' ? ', cancellation_reason = $3, cancelled_at = NOW()' : ''}
+          WHERE id = $2;
+        `, toState === 'cancelled' ? [toState.toUpperCase(), orderId, metadata.cancellationReason || 'CANCELLED'] : [toState.toUpperCase(), orderId]).catch((err: any) => {
+          console.warn('[OrderStateMachine] PostgreSQL status sync notice:', err?.message);
+        });
+
+        // Authoritative financial bill reversal if order is cancelled
+        if (toState === 'cancelled') {
+          await client.query(`
+            UPDATE canonical_bills
+            SET is_cancelled = TRUE,
+                cancelled_at = NOW(),
+                cancellation_reason = $2,
+                payment_status = 'VOIDED'
+            WHERE order_id = $1;
+          `, [orderId, metadata.cancellationReason || 'CANCELLED']).catch((err: any) => {
+            console.warn('[OrderStateMachine] PostgreSQL bill cancellation notice:', err?.message);
+          });
+        }
+
         await client.query('COMMIT').catch(() => {});
       }
 

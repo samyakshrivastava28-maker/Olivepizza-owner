@@ -16,6 +16,7 @@ import { BillingNumberService } from './BillingNumberService.js';
 import { adminDb } from '../../config/firebase.js';
 import { billingRepository } from '../../repositories/billing.repository.js';
 import { appEventBus } from '../eventBus/AppEventBus.js';
+import { POSService } from './POSService.js';
 
 export interface CreateOrderParams {
   id?: string;
@@ -87,13 +88,95 @@ export class CanonicalOrderService {
     const nums = await BillingNumberService.allocateNumbers();
     const { permanentBillNo, dailyOrderNo, orderDate, orderTime } = nums;
 
-    const discountAmount = Math.max(0, Number(params.discountAmount) || 0);
-    const taxAmount = Math.max(0, Number(params.taxAmount) || Math.round(params.subtotal * 0.05));
+    // 1.1 Process and verify line items authoritatively from catalog
+    const processedItems: Array<{
+      menuItemId: string | null;
+      name: string;
+      size: string;
+      crust: string;
+      quantity: number;
+      unitPrice: number;
+      addons: any[];
+      lineTotal: number;
+    }> = [];
+
+    let computedSubtotal = 0;
+    for (const item of (params.items || [])) {
+      const qty = Math.max(1, Math.min(100, Math.floor(Number(item.quantity) || 1)));
+      let unitPrice = 0;
+      let itemName = item.name || 'Menu Item';
+      const formattedAddons: any[] = item.addons || [];
+
+      // Server/catalog price > Client price: Always resolve authoritative catalog price
+      const itemId = item.menuItemId || (item as any).id;
+      if (itemId) {
+        try {
+          const catItem = await POSService.getCatalogItem(itemId);
+          if (catItem) {
+            itemName = catItem.productName || catItem.name || itemName;
+            const selectedSize = (item.size || '').toLowerCase();
+            if (selectedSize && catItem.sizes && catItem.sizes[selectedSize]?.price) {
+              unitPrice = Number(catItem.sizes[selectedSize].price);
+            } else if (selectedSize && Array.isArray(catItem.variants)) {
+              const v = catItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
+              if (v && v.price) {
+                unitPrice = Number(v.price);
+              }
+            }
+            if (!unitPrice || unitPrice <= 0) {
+              unitPrice = Number(catItem.offerPrice || catItem.basePrice || catItem.price || 0);
+            }
+
+            // Authoritative Addon Pricing
+            if (Array.isArray(item.addons) && item.addons.length > 0 && Array.isArray(catItem.addons)) {
+              for (const a of item.addons) {
+                const rawAddon: any = a;
+                if (!rawAddon) continue;
+                const authoritativeAddon = catItem.addons.find(
+                  (ca: any) =>
+                    ca.id === rawAddon.id ||
+                    ca.name === rawAddon.name ||
+                    ca.id === rawAddon ||
+                    ca.name === rawAddon
+                );
+                if (authoritativeAddon && authoritativeAddon.price != null) {
+                  unitPrice += Math.max(0, Number(authoritativeAddon.price));
+                }
+              }
+            }
+          }
+        } catch (catErr) {
+          console.warn('[CanonicalOrderService] Catalog lookup warning:', catErr);
+        }
+      }
+
+      // Safe fallback only if item was not found in catalog
+      if (unitPrice <= 0) {
+        unitPrice = Math.max(0, Number((item as any).unitPrice || item.price) || 0);
+      }
+
+      const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
+      computedSubtotal += lineTotal;
+      processedItems.push({
+        menuItemId: itemId || null,
+        name: itemName,
+        size: item.size || 'Regular',
+        crust: item.crust || 'Normal',
+        quantity: qty,
+        unitPrice,
+        addons: formattedAddons,
+        lineTotal
+      });
+    }
+
+    const subtotal = computedSubtotal > 0 ? parseFloat(computedSubtotal.toFixed(2)) : Math.max(0, Number(params.subtotal) || 0);
+    const discountAmount = Math.min(subtotal, Math.max(0, Number(params.discountAmount) || 0));
+    const taxableBase = Math.max(0, subtotal - discountAmount);
+    const taxAmount = params.taxAmount != null ? Math.max(0, Number(params.taxAmount)) : Math.round(taxableBase * 0.05);
     const cgst = params.cgst ?? parseFloat((taxAmount / 2).toFixed(2));
     const sgst = params.sgst ?? parseFloat((taxAmount - cgst).toFixed(2));
     const deliveryFee = Math.max(0, Number(params.deliveryFee) || 0);
-    const subtotal = Math.max(0, Number(params.subtotal) || 0);
-    const totalAmount = Math.max(0, Number(params.totalAmount) || (subtotal - discountAmount + taxAmount + deliveryFee));
+    const totalAmount = parseFloat((subtotal - discountAmount + taxAmount + deliveryFee).toFixed(2));
 
     const paymentMethod = (params.paymentMethod || 'CASH').toUpperCase();
     const paymentStatus = (params.paymentStatus || (paymentMethod === 'COD' ? 'PENDING' : 'PAID')).toUpperCase();
@@ -135,12 +218,8 @@ export class CanonicalOrderService {
         ]);
 
         // 2.2 Insert immutable line items
-        for (const item of params.items) {
+        for (const item of processedItems) {
           const itemId = crypto.randomUUID();
-          const qty = Math.max(1, Number(item.quantity) || 1);
-          const unitPrice = Math.max(0, Number(item.price) || 0);
-          const lineTotal = parseFloat((qty * unitPrice).toFixed(2));
-
           await client.query(`
             INSERT INTO canonical_order_items (
               id, order_id, menu_item_id, item_name, size_variant,
@@ -151,7 +230,7 @@ export class CanonicalOrderService {
             );
           `, [
             itemId, orderId, item.menuItemId || null, item.name, item.size || 'Regular',
-            item.crust || 'Normal', qty, unitPrice, JSON.stringify(item.addons || []), lineTotal
+            item.crust || 'Normal', item.quantity, item.unitPrice, JSON.stringify(item.addons || []), item.lineTotal
           ]);
         }
 

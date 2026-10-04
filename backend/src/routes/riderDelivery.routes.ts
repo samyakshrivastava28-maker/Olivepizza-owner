@@ -959,22 +959,8 @@ router.post('/location', async (req: AuthRequest, res: Response): Promise<void> 
       ...(effectiveOrderId ? { activeOrderId: effectiveOrderId } : {})
     }, { merge: true });
 
-    // 2. Authoritative Firestore Order driverLocation update (consumed by customer onSnapshot)
-    if (effectiveOrderId) {
-      adminDb.collection('orders').doc(effectiveOrderId).update({
-        driverLocation: {
-          lat: numLat,
-          lng: numLng,
-          heading: numHeading,
-          speed: numSpeed,
-          updatedAt: timestamp
-        },
-        updatedAt: new Date()
-      }).catch((orderErr: any) => {
-        console.warn('[RiderLocation] Order driverLocation update notice:', orderErr?.message);
-      });
-
-    }
+    // Note: Live GPS is streamed strictly via Supabase delivery_locations (Single Source of Truth)
+    // and WebSocket broadcast. High-frequency duplicate writes to Firestore orders are eliminated.
 
     // 2. Authoritative Supabase delivery_locations update (triggers Supabase Realtime for public.delivery_locations)
     await SupabaseGpsService.upsertLatestLocation({

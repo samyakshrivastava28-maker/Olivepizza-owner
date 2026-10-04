@@ -192,16 +192,27 @@ router.get('/location/:partnerId', async (req: Request, res: Response) => {
 // Get active deliveries for Owner
 router.get('/active', verifyToken, requireRole(['owner']), async (req: Request, res: Response) => {
   try {
-    const client = await pgPool.connect();
-    // Get all online partners with their active routes
-    const result = await client.query(`
-      SELECT l.*, r.distance_km, r.estimated_minutes, r.order_id
-      FROM delivery_locations l
-      LEFT JOIN delivery_routes r ON l.active_order_id = r.order_id
-      WHERE l.online_status = true
-    `);
-    client.release();
-    res.json(result.rows);
+    // Single Source of Truth: Authoritative live locations from Supabase
+    const activeLocations = await SupabaseGpsService.getActiveLocations();
+    let routesMap = new Map<string, any>();
+    try {
+      const client = await pgPool.connect();
+      const routesRes = await client.query(`SELECT * FROM delivery_routes WHERE is_active = true OR created_at > NOW() - INTERVAL '2 hours'`).catch(() => ({ rows: [] }));
+      client.release();
+      routesRes.rows.forEach((r: any) => routesMap.set(r.delivery_partner_id, r));
+    } catch {}
+
+    const combined = activeLocations.map((loc: any) => {
+      const route = routesMap.get(loc.delivery_partner_id) || {};
+      return {
+        ...loc,
+        distance_km: route.distance_km || null,
+        estimated_minutes: route.estimated_minutes || null,
+        order_id: loc.active_order_id || route.order_id || null
+      };
+    });
+
+    res.json(combined);
   } catch (error) {
     console.error('Error getting active tracking:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -260,44 +271,49 @@ router.get('/order/:orderId', optionalAuth, async (req: AuthRequest, res: Respon
       return res.status(403).json({ error: 'Forbidden: You do not have permission to track this order' });
     }
 
-    const client = await pgPool.connect();
-    
-    const result = await client.query(`
-      SELECT r.distance_km, r.estimated_minutes, r.customer_lat, r.customer_lng, r.restaurant_lat, r.restaurant_lng,
-             l.latitude as partner_lat, l.longitude as partner_lng, l.speed, l.heading, l.last_updated, l.delivery_partner_id
-      FROM delivery_routes r
-      LEFT JOIN delivery_locations l ON r.delivery_partner_id = l.delivery_partner_id
-      WHERE r.order_id = $1
-    `, [orderId]);
-    
-    client.release();
-
-    if (result.rows.length === 0) {
-      // Graceful fallback from Firestore order record
-      return res.json({
-        order_id: orderId,
-        status: order?.status || 'accepted',
-        restaurant_lat: order?.restaurantLat || DEFAULT_BRANCH_LAT,
-        restaurant_lng: order?.restaurantLng || DEFAULT_BRANCH_LNG,
-        customer_lat: order?.deliveryAddress?.lat || null,
-        customer_lng: order?.deliveryAddress?.lng || null,
-        delivery_partner_id: order?.deliveryPartnerId || null,
-        partner_lat: order?.driverLocation?.lat || null,
-        partner_lng: order?.driverLocation?.lng || null,
-        heading: order?.driverLocation?.heading || 0,
-        speed: order?.driverLocation?.speed || 0,
-        distance_km: null,
-        estimated_minutes: null,
-        partner_name: order?.deliveryPartnerName || null,
-        partner_phone: order?.deliveryPartnerPhone || null,
-        last_updated: order?.driverLocation?.updatedAt || order?.updatedAt || new Date().toISOString()
-      });
+    // Single Source of Truth: Authoritative live location from Supabase
+    const partnerId = order?.deliveryPartnerId;
+    let liveLoc: any = null;
+    if (partnerId) {
+      liveLoc = await SupabaseGpsService.getLatestLocation(partnerId);
+    } else {
+      liveLoc = await SupabaseGpsService.getLatestLocationByOrder(orderId);
     }
 
-    res.json({
-      ...result.rows[0],
+    let routeData: any = {};
+    try {
+      const client = await pgPool.connect();
+      const result = await client.query(`
+        SELECT distance_km, estimated_minutes, customer_lat, customer_lng, restaurant_lat, restaurant_lng
+        FROM delivery_routes
+        WHERE order_id = $1
+      `, [orderId]);
+      client.release();
+      if (result.rows.length > 0) {
+        routeData = result.rows[0];
+      }
+    } catch {}
+
+    const partnerLat = liveLoc?.latitude != null ? Number(liveLoc.latitude) : (order?.driverLocation?.lat || null);
+    const partnerLng = liveLoc?.longitude != null ? Number(liveLoc.longitude) : (order?.driverLocation?.lng || null);
+
+    return res.json({
+      order_id: orderId,
+      status: order?.status || 'accepted',
+      restaurant_lat: routeData.restaurant_lat || order?.restaurantLat || DEFAULT_BRANCH_LAT,
+      restaurant_lng: routeData.restaurant_lng || order?.restaurantLng || DEFAULT_BRANCH_LNG,
+      customer_lat: routeData.customer_lat || order?.deliveryAddress?.lat || null,
+      customer_lng: routeData.customer_lng || order?.deliveryAddress?.lng || null,
+      delivery_partner_id: partnerId || null,
+      partner_lat: partnerLat,
+      partner_lng: partnerLng,
+      heading: liveLoc?.heading != null ? Number(liveLoc.heading) : (order?.driverLocation?.heading || 0),
+      speed: liveLoc?.speed != null ? Number(liveLoc.speed) : (order?.driverLocation?.speed || 0),
+      distance_km: routeData.distance_km || null,
+      estimated_minutes: routeData.estimated_minutes || null,
       partner_name: order?.deliveryPartnerName || null,
       partner_phone: order?.deliveryPartnerPhone || null,
+      last_updated: liveLoc?.last_updated || order?.driverLocation?.updatedAt || order?.updatedAt || new Date().toISOString()
     });
   } catch (error) {
     console.error('Error getting tracking info:', error);
@@ -442,29 +458,24 @@ router.get('/active-drivers', async (_req: Request, res: Response) => {
   }
 });
 
-export default router;
-
-
-// Get active driver locations for owner / manager tracking
-router.get('/locations/active', async (req, res) => {
+// Get active driver locations for owner / manager tracking (Single Source of Truth: Supabase)
+router.get('/locations/active', async (req: Request, res: Response) => {
   try {
-    const locSnap = await adminDb.collection('delivery_locations').get();
-    const locations = [];
-    locSnap.forEach((d) => {
-      const data = d.data();
-      locations.push({
-        id: d.id,
-        delivery_partner_id: data.delivery_partner_id || d.id,
-        latitude: data.latitude || data.lat,
-        longitude: data.longitude || data.lng,
-        speed: data.speed || 0,
-        bearing: data.bearing || data.heading || 0,
-        updated_at: data.updated_at || data.updatedAt || new Date().toISOString(),
-        active_order_id: data.active_order_id || data.activeOrderId || null
-      });
-    });
+    const activeLocations = await SupabaseGpsService.getActiveLocations();
+    const locations = activeLocations.map((loc: any) => ({
+      id: loc.id || loc.delivery_partner_id,
+      delivery_partner_id: loc.delivery_partner_id,
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      speed: loc.speed || 0,
+      bearing: loc.heading || 0,
+      updated_at: loc.last_updated || new Date().toISOString(),
+      active_order_id: loc.active_order_id || null
+    }));
     res.json(locations);
-  } catch (err) {
+  } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
+
+export default router;

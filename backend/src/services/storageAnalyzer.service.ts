@@ -10,6 +10,7 @@ const cache = new NodeCache({ stdTTL: 60, checkperiod: 65 });
 
 export class StorageAnalyzerService {
   private static instance: StorageAnalyzerService;
+  private cronTask: any = null;
 
   private constructor() {}
 
@@ -22,8 +23,9 @@ export class StorageAnalyzerService {
 
   // --- Cron Jobs for Data Retention ---
   public startCronJobs() {
+    if (this.cronTask) return;
     // Run daily at midnight to aggregate storage_analytics into storage_analytics_daily
-    cron.schedule('0 0 * * *', async () => {
+    this.cronTask = cron.schedule('0 0 * * *', async () => {
       console.log('Running storage analytics daily rollup...');
       try {
         const client = await pgPool.connect();
@@ -60,6 +62,15 @@ export class StorageAnalyzerService {
         console.error('Error during storage analytics rollup:', err);
       }
     });
+  }
+
+  public stopCronJobs(): void {
+    if (this.cronTask) {
+      try {
+        this.cronTask.stop();
+      } catch {}
+      this.cronTask = null;
+    }
   }
 
   // Record snapshot helper

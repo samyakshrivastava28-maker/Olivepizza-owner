@@ -2,6 +2,7 @@ import { adminDb } from '../../config/firebase.js';
 import { FieldValue } from 'firebase-admin/firestore';
 import { notificationEngine } from '../notification/NotificationEngine.js';
 import { DeliveryTemplates } from '../notification/NotificationTemplates.js';
+import { SupabaseGpsService } from '../gps/SupabaseGpsService.js';
 
 export type RiderOperationalState =
   | 'OFFLINE'
@@ -79,9 +80,13 @@ export class StoreBoundDeliveryFleetService {
       combinedCandidates.set(d.id, existing ? { ...existing, ...d.data() } : { id: d.id, ...d.data() });
     });
 
-    const locSnap = await adminDb.collection('delivery_locations').get().catch(() => ({ docs: [] } as any));
+    // Single Source of Truth: Query authoritative live locations from Supabase
+    const activeLocations = await SupabaseGpsService.getActiveLocations().catch(() => []);
     const locMap = new Map<string, any>();
-    locSnap.forEach((d: any) => locMap.set(d.id, d.data()));
+    for (const loc of activeLocations) {
+      const pid = loc.delivery_partner_id || loc.id;
+      if (pid) locMap.set(pid, loc);
+    }
 
     const riders: FleetRider[] = [];
 
