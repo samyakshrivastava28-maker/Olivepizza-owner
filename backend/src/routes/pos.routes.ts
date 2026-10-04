@@ -16,7 +16,8 @@ import { BillingNumberService } from '../services/pos/BillingNumberService.js';
 import { billingRepository } from '../repositories/billing.repository.js';
 import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngine.js';
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
-import { query } from '../config/postgres.js';
+import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
+import { query } from '../lib/db.js';
 import crypto from 'crypto';
 import net from 'net';
 
@@ -666,19 +667,17 @@ router.post('/online-orders/:id/accept', verifyToken, requirePOSRole, async (req
   try {
     const { id } = req.params;
     const user = req.user!;
-    const now = new Date();
 
-    await query(`
-      UPDATE canonical_orders
-      SET order_status = 'ACCEPTED', updated_at = $2
-      WHERE id = $1;
-    `, [id, now]);
+    const transitionRes = await OrderStateMachine.transition(id, 'accepted', {
+      uid: user.uid,
+      role: user.role || 'cashier',
+      name: (user as any).name || 'POS Operator'
+    });
 
-    await adminDb.collection('orders').doc(id).update({
-      status: 'accepted',
-      acceptedAt: now.toISOString(),
-      updatedAt: now
-    }).catch(() => {});
+    if (!transitionRes.success) {
+      res.status(400).json({ success: false, error: transitionRes.error || 'Failed to accept order' });
+      return;
+    }
 
     try {
       await orderEventService.emitStatusChange(id, 'accepted', user.uid);

@@ -132,6 +132,47 @@ CREATE TABLE notification_history (
     status VARCHAR(50) DEFAULT 'delivered',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- =========================================
+-- 9. FCM TOKENS TABLE
+-- =========================================
+CREATE TABLE IF NOT EXISTS fcm_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id VARCHAR(255) NOT NULL,
+    token TEXT NOT NULL UNIQUE,
+    device_id VARCHAR(255),
+    device_name VARCHAR(255),
+    platform VARCHAR(100),
+    app_name VARCHAR(100),
+    role VARCHAR(100),
+    branch_id VARCHAR(255),
+    franchise_id VARCHAR(255),
+    terminal_id VARCHAR(255),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================
+-- 10. NOTIFICATION QUEUES
+-- =========================================
+CREATE TABLE IF NOT EXISTS notification_queue (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id VARCHAR(255),
+    payload JSONB,
+    status VARCHAR(50) DEFAULT 'queued',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS email_queue (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    recipient VARCHAR(255),
+    subject TEXT,
+    body TEXT,
+    status VARCHAR(50) DEFAULT 'queued',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- =========================================
 -- MOCK DATA (SEEDING)
 -- =========================================

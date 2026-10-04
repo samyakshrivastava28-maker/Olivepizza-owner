@@ -585,7 +585,7 @@ export class NotificationEngine {
              FROM fcm_tokens
              WHERE user_id = ANY($1) AND is_active = TRUE`,
             [firebaseUserIds]
-          );
+          ).catch(() => ({ rows: [] as any[] }));
         });
       });
 

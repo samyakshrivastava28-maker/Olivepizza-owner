@@ -134,6 +134,33 @@ async function runTests() {
   console.log('\n--- TEST GROUP 3: Multi-Device FCM Token Registration ---');
 
   await test('Registering second device does not deactivate first device token', async () => {
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS fcm_tokens (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id VARCHAR(255) NOT NULL,
+        token TEXT NOT NULL,
+        device_id VARCHAR(255),
+        device_name VARCHAR(255),
+        platform VARCHAR(100),
+        browser VARCHAR(100),
+        app_version VARCHAR(50),
+        app_name VARCHAR(100),
+        role VARCHAR(100),
+        branch_id VARCHAR(255),
+        franchise_id VARCHAR(255),
+        terminal_id VARCHAR(255),
+        is_active BOOLEAN DEFAULT TRUE,
+        last_used_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fcm_tokens_user_token_uniq UNIQUE (user_id, token)
+      );
+      ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS browser VARCHAR(100);
+      ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS app_version VARCHAR(50);
+      ALTER TABLE fcm_tokens ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+      CREATE UNIQUE INDEX IF NOT EXISTS fcm_tokens_user_token_uniq ON fcm_tokens (user_id, token);
+    `).catch(() => {});
+
     const testUserId = `test_mgr_multi_${Date.now()}`;
     const tokenPhone = `fcm_phone_token_${Date.now()}`;
     const tokenTablet = `fcm_tablet_token_${Date.now()}`;

@@ -8,13 +8,15 @@ import { optionalAuth, verifyToken, requireRole, AuthRequest } from '../middlewa
 import { query } from '../lib/db.js';
 import { adminDb } from '../config/firebase.js';
 import { CODCollectionService } from '../services/payment/CODCollectionService.js';
+import { redisService } from '../services/redis/RedisService.js';
+import crypto from 'crypto';
 
 const router = Router();
 
 // ─── 1. Create Payment Intent / Session ─────────────────────────────────────────
 router.post('/create-intent', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const { items, deliveryAddress, paymentMethod, couponCode, customerName, customerPhone, customerEmail, branchId, deliveryType, deliveryFee } = req.body;
+    const { items, deliveryAddress, paymentMethod, couponCode, customerName, customerPhone, customerEmail, branchId, deliveryType } = req.body;
     const userId = req.user?.uid || 'guest-user';
     const userIp = (req.headers['x-forwarded-for'] as string) || req.ip || '127.0.0.1';
     const deviceId = (req.headers['x-device-id'] as string) || 'unknown-device';
@@ -24,6 +26,37 @@ router.post('/create-intent', optionalAuth, async (req: AuthRequest, res: Respon
       return;
     }
 
+    // Distributed Idempotency Key Handling (Requirement 14)
+    const idempotencyKey = ((req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || '') as string).trim();
+    const payloadHash = crypto.createHash('sha256').update(JSON.stringify({
+      userId,
+      items: items.map((it: any) => ({ id: it.menuItemId || it.id, qty: it.quantity, size: it.size, variant: it.variant })),
+      deliveryAddress,
+      paymentMethod,
+      couponCode,
+      branchId,
+      deliveryType
+    })).digest('hex');
+
+    if (idempotencyKey) {
+      const cached = await redisService.get(`idempotency:pay_intent:${idempotencyKey}`);
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached as string);
+          if (parsed.hash === payloadHash) {
+            return res.json({ success: true, ...parsed.data, idempotentReplay: true });
+          } else {
+            return res.status(409).json({ error: 'Idempotency key conflict: key was previously used with different request parameters.' });
+          }
+        } catch {}
+      }
+    }
+
+    // Requirement 8: Server Delivery Fee Authority — Never trust client deliveryFee for customers
+    const userRole = (req.user?.role || 'customer').toLowerCase();
+    const isStaff = ['owner', 'admin', 'restaurant_manager', 'cashier'].includes(userRole);
+    const authorizedCustomDeliveryFee = isStaff && req.body.deliveryFee != null ? Number(req.body.deliveryFee) : undefined;
+
     const sessionRes = await PaymentService.createPaymentSession({
       userId,
       items,
@@ -32,13 +65,21 @@ router.post('/create-intent', optionalAuth, async (req: AuthRequest, res: Respon
       couponCode,
       branchId,
       deliveryType,
-      deliveryFee: deliveryFee != null ? Number(deliveryFee) : undefined,
+      deliveryFee: authorizedCustomDeliveryFee,
       userIp,
       deviceId,
       customerName: customerName || (req.user as any)?.name || 'Gourmet Customer',
       customerPhone: customerPhone || (req.user as any)?.phone || '',
       customerEmail: customerEmail || (req.user as any)?.email || '',
     });
+
+    if (idempotencyKey) {
+      await redisService.set(
+        `idempotency:pay_intent:${idempotencyKey}`,
+        JSON.stringify({ hash: payloadHash, data: sessionRes }),
+        86400
+      ).catch(() => {});
+    }
 
     res.json({
       success: true,

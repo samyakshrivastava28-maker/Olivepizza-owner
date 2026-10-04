@@ -3,6 +3,7 @@ import { adminDb } from '../../config/firebase.js';
 import { getPaymentConfig } from '../../config/payment.config.js';
 import { PaymentProviderFactory } from './PaymentProviderFactory.js';
 import { PaymentStateMachine, PaymentState } from './PaymentStateMachine.js';
+import { OrderStateMachine } from '../order/OrderStateMachine.js';
 import { PaymentErrorHandler } from './PaymentErrorHandler.js';
 import { FraudProtectionEngine } from './FraudProtectionEngine.js';
 import { PaymentAuditLogger } from './PaymentAuditLogger.js';
@@ -273,7 +274,7 @@ export class PaymentService {
 
     state = PaymentStateMachine.transition(state, 'INTENT_CREATED');
 
-    // Store in Postgres (safe fallback)
+    // Store in Postgres (Requirement 13: Fail Closed — never proceed without canonical financial record)
     try {
       await query(`
         INSERT INTO payments (id, payment_session_id, user_id, provider, amount, currency, status, payment_method, metadata, created_at)
@@ -290,7 +291,8 @@ export class PaymentService {
         JSON.stringify({ items: validatedItems, deliveryAddress: params.deliveryAddress }),
       ]);
     } catch (err: any) {
-      console.warn('[PaymentService] DB write skipped for payments table:', err.message);
+      console.error('[PaymentService] CRITICAL: Canonical payment persistence failed in PostgreSQL:', err.message);
+      throw new Error(`Payment session creation aborted: Canonical financial record could not be secured. (${err.message})`);
     }
 
     // Handle Online vs COD
@@ -361,19 +363,17 @@ export class PaymentService {
     const payload: any = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;
     const eventId = payload.event_id || payload.id || `evt_${Date.now()}`;
 
-    // Replay attack prevention check in DB
-    try {
-      const existing = await query('SELECT 1 FROM payment_webhooks WHERE event_id = $1', [eventId]);
-      if (existing.rows.length > 0) {
-        console.warn(`[Webhook] Duplicate webhook event ID ${eventId} ignored.`);
-        return { success: true, eventType: 'duplicate_ignored' };
-      }
+    // Replay attack prevention check in DB (fail closed on DB error)
+    const existing = await query('SELECT 1 FROM payment_webhooks WHERE event_id = $1', [eventId]);
+    if (existing.rows.length > 0) {
+      console.warn(`[Webhook] Duplicate webhook event ID ${eventId} ignored.`);
+      return { success: true, eventType: 'duplicate_ignored' };
+    }
 
-      await query(
-        'INSERT INTO payment_webhooks (id, provider, event_type, event_id, payload, signature_verified, processed_at) VALUES ($1, $2, $3, $4, $5, true, NOW())',
-        [crypto.randomUUID(), providerName, payload.event || 'payment.success', eventId, JSON.stringify(payload)]
-      );
-    } catch (err) {}
+    await query(
+      'INSERT INTO payment_webhooks (id, provider, event_type, event_id, payload, signature_verified, processed_at) VALUES ($1, $2, $3, $4, $5, true, NOW())',
+      [crypto.randomUUID(), providerName, payload.event || 'payment.success', eventId, JSON.stringify(payload)]
+    );
 
     console.log(`✅ [Webhook] Verified webhook received from ${providerName}:`, payload.event || 'payment.success');
 
@@ -427,41 +427,74 @@ export class PaymentService {
     }
 
     if (paymentId) {
-      // 1. Update PostgreSQL Payment status
-      try {
-        await query(
-          "UPDATE payments SET status = 'PAYMENT_CAPTURED', provider_transaction_id = $1, verified_at = NOW(), updated_at = NOW() WHERE id = $2 OR provider_payment_id = $2",
-          [providerTxId || `tx_${Date.now()}`, paymentId]
-        );
-      } catch (dbErr) {
-        console.warn('[Webhook] Postgres payment update warning:', dbErr);
+      // 1. Validate payment record exists in PostgreSQL (Requirement 12)
+      const payRecordRes = await query('SELECT id, amount, currency, status, user_id, metadata FROM payments WHERE id = $1 OR provider_payment_id = $1 LIMIT 1', [paymentId]);
+      if (payRecordRes.rows.length === 0) {
+        console.error(`[Webhook] CRITICAL: Unknown payment ID ${paymentId} received in webhook from ${providerName}`);
+        throw new Error(`Payment verification failed: No payment record found for ${paymentId}`);
       }
 
-      // 2. Update Firestore Order status atomically
-      try {
-        const orderSnap = await adminDb.collection('orders').doc(paymentId).get();
-        if (orderSnap.exists) {
-          await adminDb.collection('orders').doc(paymentId).update({
-            paymentStatus: 'PAID',
-            isPaid: true,
-            status: orderSnap.data()?.status === 'pending_payment' ? 'placed' : orderSnap.data()?.status,
-            paidAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            providerTransactionId: providerTxId || null
-          });
-          console.log(`[Webhook] Order ${paymentId} marked as PAID in Firestore`);
+      const canonicalPayment = payRecordRes.rows[0];
+
+      // 2. Validate Amount and Currency (Requirement 12)
+      if (amount != null) {
+        const expectedAmount = Number(canonicalPayment.amount || 0);
+        const receivedAmount = Number(amount);
+        if (Math.abs(expectedAmount - receivedAmount) > 0.05) {
+          console.error(`[Webhook] CRITICAL SECURITY ALERT: Webhook amount mismatch for payment ${paymentId}! Expected: ₹${expectedAmount}, Received: ₹${receivedAmount}`);
+          throw new Error(`CRITICAL SECURITY ALERT: Webhook amount mismatch for ${paymentId}`);
         }
-      } catch (fsErr) {
-        console.warn('[Webhook] Firestore order update warning:', fsErr);
       }
 
-      // 3. Log Payment Audit Event
+      // 3. Atomically update PostgreSQL Payment status (Requirement 13: Fail closed)
+      await query(
+        "UPDATE payments SET status = 'PAYMENT_CAPTURED', provider_transaction_id = $1, verified_at = NOW(), updated_at = NOW() WHERE id = $2 OR provider_payment_id = $2",
+        [providerTxId || `tx_${Date.now()}`, paymentId]
+      );
+
+      // 4. Update canonical order status & projection via OrderStateMachine (Requirement 10)
+      const orderIdToUpdate = orderId || canonicalPayment.metadata?.orderId || paymentId;
+      if (orderIdToUpdate) {
+        // Update PostgreSQL canonical_orders
+        await query(
+          "UPDATE canonical_orders SET payment_status = 'PAID', is_paid = TRUE, updated_at = NOW() WHERE id = $1",
+          [orderIdToUpdate]
+        ).catch(() => {});
+
+        // Synchronize operational state through OrderStateMachine
+        try {
+          const orderSnap = await adminDb.collection('orders').doc(orderIdToUpdate).get();
+          if (orderSnap.exists) {
+            const currentStatus = orderSnap.data()?.status;
+            if (currentStatus === 'pending' || currentStatus === 'pending_payment') {
+              await OrderStateMachine.transition(orderIdToUpdate, 'accepted', {
+                uid: `webhook_${providerName}`,
+                role: 'system',
+                name: 'Payment Webhook Service'
+              });
+            } else {
+              await adminDb.collection('orders').doc(orderIdToUpdate).update({
+                paymentStatus: 'PAID',
+                isPaid: true,
+                paidAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                providerTransactionId: providerTxId || null
+              });
+            }
+            console.log(`[Webhook] Order ${orderIdToUpdate} marked as PAID`);
+          }
+        } catch (stateErr: any) {
+          console.warn('[Webhook] Order state sync warning:', stateErr.message);
+        }
+      }
+
+      // 5. Log Payment Audit Event
       await PaymentAuditLogger.log({
         paymentId,
         action: 'WEBHOOK_PAYMENT_CAPTURED',
         actorId: `webhook_${providerName}`,
         actorRole: 'system',
-        details: { provider: providerName, providerTxId, eventType: payload.event || 'payment.success' }
+        details: { provider: providerName, providerTxId, eventType: payload.event || 'payment.success', amount: canonicalPayment.amount }
       });
     }
 
@@ -469,19 +502,19 @@ export class PaymentService {
   }
 
   /**
-   * Initiates Full or Partial Refund
+   * Initiates Full or Partial Refund (Requirement 15: Canonical in PostgreSQL)
    */
   public static async processRefund(paymentId: string, refundAmount: number, reason: string, actorId: string): Promise<{ success: boolean; refundId: string }> {
     let providerTxId = `tx_${paymentId}`;
     let providerName = 'mock';
 
-    try {
-      const res = await query('SELECT * FROM payments WHERE id = $1', [paymentId]);
-      if (res.rows.length > 0) {
-        providerTxId = res.rows[0].provider_payment_id || providerTxId;
-        providerName = res.rows[0].provider || 'mock';
-      }
-    } catch (e) {}
+    const res = await query('SELECT * FROM payments WHERE id = $1', [paymentId]);
+    if (res.rows.length === 0) {
+      throw new Error(`Refund failed: Payment record ${paymentId} not found in database.`);
+    }
+
+    providerTxId = res.rows[0].provider_payment_id || providerTxId;
+    providerName = res.rows[0].provider || 'mock';
 
     const provider = PaymentProviderFactory.getProvider(providerName);
     const refundRes = await provider.createRefund({
@@ -500,16 +533,15 @@ export class PaymentService {
         details: { refundAmount, reason, refundTransactionId: refundRes.refundTransactionId },
       });
 
-      try {
-        await query('INSERT INTO refunds (id, payment_id, refund_amount, reason, status, created_at) VALUES ($1, $2, $3, $4, $5, NOW())', [
-          refundRes.refundTransactionId,
-          paymentId,
-          refundAmount,
-          reason,
-          'PROCESSED',
-        ]);
-        await query("UPDATE payments SET status = 'REFUNDED', updated_at = NOW() WHERE id = $1", [paymentId]);
-      } catch (e) {}
+      // Atomically commit refund to PostgreSQL
+      await query('INSERT INTO refunds (id, payment_id, refund_amount, reason, status, created_at) VALUES ($1, $2, $3, $4, $5, NOW())', [
+        refundRes.refundTransactionId,
+        paymentId,
+        refundAmount,
+        reason,
+        'PROCESSED',
+      ]);
+      await query("UPDATE payments SET status = 'REFUNDED', updated_at = NOW() WHERE id = $1", [paymentId]);
     }
 
     return {

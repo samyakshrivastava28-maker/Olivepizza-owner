@@ -169,44 +169,26 @@ router.patch('/orders/:id/status', requireRole(['owner', 'delivery', 'delivery_p
       }
     }
 
-    const updateData: Record<string, any> = {
-      status: status,
-      updatedAt: FieldValue.serverTimestamp()
-    };
-    if (status === 'delivered') {
-      const paymentMethod = (orderData.paymentMethod || '').toLowerCase();
-      const isCod = paymentMethod === 'cod' || orderData.isCod === true;
-      if (isCod) {
-        const pStatus = (orderData.paymentStatus || '').toUpperCase();
-        const isPaid = orderData.isPaid === true || pStatus === 'PAID' || pStatus === 'COLLECTED';
-        if (!isPaid) {
-          res.status(400).json({
-            error: 'Cannot mark COD order as delivered before payment is collected and verified. Please collect via Cash or dynamic UPI QR.'
-          });
-          return;
-        }
+    // Route transition through canonical OrderStateMachine (PostgreSQL -> Firestore projection)
+    const transitionRes = await OrderStateMachine.transition(
+      id,
+      status as any,
+      {
+        uid: req.user?.uid || 'rider',
+        role: req.user?.role || 'delivery_partner',
+        name: (req.user as any)?.name || 'Delivery Partner',
+        branchId: orderData.branchId
+      },
+      {
+        deliveryProof: req.body.deliveryProof,
+        deliveryPartnerId: orderData.deliveryPartnerId || req.user?.uid
       }
+    );
 
-      updateData.deliveredAt = FieldValue.serverTimestamp();
-      if (req.body.deliveryProof) {
-        updateData.deliveryProof = req.body.deliveryProof;
-      }
-      const riderUid = orderData.deliveryPartnerId || req.user?.uid;
-      if (riderUid) {
-        await adminDb.collection('users').doc(riderUid).set({
-          activeOrderId: null,
-          deliveryStatus: 'returning',
-          updatedAt: FieldValue.serverTimestamp()
-        }, { merge: true }).catch(() => {});
-        await adminDb.collection('delivery_partners').doc(riderUid).set({
-          activeOrderId: null,
-          deliveryStatus: 'returning',
-          updatedAt: FieldValue.serverTimestamp()
-        }, { merge: true }).catch(() => {});
-      }
+    if (!transitionRes.success) {
+      res.status(400).json({ error: transitionRes.error || 'Failed to transition order status' });
+      return;
     }
-
-    await adminDb.collection('orders').doc(id).update(updateData);
     
     // Synchronous Dispatch
     setImmediate(async () => {

@@ -961,39 +961,62 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
     const timeoutMinutes = Number(process.env.ORDER_ACCEPT_TIMEOUT_MINUTES || 10);
     const acceptanceDeadline = new Date(Date.now() + timeoutMinutes * 60 * 1000).toISOString();
 
-    const canonical = await CanonicalOrderService.createCanonicalOrder({
-      id: newOrderId,
-      orderSource: resolvedOrderSource as any,
-      orderType: deliveryType === 'delivery' ? 'delivery' : 'pickup',
-      customerName: userData.name || (req.user as any)?.name || 'Gourmet Customer',
-      customerPhone: userPhone || 'N/A',
-      deliveryAddress: userAddress || undefined,
-      items: validatedItems.map(it => ({
-        menuItemId: it.menuItemId,
-        name: it.name,
-        price: it.price,
-        quantity: it.quantity,
-        size: it.size || 'Regular',
-        crust: it.crust || 'Normal',
-        addons: it.addons || []
-      })),
-      subtotal: serverCalculatedTotal,
-      discountAmount,
-      couponCode: appliedCouponCode || undefined,
-      taxAmount: taxes,
-      cgst: Math.round(taxes / 2),
-      sgst: taxes - Math.round(taxes / 2),
-      deliveryFee,
-      totalAmount: finalOrderTotal,
-      paymentMethod: (req.body.paymentMethod || 'COD').toUpperCase(),
-      paymentStatus: (req.body.paymentMethod || '').toUpperCase() === 'COD' ? 'PENDING' : 'PAID',
-      orderStatus: 'PLACED',
-      franchiseId: resolvedFranchiseId,
-      branchId: resolvedBranchId,
-      cashierName: resolvedCashierName || 'Online App',
-      terminalId: resolvedTerminalId || 'ONLINE-APP',
-      notes: req.body.notes || ''
-    });
+      // Requirement 7 & 13: Online Payment Authority — Verify captured payment in PostgreSQL
+      let initialPaymentStatus = 'PENDING';
+      const rawPaymentMethod = (req.body.paymentMethod || 'COD').toUpperCase();
+
+      if (resolvedOrderSource !== 'ONLINE') {
+        initialPaymentStatus = rawPaymentMethod === 'COD' ? 'PENDING' : 'PAID';
+      } else if (rawPaymentMethod !== 'COD') {
+        const incomingPaymentId = req.body.paymentId;
+        if (incomingPaymentId) {
+          try {
+            const payRes = await query('SELECT status, amount FROM payments WHERE id = $1 OR provider_payment_id = $1', [incomingPaymentId]);
+            if (payRes.rows.length > 0) {
+              const payRow = payRes.rows[0];
+              if (payRow.status === 'PAYMENT_CAPTURED' && Number(payRow.amount) >= finalOrderTotal - 0.05) {
+                initialPaymentStatus = 'PAID';
+              }
+            }
+          } catch (e) {
+            console.warn('[Orders] Canonical payment verification lookup notice:', e);
+          }
+        }
+      }
+
+      const canonical = await CanonicalOrderService.createCanonicalOrder({
+        id: newOrderId,
+        orderSource: resolvedOrderSource as any,
+        orderType: deliveryType === 'delivery' ? 'delivery' : 'pickup',
+        customerName: userData.name || (req.user as any)?.name || 'Gourmet Customer',
+        customerPhone: userPhone || 'N/A',
+        deliveryAddress: userAddress || undefined,
+        items: validatedItems.map(it => ({
+          menuItemId: it.menuItemId,
+          name: it.name,
+          price: it.price,
+          quantity: it.quantity,
+          size: it.size || 'Regular',
+          crust: it.crust || 'Normal',
+          addons: it.addons || []
+        })),
+        subtotal: serverCalculatedTotal,
+        discountAmount,
+        couponCode: appliedCouponCode || undefined,
+        taxAmount: taxes,
+        cgst: Math.round(taxes / 2),
+        sgst: taxes - Math.round(taxes / 2),
+        deliveryFee,
+        totalAmount: finalOrderTotal,
+        paymentMethod: rawPaymentMethod,
+        paymentStatus: initialPaymentStatus,
+        orderStatus: 'PLACED',
+        franchiseId: resolvedFranchiseId,
+        branchId: resolvedBranchId,
+        cashierName: resolvedCashierName || 'Online App',
+        terminalId: resolvedTerminalId || 'ONLINE-APP',
+        notes: req.body.notes || ''
+      });
 
     const permanentBillNo = canonical.permanentBillNo;
     const dailyOrderNumber = canonical.dailyOrderNo;
