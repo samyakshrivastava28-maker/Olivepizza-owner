@@ -55,7 +55,7 @@ async function runTests() {
   assert(tcProvider.isConfigured(), 'Truecaller is properly configured');
   assert(tcProvider.getClientId() === 'um2vaxqdcr3nroydqvyg_hahzikmqrla8w_yxiptsry', 'Truecaller Client ID matches production key');
 
-  const tcSession = tcProvider.createWebSession('+919876543210', 'test_user_01');
+  const tcSession = await tcProvider.createWebSession('+919876543210', 'test_user_01');
   assert(tcSession.status === 'PENDING' && tcSession.deepLink?.includes('truecallersdk://'), 'Truecaller Web session creates valid deepLink');
   assert(tcSession.deepLink?.includes('partnerKey=um2vaxqdcr'), 'Truecaller deepLink contains production partnerKey');
 

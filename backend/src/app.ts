@@ -364,6 +364,8 @@ app.use('/api/github', githubRoutes);
 
 app.use('/phone', phoneVerificationRoutes);
 app.use('/api/phone', phoneVerificationRoutes);
+app.use('/truecaller', phoneVerificationRoutes);
+app.use('/api/truecaller', phoneVerificationRoutes);
 
 app.use('/data-manager', dataManagerRoutes);
 app.use('/api/data-manager', dataManagerRoutes);

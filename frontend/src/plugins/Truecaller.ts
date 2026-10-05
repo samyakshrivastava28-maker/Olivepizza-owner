@@ -25,6 +25,7 @@ export interface TruecallerWebSessionResponse {
   success: boolean;
   requestId: string;
   deepLink: string;
+  bridgeUrl?: string;
   expiresAt: number;
 }
 
@@ -35,6 +36,8 @@ export interface TruecallerSessionStatusResponse {
   error?: string;
   name?: string;
   country?: string;
+  customToken?: string;
+  userId?: string;
 }
 
 export const TruecallerService = {

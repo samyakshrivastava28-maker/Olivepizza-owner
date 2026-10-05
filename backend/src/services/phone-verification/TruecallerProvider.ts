@@ -17,6 +17,7 @@ export interface TruecallerWebSession {
   name?: string;
   country?: string;
   deepLink?: string;
+  bridgeUrl?: string;
   createdAt: number;
   expiresAt: number;
   verifiedAt?: number;
@@ -91,13 +92,14 @@ export class TruecallerProvider implements PhoneVerificationProvider {
   /**
    * Creates a Web / Desktop QR verification session
    */
-  public createWebSession(expectedPhone?: string, userId?: string): TruecallerWebSession {
+  public async createWebSession(expectedPhone?: string, userId?: string): Promise<TruecallerWebSession> {
     const requestId = crypto.randomBytes(16).toString('hex');
     const now = Date.now();
     const expiresAt = now + 5 * 60 * 1000; // 5 minutes validity
 
     const normalizedExpected = expectedPhone ? this.normalizeE164(expectedPhone) : undefined;
     const deepLink = `truecallersdk://truesdk/web_verify?requestNonce=${requestId}&partnerKey=${encodeURIComponent(this.CLIENT_ID)}&partnerName=Olive%20Pizza&lang=en&title=Verify%20Number`;
+    const bridgeUrl = `https://olivepizza-owner.onrender.com/api/phone/truecaller/bridge?requestId=${requestId}`;
 
     const session: TruecallerWebSession = {
       requestId,
@@ -105,19 +107,22 @@ export class TruecallerProvider implements PhoneVerificationProvider {
       expectedPhone: normalizedExpected,
       userId,
       deepLink,
+      bridgeUrl,
       createdAt: now,
       expiresAt
     };
 
     this.webSessions.set(requestId, session);
 
-    // Persist to Firestore asynchronously for multi-instance / webhook reliability
-    adminDb.collection('truecaller_web_sessions').doc(requestId).set({
-      ...session,
-      updatedAt: now
-    }).catch(err => {
+    // Persist to Firestore synchronously for guaranteed webhook reliability
+    try {
+      await adminDb.collection('truecaller_web_sessions').doc(requestId).set({
+        ...session,
+        updatedAt: now
+      });
+    } catch (err: any) {
       console.warn('[Truecaller] Firestore session creation warning:', err?.message);
-    });
+    }
 
     return session;
   }
@@ -126,9 +131,11 @@ export class TruecallerProvider implements PhoneVerificationProvider {
    * Retrieves a Web verification session (checks in-memory first, then Firestore)
    */
   public async getWebSession(requestId: string): Promise<TruecallerWebSession | null> {
-    const memSession = this.webSessions.get(requestId);
+    if (!requestId) return null;
+    const cleanId = requestId.trim();
+    const memSession = this.webSessions.get(cleanId);
     if (memSession && memSession.expiresAt < Date.now()) {
-      this.webSessions.delete(requestId);
+      this.webSessions.delete(cleanId);
       return null;
     }
 
@@ -138,11 +145,11 @@ export class TruecallerProvider implements PhoneVerificationProvider {
 
     // Check Firestore if missing or still PENDING
     try {
-      const snap = await adminDb.collection('truecaller_web_sessions').doc(requestId).get();
+      const snap = await adminDb.collection('truecaller_web_sessions').doc(cleanId).get();
       if (snap.exists) {
         const firestoreData = snap.data() as TruecallerWebSession;
         if (firestoreData.expiresAt && firestoreData.expiresAt >= Date.now()) {
-          this.webSessions.set(requestId, firestoreData);
+          this.webSessions.set(cleanId, firestoreData);
           return firestoreData;
         }
       }
@@ -288,14 +295,15 @@ export class TruecallerProvider implements PhoneVerificationProvider {
     payloadOrOptions: any,
     signature?: string
   ): Promise<VerificationResult> {
-    let session = await this.getWebSession(requestId);
+    const cleanId = (requestId || '').trim();
+    let session = await this.getWebSession(cleanId);
     if (!session) {
       // Retry after 350ms to handle Firestore eventual consistency / replication
       await new Promise(r => setTimeout(r, 350));
-      session = await this.getWebSession(requestId);
+      session = await this.getWebSession(cleanId);
     }
     if (!session) {
-      console.warn(`[Truecaller Callback] Session ${requestId} not found in memory or Firestore.`);
+      console.warn(`[Truecaller Callback] Session ${cleanId} not found in memory or Firestore.`);
       return { success: false, error: 'Session not found or expired.' };
     }
 
@@ -305,7 +313,7 @@ export class TruecallerProvider implements PhoneVerificationProvider {
 
     if (accessToken && endpoint) {
       try {
-        console.log(`[Truecaller Callback] Fetching profile from ${endpoint} for request ${requestId}`);
+        console.log(`[Truecaller Callback] Fetching profile from ${endpoint} for request ${cleanId}`);
         const response = await axios.get(endpoint, {
           headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -319,11 +327,16 @@ export class TruecallerProvider implements PhoneVerificationProvider {
           throw new Error('Empty profile response from Truecaller API.');
         }
 
+        const profileData = profile?.data || profile?.profile || profile;
+
         // Parse phone number from various Truecaller response formats
         const rawPhone = (
+          (Array.isArray(profileData.phoneNumbers) && profileData.phoneNumbers[0]) ||
           (Array.isArray(profile.phoneNumbers) && profile.phoneNumbers[0]) ||
-          profile.phone_number ||
+          profileData.phoneNumber ||
+          profileData.phone_number ||
           profile.phoneNumber ||
+          profile.phone_number ||
           ''
         ).toString();
 
@@ -339,8 +352,8 @@ export class TruecallerProvider implements PhoneVerificationProvider {
           if (formattedPhone !== normalizedExpected) {
             session.status = 'FAILED';
             session.error = `The verified phone number (${formattedPhone}) does not match expected account number (${normalizedExpected}).`;
-            this.webSessions.set(requestId, session);
-            await adminDb.collection('truecaller_web_sessions').doc(requestId).set({ ...session, updatedAt: Date.now() }).catch(() => {});
+            this.webSessions.set(cleanId, session);
+            await adminDb.collection('truecaller_web_sessions').doc(cleanId).set({ ...session, updatedAt: Date.now() }).catch(() => {});
             return {
               success: false,
               error: session.error
@@ -348,10 +361,10 @@ export class TruecallerProvider implements PhoneVerificationProvider {
           }
         }
 
-        const firstName = profile.firstName || profile.given_name || '';
-        const lastName = profile.lastName || profile.family_name || '';
-        const name = (profile.name || `${firstName} ${lastName}`.trim()) || 'Truecaller User';
-        const country = profile.phone_number_country_code || (Array.isArray(profile.addresses) && profile.addresses[0]?.countryCode) || profile.countryCode || 'IN';
+        const firstName = profileData.firstName || profileData.given_name || profile.firstName || profile.given_name || '';
+        const lastName = profileData.lastName || profileData.family_name || profile.lastName || profile.family_name || '';
+        const name = (profileData.name || profile.name || `${firstName} ${lastName}`.trim()) || 'Truecaller User';
+        const country = profileData.phone_number_country_code || profileData.countryCode || (Array.isArray(profileData.addresses) && profileData.addresses[0]?.countryCode) || profile.countryCode || 'IN';
         const now = Date.now();
 
         session.status = 'VERIFIED';
@@ -370,9 +383,9 @@ export class TruecallerProvider implements PhoneVerificationProvider {
           console.warn('[Truecaller Callback] Custom token creation notice:', tokenErr?.message);
         }
 
-        this.webSessions.set(requestId, session);
+        this.webSessions.set(cleanId, session);
 
-        await adminDb.collection('truecaller_web_sessions').doc(requestId).set({
+        await adminDb.collection('truecaller_web_sessions').doc(cleanId).set({
           ...session,
           updatedAt: now
         }).catch(err => {

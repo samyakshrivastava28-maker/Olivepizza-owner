@@ -50,11 +50,12 @@ router.post('/truecaller/session', authLimiter, authenticateUser, async (req: Re
       }
     }
 
-    const session = truecaller.createWebSession(expectedPhone, uid);
+    const session = await truecaller.createWebSession(expectedPhone, uid);
     return res.json({
       success: true,
       requestId: session.requestId,
       deepLink: session.deepLink,
+      bridgeUrl: session.bridgeUrl,
       expiresAt: session.expiresAt
     });
   } catch (error: any) {
@@ -65,6 +66,92 @@ router.post('/truecaller/session', authLimiter, authenticateUser, async (req: Re
       error: 'Failed to create Truecaller verification session.'
     });
   }
+});
+
+// Mobile QR Bridge: When any smartphone camera scans the desktop QR code,
+// this webpage opens and immediately triggers the Truecaller deep link.
+router.get(['/truecaller/bridge', '/bridge'], async (req: Request, res: Response) => {
+  const requestId = (req.query?.requestId as string)?.trim();
+  if (!requestId) {
+    return res.status(400).send('<h3>Invalid Request: Missing verification requestId.</h3>');
+  }
+
+  const session = await truecaller.getWebSession(requestId);
+  if (!session) {
+    return res.status(404).send('<h3>Session Expired: Please generate a new QR code on Olive Pizza.</h3>');
+  }
+
+  const deepLink = session.deepLink || `truecallersdk://truesdk/web_verify?requestNonce=${requestId}&partnerKey=${encodeURIComponent(truecaller.getClientId())}&partnerName=Olive%20Pizza&lang=en&title=Verify%20Number`;
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Verify with Truecaller — Olive Pizza</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: #0f172a; color: #f8fafc; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 20px; padding: 32px 24px; max-width: 420px; width: 100%; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); }
+    .logo { width: 64px; height: 64px; margin-bottom: 16px; border-radius: 16px; }
+    h1 { font-size: 22px; font-weight: 800; margin-bottom: 8px; color: #fff; }
+    p { font-size: 14px; color: #94a3b8; line-height: 1.5; margin-bottom: 24px; }
+    .btn { display: block; width: 100%; background: #0087ff; color: #fff; font-weight: 700; font-size: 16px; padding: 14px 20px; border-radius: 12px; text-decoration: none; border: none; cursor: pointer; transition: background 0.2s; box-shadow: 0 4px 14px rgba(0,135,255,0.4); margin-bottom: 12px; }
+    .btn:hover { background: #0070d6; }
+    .btn-secondary { background: #334155; color: #cbd5e1; box-shadow: none; }
+    .status-box { margin-top: 16px; padding: 12px; border-radius: 8px; font-size: 13px; background: rgba(51,65,85,0.5); }
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; vertical-align: middle; margin-right: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .verified-badge { color: #10b981; font-weight: 700; display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div style="font-size: 44px; margin-bottom: 12px;">🍕</div>
+    <h1>Olive Pizza Verification</h1>
+    <p>Opening Truecaller to verify your mobile number securely...</p>
+
+    <a id="tcLink" href="${deepLink}" class="btn">
+      Open Truecaller App
+    </a>
+
+    <div class="status-box" id="statusBox">
+      <span class="spinner" id="spinner"></span>
+      <span id="statusText">Waiting for verification...</span>
+      <span class="verified-badge" id="verifiedText">✅ Verified! You can return to your computer.</span>
+    </div>
+  </div>
+
+  <script>
+    const deepLink = ${JSON.stringify(deepLink)};
+    const requestId = ${JSON.stringify(requestId)};
+
+    // Auto-trigger deep link intent
+    try {
+      window.location.href = deepLink;
+    } catch (e) {}
+
+    // Poll status every 1.5s
+    const pollTimer = setInterval(async () => {
+      try {
+        const res = await fetch('/api/phone/truecaller/session/' + requestId);
+        const data = await res.json();
+        if (data.status === 'VERIFIED') {
+          clearInterval(pollTimer);
+          document.getElementById('spinner').style.display = 'none';
+          document.getElementById('statusText').style.display = 'none';
+          document.getElementById('verifiedText').style.display = 'inline';
+          document.getElementById('tcLink').style.background = '#10b981';
+          document.getElementById('tcLink').textContent = '✅ Verified Successfully';
+        }
+      } catch (err) {}
+    }, 1500);
+  </script>
+</body>
+</html>`;
+
+  res.setHeader('Content-Type', 'text/html');
+  return res.send(html);
 });
 
 router.get('/truecaller/session/:requestId', async (req: Request, res: Response) => {
@@ -106,7 +193,7 @@ router.get('/truecaller/session/:requestId', async (req: Request, res: Response)
 });
 
 // Probe / Health verification endpoint for Truecaller Developer Portal
-router.get('/truecaller/callback', (req: Request, res: Response) => {
+router.get(['/truecaller/callback', '/callback'], (_req: Request, res: Response) => {
   return res.json({
     success: true,
     message: 'Truecaller webhook callback endpoint is active and listening.'
@@ -114,11 +201,30 @@ router.get('/truecaller/callback', (req: Request, res: Response) => {
 });
 
 // Webhook callback called by Truecaller cloud when user completes web verification on mobile
-router.post('/truecaller/callback', async (req: Request, res: Response) => {
+const handleTruecallerWebhook = async (req: Request, res: Response) => {
   try {
-    const requestId = req.body?.requestId || req.body?.requestNonce || (req.query?.requestId as string) || (req.query?.requestNonce as string);
-    const accessToken = req.body?.accessToken || req.body?.access_token || (req.query?.accessToken as string) || (req.query?.access_token as string);
-    const rawEndpoint = req.body?.endpoint || req.body?.profileEndpoint || (req.query?.endpoint as string) || (req.query?.profileEndpoint as string);
+    const requestId = (
+      req.body?.requestId ||
+      req.body?.requestNonce ||
+      req.query?.requestId ||
+      req.query?.requestNonce ||
+      req.params?.requestId
+    )?.toString().trim();
+
+    const accessToken = (
+      req.body?.accessToken ||
+      req.body?.access_token ||
+      req.query?.accessToken ||
+      req.query?.access_token
+    )?.toString().trim();
+
+    const rawEndpoint = (
+      req.body?.endpoint ||
+      req.body?.profileEndpoint ||
+      req.query?.endpoint ||
+      req.query?.profileEndpoint
+    )?.toString().trim();
+
     const endpoint = rawEndpoint || 'https://profile4-noneu.truecaller.com/v1/default';
     const payload = req.body?.payload || req.query?.payload;
     const signature = req.body?.signature || req.query?.signature;
@@ -146,7 +252,9 @@ router.post('/truecaller/callback', async (req: Request, res: Response) => {
     console.error('[Truecaller Webhook] Exception processing callback:', error);
     return res.status(500).json({ success: false, error: error.message || 'Callback verification failed.' });
   }
-});
+};
+
+router.post(['/truecaller/callback', '/callback'], handleTruecallerWebhook);
 
 router.use(authenticateUser);
 

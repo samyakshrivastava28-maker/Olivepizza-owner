@@ -1,12 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ShieldCheck, X, RefreshCw, Smartphone, ExternalLink, CheckCircle2 } from 'lucide-react';
+import { db } from '../../lib/firebase';
+import { doc, onSnapshot } from 'firebase/firestore';
 import { TruecallerService, TruecallerSessionStatusResponse } from '../../plugins/Truecaller';
 
 interface TruecallerQRModalProps {
   isOpen: boolean;
   onClose: () => void;
   deepLink: string;
+  bridgeUrl?: string;
   requestId: string;
   onSuccess: (status: TruecallerSessionStatusResponse) => void;
   onError: (errorMsg: string) => void;
@@ -16,19 +19,50 @@ export default function TruecallerQRModal({
   isOpen,
   onClose,
   deepLink,
+  bridgeUrl,
   requestId,
   onSuccess,
   onError
 }: TruecallerQRModalProps) {
   const [polling, setPolling] = useState(true);
   const [verified, setVerified] = useState(false);
+  const [checkingNow, setCheckingNow] = useState(false);
 
   useEffect(() => {
     if (!isOpen || !requestId) return;
 
     let pollInterval: ReturnType<typeof setTimeout>;
+    let unsubscribeFirestore: (() => void) | null = null;
     let isMounted = true;
 
+    // 1. Instant Realtime Firestore Listener
+    try {
+      const sessionDocRef = doc(db, 'truecaller_web_sessions', requestId);
+      unsubscribeFirestore = onSnapshot(sessionDocRef, (snap) => {
+        if (!isMounted || !snap.exists()) return;
+        const data = snap.data();
+        if (data.status === 'VERIFIED') {
+          setVerified(true);
+          setTimeout(() => {
+            onSuccess({
+              status: 'VERIFIED',
+              phone: data.phone,
+              profile: data.profile,
+              customToken: data.customToken,
+              userId: data.userId
+            });
+          }, 600);
+        } else if (data.status === 'FAILED') {
+          onError(data.error || 'Truecaller verification failed.');
+        }
+      }, (err) => {
+        console.warn('Realtime listener fallback to polling:', err.message);
+      });
+    } catch (e) {
+      console.warn('Could not initialize firestore listener, falling back to polling:', e);
+    }
+
+    // 2. Continuous Background Polling
     const startPolling = () => {
       pollInterval = setInterval(async () => {
         try {
@@ -37,18 +71,20 @@ export default function TruecallerQRModal({
 
           if (res.status === 'VERIFIED') {
             clearInterval(pollInterval);
+            if (unsubscribeFirestore) unsubscribeFirestore();
             setVerified(true);
             setTimeout(() => {
               onSuccess(res);
-            }, 800);
+            }, 600);
           } else if (res.status === 'FAILED') {
             clearInterval(pollInterval);
+            if (unsubscribeFirestore) unsubscribeFirestore();
             onError(res.error || 'Truecaller verification failed.');
           }
         } catch {
           // Keep polling until expiry
         }
-      }, 2500);
+      }, 2000);
     };
 
     startPolling();
@@ -56,14 +92,33 @@ export default function TruecallerQRModal({
     return () => {
       isMounted = false;
       clearInterval(pollInterval);
+      if (unsubscribeFirestore) unsubscribeFirestore();
     };
   }, [isOpen, requestId, onSuccess, onError]);
 
+  const handleManualCheck = async () => {
+    setCheckingNow(true);
+    try {
+      const res = await TruecallerService.pollWebSession(requestId);
+      if (res.status === 'VERIFIED') {
+        setVerified(true);
+        setTimeout(() => {
+          onSuccess(res);
+        }, 500);
+      }
+    } catch (e) {
+      // Ignored
+    } finally {
+      setTimeout(() => setCheckingNow(false), 1000);
+    }
+  };
+
   if (!isOpen) return null;
 
-  const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(
-    deepLink
-  )}&format=svg`;
+  const targetUrl = bridgeUrl || deepLink;
+  const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=${encodeURIComponent(
+    targetUrl
+  )}&format=svg&qzone=1`;
 
   return (
     <AnimatePresence>
@@ -91,7 +146,7 @@ export default function TruecallerQRModal({
               Verify with Truecaller
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Scan this QR code using the <strong>Truecaller App</strong> or camera on your phone to verify instantly.
+              Scan with <strong>Truecaller</strong>, Google Lens, or your phone's camera, then tap <strong>Continue</strong>.
             </p>
           </div>
 
@@ -123,9 +178,20 @@ export default function TruecallerQRModal({
                   />
                 </div>
 
-                <div className="mt-4 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#0052CC]" />
-                  <span>Waiting for scan & consent...</span>
+                <div className="mt-4 flex flex-col items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className={`w-3.5 h-3.5 ${checkingNow ? 'animate-spin text-emerald-500' : 'animate-spin text-[#0052CC]'}`} />
+                    <span>{checkingNow ? 'Verifying with Truecaller...' : 'Waiting for phone confirmation...'}</span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleManualCheck}
+                    disabled={checkingNow}
+                    className="mt-1 text-xs text-[#0052CC] hover:underline font-medium cursor-pointer"
+                  >
+                    I have tapped Continue on my phone
+                  </button>
                 </div>
               </>
             )}
@@ -134,11 +200,13 @@ export default function TruecallerQRModal({
           {/* Mobile Direct Action (if user is on mobile browser) */}
           <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 flex flex-col gap-2">
             <a
-              href={deepLink}
+              href={bridgeUrl || deepLink}
+              target="_blank"
+              rel="noopener noreferrer"
               className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs font-semibold text-[#0052CC] bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
             >
               <Smartphone className="w-4 h-4" />
-              <span>Tap to Open in Truecaller App</span>
+              <span>Tap to Open on Phone</span>
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
 
