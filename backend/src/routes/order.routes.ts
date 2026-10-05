@@ -752,20 +752,32 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       const qty = Math.max(1, Math.min(50, Math.floor(Number(item.quantity || 1))));
       let addonsCost = 0;
       const validatedAddons: any[] = [];
-      if (Array.isArray(item.addons)) {
+      if (Array.isArray(item.addons) && item.addons.length > 0) {
+        if (!Array.isArray(menuData.addons) || menuData.addons.length === 0) {
+          res.status(400).json({
+            error: `Addons are not supported for item "${itemName}".`,
+            code: 'UNKNOWN_ADDON_ID'
+          });
+          return;
+        }
         for (const addon of item.addons) {
           if (!addon) continue;
-          let addonPrice = Number(addon.price || 0);
-          if (Array.isArray(menuData.addons)) {
-            const authoritativeAddon = menuData.addons.find((a: any) => (a.id === addon.id || a.name === addon.name));
-            if (authoritativeAddon) {
-              addonPrice = Number(authoritativeAddon.price || 0);
-            }
+          const authoritativeAddon = menuData.addons.find((a: any) => (
+            (addon.id && a.id === addon.id) ||
+            (addon.name && a.name && a.name.toLowerCase().trim() === String(addon.name).toLowerCase().trim())
+          ));
+          if (!authoritativeAddon) {
+            res.status(400).json({
+              error: `Addon "${addon.name || addon.id}" is not available for item "${itemName}".`,
+              code: 'UNKNOWN_ADDON_ID'
+            });
+            return;
           }
+          const addonPrice = Number(authoritativeAddon.price || 0);
           addonsCost += addonPrice;
           validatedAddons.push({
-            id: addon.id || addon.name,
-            name: addon.name,
+            id: authoritativeAddon.id || addon.id || addon.name,
+            name: authoritativeAddon.name || addon.name,
             price: addonPrice
           });
         }

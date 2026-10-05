@@ -527,8 +527,25 @@ router.post('/accounts/approve', async (req: AuthRequest, res: Response) => {
       targetApp === 'DELIVERY' ? 'delivery_partner' : 'restaurant_manager'
     );
 
-    const effectiveFranchiseId = franchiseId || existingData.franchiseId || null;
-    const effectiveBranchId = branchId || existingData.branchId || null;
+    const effectiveFranchiseId = franchiseId || existingData.franchiseId || 'fra_rajnandgaon';
+    const effectiveBranchId = branchId || existingData.branchId || 'main_branch';
+
+    const resolvedApp = targetApp || (
+      resolvedRole === 'restaurant_manager' ? 'RESTAURANT_MANAGER' :
+      resolvedRole === 'pos_operator' ? 'POS' :
+      resolvedRole === 'franchise_manager' ? 'FRANCHISE_MANAGER' :
+      resolvedRole === 'delivery_partner' ? 'DELIVERY' : ''
+    );
+
+    const allowedApps = Array.isArray(existingData.allowedApps) ? [...existingData.allowedApps] : [];
+    if (resolvedApp && !allowedApps.includes(resolvedApp)) {
+      allowedApps.push(resolvedApp);
+    }
+    const appAccess = { ...(existingData.applicationAccess || {}) };
+    if (resolvedApp === 'RESTAURANT_MANAGER') appAccess.app_restaurant_management = true;
+    if (resolvedApp === 'POS') appAccess.app_pos = true;
+    if (resolvedApp === 'FRANCHISE_MANAGER') appAccess.app_franchise_management = true;
+    if (resolvedApp === 'DELIVERY') appAccess.app_delivery = true;
 
     const updatePayload: Record<string, any> = {
       role: resolvedRole,
@@ -539,7 +556,9 @@ router.post('/accounts/approve', async (req: AuthRequest, res: Response) => {
       approvedByEmail: req.user?.email || 'owner@olivepizza.in',
       updatedAt: now,
       franchiseId: effectiveFranchiseId,
-      branchId: effectiveBranchId
+      branchId: effectiveBranchId,
+      allowedApps,
+      applicationAccess: appAccess
     };
 
     if (permissions && Array.isArray(permissions)) {
@@ -559,12 +578,6 @@ router.post('/accounts/approve', async (req: AuthRequest, res: Response) => {
     }
 
     // 2. Update specific operational collection
-    const resolvedApp = targetApp || (
-      resolvedRole === 'restaurant_manager' ? 'RESTAURANT_MANAGER' :
-      resolvedRole === 'pos_operator' ? 'POS' :
-      resolvedRole === 'franchise_manager' ? 'FRANCHISE_MANAGER' :
-      resolvedRole === 'delivery_partner' ? 'DELIVERY' : ''
-    );
 
     if (resolvedApp === 'RESTAURANT_MANAGER') {
       if (uid) await adminDb.collection('restaurant_managers').doc(uid).set(updatePayload, { merge: true });

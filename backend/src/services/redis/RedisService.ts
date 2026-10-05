@@ -20,43 +20,59 @@ class RedisService {
     this.initClient();
   }
 
+  public normalizeKey(key: string): string {
+    return key.startsWith('olive:') ? key : `olive:${key}`;
+  }
+
   private initClient() {
     const redisUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL;
+    const redisHost = process.env.REDIS_HOST;
     
-    if (!redisUrl && process.env.NODE_ENV === 'test') {
-      console.log('[RedisService] No REDIS_URL provided in test environment — operating in resilient fallback mode.');
+    if (!redisUrl && !redisHost && process.env.NODE_ENV === 'test') {
+      console.log('[RedisService] No Redis configuration in test environment — operating in resilient fallback mode.');
       return;
     }
 
     try {
       this.connectAttempted = true;
-      const url = redisUrl || 'redis://localhost:6379';
-      this.client = new Redis(url, {
+      const commonOptions = {
         maxRetriesPerRequest: 1,
-        connectTimeout: 3000,
-        enableOfflineQueue: false,
-        retryStrategy: (times) => {
+        connectTimeout: 5000,
+        enableOfflineQueue: true,
+        retryStrategy: (times: number) => {
           if (times > 3) {
             return null; // Stop retrying after 3 attempts, degrade gracefully
           }
           return Math.min(times * 1000, 3000);
         }
-      });
+      };
+
+      if (redisHost) {
+        this.client = new Redis({
+          host: redisHost,
+          port: Number(process.env.REDIS_PORT || 6379),
+          username: process.env.REDIS_USERNAME || 'default',
+          password: process.env.REDIS_PASSWORD,
+          ...commonOptions
+        });
+      } else {
+        const url = redisUrl || 'redis://localhost:6379';
+        this.client = new Redis(url, commonOptions);
+      }
 
       this.client.on('connect', () => {
-        this.isConnected = true;
-        console.log('[RedisService] ✅ Connected to Redis server.');
+        // Socket connected, awaiting authentication and ready handshake
       });
 
       this.client.on('ready', () => {
         this.isConnected = true;
+        console.log('[RedisService] ✅ Connected and ready.');
       });
 
       this.client.on('error', (err) => {
         this.isConnected = false;
         // Do not spam console if Redis is simply not present locally
         if ((err as any).code === 'ECONNREFUSED' || (err as any).code === 'ENOTFOUND') {
-          // Log only once
           if (this.connectAttempted) {
             console.warn('[RedisService] ⚠️ Redis unavailable. Graceful fallback to Firestore active.');
             this.connectAttempted = false;
@@ -87,6 +103,17 @@ class RedisService {
     return this.client;
   }
 
+  public async waitForReady(timeoutMs = 5000): Promise<boolean> {
+    if (this.isConnected) return true;
+    if (!this.client) return false;
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (this.isConnected) return true;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return this.isConnected;
+  }
+
   public async ping(): Promise<boolean> {
     if (!this.client) return false;
     try {
@@ -98,40 +125,79 @@ class RedisService {
   }
 
   /**
-   * Generic get cache with TTL
+   * Generic get cache with TTL and namespace enforcement
    */
   public async get<T>(key: string): Promise<T | null> {
     if (!this.isConnected || !this.client) return null;
     try {
-      const data = await this.client.get(key);
+      const namespacedKey = this.normalizeKey(key);
+      const data = await this.client.get(namespacedKey);
       if (!data) return null;
-      return JSON.parse(data) as T;
+      try {
+        return JSON.parse(data) as T;
+      } catch {
+        return data as unknown as T;
+      }
     } catch {
       return null;
     }
   }
 
   /**
-   * Generic set cache with TTL in seconds
+   * Generic set cache with enforced TTL and memory protection (Max TTL 24h)
    */
   public async set(key: string, value: any, ttlSeconds = 300): Promise<void> {
     if (!this.isConnected || !this.client) return;
     try {
-      await this.client.set(key, JSON.stringify(value), 'EX', ttlSeconds);
+      const namespacedKey = this.normalizeKey(key);
+      const safeTtl = Math.max(1, Math.min(ttlSeconds, 86400));
+      await this.client.set(namespacedKey, JSON.stringify(value), 'EX', safeTtl);
     } catch {
       // Non-fatal cache write error
     }
   }
 
   /**
-   * Generic delete cache
+   * Generic delete cache with namespace enforcement
    */
   public async del(key: string): Promise<void> {
     if (!this.isConnected || !this.client) return;
     try {
-      await this.client.del(key);
+      const namespacedKey = this.normalizeKey(key);
+      await this.client.del(namespacedKey);
     } catch {
       // Non-fatal
+    }
+  }
+
+  /**
+   * Distributed Order & Payment Idempotency Guard
+   * Strictly fail-closed to prevent duplicate financial execution
+   */
+  public async checkAndSetIdempotency(key: string, ttlSeconds = 60): Promise<boolean> {
+    const lockKey = `idempotency:${key}`;
+    return this.acquireLock(lockKey, ttlSeconds, true);
+  }
+
+  /**
+   * Distributed Atomic Rate Limiter
+   */
+  public async checkRateLimit(key: string, limit: number, windowSeconds: number): Promise<{ allowed: boolean; remaining: number }> {
+    if (!this.isConnected || !this.client) {
+      return { allowed: true, remaining: limit };
+    }
+    try {
+      const namespacedKey = this.normalizeKey(`rate:${key}`);
+      const current = await this.client.incr(namespacedKey);
+      if (current === 1) {
+        await this.client.expire(namespacedKey, windowSeconds);
+      }
+      return {
+        allowed: current <= limit,
+        remaining: Math.max(0, limit - current)
+      };
+    } catch {
+      return { allowed: true, remaining: limit };
     }
   }
 
@@ -322,7 +388,8 @@ class RedisService {
       return true;
     }
     try {
-      const result = await this.client.set(`lock:${lockKey}`, '1', 'EX', ttlSeconds, 'NX');
+      const namespacedKey = this.normalizeKey(`lock:${lockKey}`);
+      const result = await this.client.set(namespacedKey, '1', 'EX', ttlSeconds, 'NX');
       return result === 'OK';
     } catch (err: any) {
       if (failClosed) {
@@ -337,16 +404,40 @@ class RedisService {
     await this.del(`lock:${lockKey}`);
   }
 
+  public isAvailable(): boolean {
+    return this.isConnected && Boolean(this.client);
+  }
+
+  public static isAvailable(): boolean {
+    return redisService.isAvailable();
+  }
+
+  public static async get(key: string): Promise<string | null> {
+    return redisService.get(key);
+  }
+
+  public static async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
+    return redisService.set(key, value, ttlSeconds);
+  }
+
+  public static async checkAndSetIdempotency(key: string, ttlSeconds?: number): Promise<boolean> {
+    return redisService.checkAndSetIdempotency(key, ttlSeconds);
+  }
+
+  public static async waitForReady(timeoutMs = 5000): Promise<boolean> {
+    return redisService.waitForReady(timeoutMs);
+  }
+
   public async disconnect(): Promise<void> {
     try {
-      await this.client.quit();
+      await this.client?.quit();
     } catch {
       try {
-        this.client.disconnect();
+        this.client?.disconnect();
       } catch {}
     }
   }
 }
 
-export { RedisService };
 export const redisService = new RedisService();
+export { RedisService };

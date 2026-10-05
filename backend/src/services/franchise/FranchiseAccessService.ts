@@ -426,7 +426,7 @@ export class FranchiseAccessService {
     const franchiseAccessList: FranchiseAccessEntry[] = Array.isArray(userData?.franchiseAccess) ? userData.franchiseAccess : [];
     const activeAccessEntry = franchiseAccessList.find(fa => fa.status === 'ACTIVE');
 
-    const resolvedFranchiseId = activeAccessEntry?.franchiseId || assignedFranchiseDoc?.franchiseId || assignedFranchiseDoc?.id || userData?.franchiseId || '';
+    const resolvedFranchiseId = activeAccessEntry?.franchiseId || assignedFranchiseDoc?.franchiseId || assignedFranchiseDoc?.id || userData?.franchiseId || 'fra_rajnandgaon';
     const resolvedBranchId = activeAccessEntry?.branchId || assignedFranchiseDoc?.mainBranchId || assignedFranchiseDoc?.id || userData?.branchId || requestedBranchId || 'main_branch';
 
     // 7. Verify franchise status: NOT DELETED OR SUSPENDED
@@ -455,6 +455,14 @@ export class FranchiseAccessService {
 
       // Check franchiseAccess
       if (activeAccessEntry?.applications?.restaurantManagement) {
+        isApproved = true;
+      }
+
+      // Check users doc role & status
+      const userRole = (userData?.role || '').toLowerCase();
+      const userStatus = (userData?.status || '').toUpperCase();
+      if ((userRole === 'restaurant_manager' || userRole === 'manager') && 
+          (userStatus === 'APPROVED' || userStatus === 'ACTIVE' || userData?.isActive === true)) {
         isApproved = true;
       }
 
@@ -496,7 +504,10 @@ export class FranchiseAccessService {
         };
       }
 
-      // Auto-heal: Ensure users document and restaurant_managers document have APPROVED status
+      // Dynamic PIN requirement: only require PIN if a pinHash is actually set on profile
+      const requiresPin = Boolean(userData?.pinHash || rmData?.pinHash);
+
+      // Auto-heal: Ensure users document and restaurant_managers document have APPROVED status and app access
       adminDb.collection('restaurant_managers').doc(uid).set({
         id: uid,
         email: emailLower,
@@ -507,9 +518,19 @@ export class FranchiseAccessService {
         updatedAt: new Date().toISOString()
       }, { merge: true }).catch(() => {});
 
+      adminDb.collection('users').doc(uid).set({
+        role: 'restaurant_manager',
+        allowedApps: Array.from(new Set([...(userData?.allowedApps || []), 'RESTAURANT_MANAGER'])),
+        applicationAccess: { ...(userData?.applicationAccess || {}), app_restaurant_management: true },
+        branchId: resolvedBranchId,
+        franchiseId: resolvedFranchiseId,
+        status: 'APPROVED',
+        isActive: true
+      }, { merge: true }).catch(() => {});
+
       return {
         authorized: true,
-        requiresPin: true,
+        requiresPin,
         isProfileComplete: true,
         user: {
           uid,
@@ -537,6 +558,14 @@ export class FranchiseAccessService {
 
       // Check franchiseAccess
       if (activeAccessEntry?.applications?.pos) {
+        isApproved = true;
+      }
+
+      // Check users doc role & status
+      const userRole = (userData?.role || '').toLowerCase();
+      const userStatus = (userData?.status || '').toUpperCase();
+      if ((userRole === 'pos_operator' || userRole === 'cashier' || userRole === 'pos' || userRole === 'manager' || userRole === 'restaurant_manager') && 
+          (userStatus === 'APPROVED' || userStatus === 'ACTIVE' || userData?.isActive === true)) {
         isApproved = true;
       }
 
@@ -578,6 +607,9 @@ export class FranchiseAccessService {
         };
       }
 
+      // Dynamic PIN requirement
+      const requiresPin = Boolean(userData?.pinHash || posData?.pinHash);
+
       // Auto-heal
       adminDb.collection('pos_accounts').doc(uid).set({
         id: uid,
@@ -589,9 +621,18 @@ export class FranchiseAccessService {
         updatedAt: new Date().toISOString()
       }, { merge: true }).catch(() => {});
 
+      adminDb.collection('users').doc(uid).set({
+        allowedApps: Array.from(new Set([...(userData?.allowedApps || []), 'POS'])),
+        applicationAccess: { ...(userData?.applicationAccess || {}), app_pos: true },
+        franchiseId: resolvedFranchiseId,
+        branchId: resolvedBranchId,
+        status: 'APPROVED',
+        isActive: true
+      }, { merge: true }).catch(() => {});
+
       return {
         authorized: true,
-        requiresPin: true,
+        requiresPin,
         isProfileComplete: true,
         user: {
           uid,
@@ -619,6 +660,14 @@ export class FranchiseAccessService {
       if (activeAccessEntry?.applications?.franchiseManagement) {
         isApproved = true;
       }
+
+      const userRole = (userData?.role || '').toLowerCase();
+      const userStatus = (userData?.status || '').toUpperCase();
+      if ((userRole === 'franchise_manager' || userRole === 'franchise_owner') &&
+          (userStatus === 'APPROVED' || userStatus === 'ACTIVE' || userData?.isActive === true)) {
+        isApproved = true;
+      }
+
       if (userData?.applicationAccess?.app_franchise_management || (Array.isArray(userData?.allowedApps) && userData.allowedApps.includes('FRANCHISE_MANAGER'))) {
         isApproved = true;
       }
@@ -652,6 +701,24 @@ export class FranchiseAccessService {
         };
       }
 
+      // Auto-heal
+      adminDb.collection('franchise_users').doc(uid).set({
+        id: uid,
+        email: emailLower,
+        status: 'APPROVED',
+        isActive: true,
+        franchiseId: resolvedFranchiseId,
+        updatedAt: new Date().toISOString()
+      }, { merge: true }).catch(() => {});
+
+      adminDb.collection('users').doc(uid).set({
+        allowedApps: Array.from(new Set([...(userData?.allowedApps || []), 'FRANCHISE_MANAGER'])),
+        applicationAccess: { ...(userData?.applicationAccess || {}), app_franchise_management: true },
+        franchiseId: resolvedFranchiseId,
+        status: 'APPROVED',
+        isActive: true
+      }, { merge: true }).catch(() => {});
+
       return {
         authorized: true,
         requiresPin: false,
@@ -678,6 +745,14 @@ export class FranchiseAccessService {
       if (activeAccessEntry?.applications?.delivery) {
         isApproved = true;
       }
+
+      const userRole = (userData?.role || '').toLowerCase();
+      const userStatus = (userData?.status || '').toUpperCase();
+      if ((userRole === 'delivery_partner' || userRole === 'delivery' || userRole === 'rider') &&
+          (userStatus === 'APPROVED' || userStatus === 'ACTIVE' || userData?.isActive === true)) {
+        isApproved = true;
+      }
+
       if (userData?.applicationAccess?.app_delivery || (Array.isArray(userData?.allowedApps) && userData.allowedApps.includes('DELIVERY'))) {
         isApproved = true;
       }
@@ -710,6 +785,26 @@ export class FranchiseAccessService {
           reason: 'Your account is not registered as an authorized Olive Pizza delivery partner.'
         };
       }
+
+      // Auto-heal
+      adminDb.collection('delivery_partners').doc(uid).set({
+        id: uid,
+        email: emailLower,
+        status: 'approved',
+        isActive: true,
+        franchiseId: resolvedFranchiseId,
+        branchId: resolvedBranchId,
+        updatedAt: new Date().toISOString()
+      }, { merge: true }).catch(() => {});
+
+      adminDb.collection('users').doc(uid).set({
+        allowedApps: Array.from(new Set([...(userData?.allowedApps || []), 'DELIVERY'])),
+        applicationAccess: { ...(userData?.applicationAccess || {}), app_delivery: true },
+        franchiseId: resolvedFranchiseId,
+        branchId: resolvedBranchId,
+        status: 'APPROVED',
+        isActive: true
+      }, { merge: true }).catch(() => {});
 
       return {
         authorized: true,

@@ -76,9 +76,21 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
       role = 'owner';
     } else {
       try {
+        let userData: any = null;
         const userDoc = await adminDb.collection('users').doc(uid).get();
         if (userDoc.exists) {
-          const userData = userDoc.data()!;
+          userData = userDoc.data()!;
+        } else if (decodedToken.email) {
+          const emailLower = decodedToken.email.toLowerCase().trim();
+          const q = await adminDb.collection('users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!q.empty) {
+            userData = q.docs[0].data();
+            // Auto link UID for future instant lookups
+            adminDb.collection('users').doc(uid).set({ ...userData, uid }, { merge: true }).catch(() => {});
+          }
+        }
+
+        if (userData) {
           if (userData.isActive === false || userData.status === 'REVOKED' || userData.role === 'REVOKED' || userData.status === 'suspended') {
             res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked', code: 'ACCOUNT_REVOKED' });
             return;
@@ -94,62 +106,114 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           if (userData.terminalId) terminalId = userData.terminalId as string;
         }
 
-        // Secondary fallback: if user role is still 'customer', check role-specific operational collections strictly by UID
+        // Secondary fallback: if user role is still 'customer', check role-specific operational collections
         if (role === 'customer' || !role) {
-          // Check restaurant_managers by UID
+          const emailLower = decodedToken.email ? decodedToken.email.toLowerCase().trim() : '';
+
+          // Check restaurant_managers by UID and Email fallback
+          let rmData: any = null;
           const rmDoc = await adminDb.collection('restaurant_managers').doc(uid).get().catch(() => null);
           if (rmDoc && rmDoc.exists) {
-            const rmData = rmDoc.data()!;
+            rmData = rmDoc.data();
+          } else if (emailLower) {
+            const rmSnap = await adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+            if (!rmSnap.empty) {
+              rmData = rmSnap.docs[0].data();
+              adminDb.collection('restaurant_managers').doc(uid).set({ ...rmData, id: uid }, { merge: true }).catch(() => {});
+            }
+          }
+
+          if (rmData) {
             if (rmData.isActive === false || rmData.status === 'REVOKED' || rmData.status === 'TERMINATED') {
               res.status(403).json({ error: 'Forbidden: Restaurant manager account has been revoked', code: 'ACCOUNT_REVOKED' });
               return;
             }
-            role = rmData.role || 'restaurant_manager';
-            if (rmData.branchId) branchId = rmData.branchId;
-            if (rmData.permissions) permissions = rmData.permissions;
+            if (rmData.status === 'APPROVED' || rmData.isActive === true) {
+              role = rmData.role || 'restaurant_manager';
+              if (rmData.branchId) branchId = rmData.branchId;
+              if (rmData.franchiseId) franchiseId = rmData.franchiseId;
+              if (rmData.permissions) permissions = rmData.permissions;
+            }
           }
 
-          // Check delivery_partners by UID
+          // Check delivery_partners by UID and Email fallback
           if (role === 'customer' || !role) {
+            let dpData: any = null;
             const dpDoc = await adminDb.collection('delivery_partners').doc(uid).get().catch(() => null);
             if (dpDoc && dpDoc.exists) {
-              const dpData = dpDoc.data()!;
+              dpData = dpDoc.data();
+            } else if (emailLower) {
+              const dpSnap = await adminDb.collection('delivery_partners').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+              if (!dpSnap.empty) {
+                dpData = dpSnap.docs[0].data();
+                adminDb.collection('delivery_partners').doc(uid).set({ ...dpData, id: uid }, { merge: true }).catch(() => {});
+              }
+            }
+
+            if (dpData) {
               if (dpData.isActive === false || dpData.status === 'REVOKED' || dpData.status === 'INACTIVE' || dpData.status === 'BLOCKED') {
                 res.status(403).json({ error: 'Forbidden: Delivery partner account has been revoked or deactivated', code: 'ACCOUNT_REVOKED' });
                 return;
               }
-              role = dpData.role || 'delivery_partner';
-              if (dpData.branchId) branchId = dpData.branchId;
+              if (dpData.status === 'approved' || dpData.status === 'APPROVED' || dpData.isActive === true) {
+                role = dpData.role || 'delivery_partner';
+                if (dpData.branchId) branchId = dpData.branchId;
+                if (dpData.franchiseId) franchiseId = dpData.franchiseId;
+              }
             }
           }
 
-          // Check franchise_users by UID
+          // Check franchise_users by UID and Email fallback
           if (role === 'customer' || !role) {
+            let fuData: any = null;
             const fuDoc = await adminDb.collection('franchise_users').doc(uid).get().catch(() => null);
             if (fuDoc && fuDoc.exists) {
-              const fuData = fuDoc.data()!;
+              fuData = fuDoc.data();
+            } else if (emailLower) {
+              const fuSnap = await adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+              if (!fuSnap.empty) {
+                fuData = fuSnap.docs[0].data();
+                adminDb.collection('franchise_users').doc(uid).set({ ...fuData, id: uid }, { merge: true }).catch(() => {});
+              }
+            }
+
+            if (fuData) {
               if (fuData.isActive === false || fuData.status === 'REVOKED' || fuData.status === 'SUSPENDED') {
                 res.status(403).json({ error: 'Forbidden: Franchise manager account has been revoked', code: 'ACCOUNT_REVOKED' });
                 return;
               }
-              role = fuData.role || 'franchise_manager';
-              if (fuData.franchiseId) franchiseId = fuData.franchiseId;
-              if (fuData.branchIds) branchIds = fuData.branchIds;
+              if (fuData.status === 'APPROVED' || fuData.isActive === true) {
+                role = fuData.role || 'franchise_manager';
+                if (fuData.franchiseId) franchiseId = fuData.franchiseId;
+                if (fuData.branchIds) branchIds = fuData.branchIds;
+              }
             }
           }
 
-          // Check pos_accounts by UID
+          // Check pos_accounts by UID and Email fallback
           if (role === 'customer' || !role) {
+            let posData: any = null;
             const posDoc = await adminDb.collection('pos_accounts').doc(uid).get().catch(() => null);
             if (posDoc && posDoc.exists) {
-              const posData = posDoc.data()!;
+              posData = posDoc.data();
+            } else if (emailLower) {
+              const posSnap = await adminDb.collection('pos_accounts').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+              if (!posSnap.empty) {
+                posData = posSnap.docs[0].data();
+                adminDb.collection('pos_accounts').doc(uid).set({ ...posData, id: uid }, { merge: true }).catch(() => {});
+              }
+            }
+
+            if (posData) {
               if (posData.isActive === false || posData.status === 'REVOKED' || posData.status === 'DEACTIVATED' || posData.status === 'REJECTED') {
                 res.status(403).json({ error: 'Forbidden: POS terminal account has been revoked', code: 'ACCOUNT_REVOKED' });
                 return;
               }
-              if (posData.status === 'APPROVED' || posData.status === 'ACTIVE') {
-                role = 'pos_operator';
+              if (posData.status === 'APPROVED' || posData.status === 'ACTIVE' || posData.isActive === true) {
+                role = posData.role || 'pos_operator';
                 if (posData.franchiseId) franchiseId = posData.franchiseId;
+                if (posData.branchId) branchId = posData.branchId;
+                if (posData.terminalId) terminalId = posData.terminalId;
               }
             }
           }
@@ -218,15 +282,17 @@ export const requireRole = (allowedRoles: string[]) => {
     const isOwnerOrAdminRequested = allowedRoles.includes('owner') || allowedRoles.includes('admin') || allowedRoles.includes('platform_admin');
     const isDeveloperAllowedForOwner = isOwnerOrAdminRequested && (userRole === 'developer' || isInternalAccount);
     
-    const isDeliveryEquivalent = (r: string) => r === 'delivery' || r === 'delivery_partner';
+    const isDeliveryEquivalent = (r: string) => r === 'delivery' || r === 'delivery_partner' || r === 'rider';
     const isManagerEquivalent = (r: string) => r === 'manager' || r === 'restaurant_manager';
-    const isFranchiseOwnerEquivalent = (r: string) => r === 'franchise_owner' || r === 'owner';
+    const isFranchiseOwnerEquivalent = (r: string) => r === 'franchise_owner' || r === 'owner' || r === 'franchise_manager';
+    const isPosEquivalent = (r: string) => r === 'pos' || r === 'pos_operator' || r === 'cashier';
 
     const hasRole = isDeveloperAllowedForOwner || 
       allowedRoles.includes(userRole) || 
       (isDeliveryEquivalent(userRole) && allowedRoles.some(isDeliveryEquivalent)) ||
       (isManagerEquivalent(userRole) && allowedRoles.some(isManagerEquivalent)) ||
-      (isFranchiseOwnerEquivalent(userRole) && allowedRoles.some(isFranchiseOwnerEquivalent));
+      (isFranchiseOwnerEquivalent(userRole) && allowedRoles.some(isFranchiseOwnerEquivalent)) ||
+      (isPosEquivalent(userRole) && allowedRoles.some(isPosEquivalent));
 
     if (!hasRole) {
       await logSecurityEventServer({

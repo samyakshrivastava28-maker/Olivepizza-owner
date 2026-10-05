@@ -1,6 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from './auth.middleware.js';
 import { adminDb } from '../config/firebase.js';
+import { RedisService } from '../services/redis/RedisService.js';
 
 interface CachedResponse {
   status: number;
@@ -42,6 +43,30 @@ export function idempotency(options: { ttlSeconds?: number } = {}) {
     const idempotencyKey = rawKey.trim();
     const userId = req.user?.uid || req.ip || 'anonymous';
     const compositeKey = `${userId}:${idempotencyKey}`;
+
+    // 0. Redis Fast Replay & Distributed Atomic Lock
+    if (RedisService.isAvailable()) {
+      try {
+        const cachedPayload = await RedisService.get(`idemp_res:${compositeKey}`);
+        if (cachedPayload) {
+          const parsed = JSON.parse(cachedPayload);
+          res.setHeader('X-Idempotent-Replay', 'true');
+          res.status(parsed.status).send(parsed.body);
+          return;
+        }
+
+        const acquired = await RedisService.checkAndSetIdempotency(`idemp_lock:${compositeKey}`, 120);
+        if (!acquired) {
+          res.status(409).json({
+            error: 'A request with this Idempotency-Key is currently being processed. Please wait.',
+            code: 'IDEMPOTENT_REQUEST_IN_FLIGHT'
+          });
+          return;
+        }
+      } catch (redisErr) {
+        console.warn('[Idempotency] Redis check error, proceeding to storage fallback:', redisErr);
+      }
+    }
 
     // 1. Fast path: check in-memory cache
     const memoryRecord = inMemoryCache.get(compositeKey);
@@ -114,6 +139,9 @@ export function idempotency(options: { ttlSeconds?: number } = {}) {
         };
 
         inMemoryCache.set(compositeKey, finalizedRecord);
+        if (RedisService.isAvailable()) {
+          RedisService.set(`idemp_res:${compositeKey}`, JSON.stringify(finalizedRecord), Math.min(ttlSeconds, 86400)).catch(() => {});
+        }
         docRef.set({
           ...finalizedRecord,
           userId,
