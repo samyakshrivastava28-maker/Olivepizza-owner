@@ -151,10 +151,10 @@ export default function OwnerLiveMap() {
           zoom={13} 
           style={{ height: '100%', width: '100%' }}
         >
-          {/* Standard OpenStreetMap Tiles */}
+          {/* OpenStreetMap Standard Tiles (zero-cost, no rate limit, no watermark) */}
           <TileLayer
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors'
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors'
             maxZoom={19}
           />
 

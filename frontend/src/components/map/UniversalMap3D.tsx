@@ -57,29 +57,29 @@ export interface UniversalMap3DRef {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-// OpenFreeMap vector tiles with automatic CartoDB raster tile fallback
+// OpenFreeMap vector tiles with automatic OpenStreetMap raster tile fallback
 const TILE_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
-const CARTO_RASTER_STYLE: maplibregl.StyleSpecification = {
+const OSM_RASTER_STYLE: maplibregl.StyleSpecification = {
   version: 8,
   sources: {
-    'carto-tiles': {
+    'osm-tiles': {
       type: 'raster',
       tiles: [
-        'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
-        'https://b.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
-        'https://c.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+        'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png',
       ],
       tileSize: 256,
-      attribution: '© OpenStreetMap contributors © CARTO',
+      attribution: '© OpenStreetMap contributors',
     },
   },
   layers: [
     {
-      id: 'carto-tiles-layer',
+      id: 'osm-tiles-layer',
       type: 'raster',
-      source: 'carto-tiles',
+      source: 'osm-tiles',
       minzoom: 0,
-      maxzoom: 22,
+      maxzoom: 19,
     },
   ],
 };
@@ -246,9 +246,9 @@ const UniversalMap3D = forwardRef<UniversalMap3DRef, UniversalMap3DProps>(
       const triggerFallbackStyle = () => {
         if (fallbackTriggered) return;
         fallbackTriggered = true;
-        console.warn('[UniversalMap3D] Primary tile server failed or timed out. Switching to CartoDB Voyager raster tiles.');
+        console.warn('[UniversalMap3D] Primary tile server failed or timed out. Switching to OpenStreetMap raster tiles.');
         try {
-          map.setStyle(CARTO_RASTER_STYLE);
+          map.setStyle(OSM_RASTER_STYLE);
         } catch (err) {
           console.error('[UniversalMap3D] Fallback style error:', err);
         }

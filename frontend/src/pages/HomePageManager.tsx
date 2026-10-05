@@ -22,10 +22,13 @@ import {
   FolderHeart,
   Palette,
   RotateCcw,
+  Database,
+  Sliders,
 } from 'lucide-react';
 import { PageSchema, BuiltInPageSchema } from '../types/PageSchema';
 import { PREDEFINED_TEMPLATES } from '../utils/HomePageTemplates';
 import HomePageEditor from '../components/home/HomePageEditor';
+import PageRenderer from '../components/home/PageRenderer';
 import { db } from '../lib/firebase';
 import { collection, onSnapshot, doc } from 'firebase/firestore';
 import { fetchApi } from '../lib/api';
@@ -47,6 +50,7 @@ export default function HomePageManager() {
   // Preview Modal state
   const [previewTemplate, setPreviewTemplate] = useState<PageSchema | null>(null);
   const [previewDevice, setPreviewDevice] = useState<'mobile' | 'tablet' | 'desktop'>('mobile');
+  const [previewDataSource, setPreviewDataSource] = useState<'preview' | 'real'>('real');
 
   // Publish Confirmation Dialog state
   const [publishTarget, setPublishTarget] = useState<PageSchema | null>(null);
@@ -677,24 +681,56 @@ export default function HomePageManager() {
                 <p className="text-[11px] text-slate-400">Live Customer Parity Preview</p>
               </div>
 
-              {/* Viewport controls */}
-              <div className="flex items-center gap-2">
+              {/* Data source and Viewport controls */}
+              <div className="flex items-center gap-2.5">
+                {/* [Preview Data] [Real Data] Toggle */}
+                <div className="flex items-center bg-[#06070A] p-1 rounded-xl border border-slate-800 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewDataSource('preview')}
+                    className={`px-2.5 py-1 rounded-lg font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      previewDataSource === 'preview'
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-xs'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Sliders className="w-3.5 h-3.5" />
+                    <span>Preview Data</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPreviewDataSource('real')}
+                    className={`px-2.5 py-1 rounded-lg font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      previewDataSource === 'real'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-xs'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Database className="w-3.5 h-3.5" />
+                    <span>Real Data</span>
+                  </button>
+                </div>
+
+                {/* Viewport controls */}
                 <div className="flex items-center bg-[#0E1524] p-1 rounded-xl border border-slate-800">
                   <button
                     onClick={() => setPreviewDevice('mobile')}
-                    className={`p-1.5 rounded-lg ${previewDevice === 'mobile' ? 'bg-orange-500 text-white' : 'text-slate-400'}`}
+                    className={`p-1.5 rounded-lg ${previewDevice === 'mobile' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:text-white'}`}
+                    title="Mobile View"
                   >
                     <Smartphone className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => setPreviewDevice('tablet')}
-                    className={`p-1.5 rounded-lg ${previewDevice === 'tablet' ? 'bg-orange-500 text-white' : 'text-slate-400'}`}
+                    className={`p-1.5 rounded-lg ${previewDevice === 'tablet' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:text-white'}`}
+                    title="Tablet View"
                   >
                     <Tablet className="w-4 h-4" />
                   </button>
                   <button
                     onClick={() => setPreviewDevice('desktop')}
-                    className={`p-1.5 rounded-lg ${previewDevice === 'desktop' ? 'bg-orange-500 text-white' : 'text-slate-400'}`}
+                    className={`p-1.5 rounded-lg ${previewDevice === 'desktop' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:text-white'}`}
+                    title="Desktop View"
                   >
                     <Monitor className="w-4 h-4" />
                   </button>
@@ -702,17 +738,30 @@ export default function HomePageManager() {
 
                 <button
                   onClick={() => setPreviewTemplate(null)}
-                  className="p-1.5 text-slate-400 hover:text-white rounded-lg"
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg bg-slate-800 hover:bg-slate-700 cursor-pointer"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
             </div>
 
+            {/* Read-Only Real Data Status Banner */}
+            {previewDataSource === 'real' && (
+              <div className="px-5 py-2 bg-emerald-950/40 border-b border-emerald-500/20 flex items-center justify-between text-xs text-emerald-300">
+                <span className="flex items-center gap-1.5">
+                  <Database className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span><strong>Real Data Mode:</strong> Read-only customer section renderers loaded with active store products, ads & coupons.</span>
+                </span>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 font-mono font-bold">
+                  READ-ONLY
+                </span>
+              </div>
+            )}
+
             {/* Preview Viewport Frame */}
             <div className="flex-1 overflow-y-auto min-h-0 p-6 flex justify-center bg-[#06070A] custom-scrollbar">
               <div
-                className={`w-full bg-[#06070A] rounded-2xl overflow-hidden border border-slate-800 shadow-2xl space-y-4 p-4 ${
+                className={`w-full bg-[#06070A] rounded-2xl overflow-hidden border border-slate-800 shadow-2xl p-4 ${
                   previewDevice === 'mobile'
                     ? 'max-w-[400px]'
                     : previewDevice === 'tablet'
@@ -720,36 +769,46 @@ export default function HomePageManager() {
                     : 'max-w-4xl'
                 }`}
               >
-                {(previewTemplate as any).sections?.map((sec, idx) => (
-                  <div
-                    key={idx}
-                    className="p-6 rounded-2xl border border-slate-800 text-center relative overflow-hidden"
-                    style={{
-                      backgroundColor: sec.config?.styleOverrides?.backgroundColor || '#0F172A',
-                      color: sec.config?.styleOverrides?.textColor || '#FFFFFF',
-                    }}
-                  >
-                    {sec.config?.mediaUrl && (
-                      <img
-                        src={sec.config.mediaUrl}
-                        alt="Media"
-                        className="absolute inset-0 w-full h-full object-cover opacity-30"
-                      />
-                    )}
-                    <div className="relative z-10 space-y-2">
-                      <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-black/50">
-                        {sec.type}
-                      </span>
-                      <h4 className="text-lg font-black">{sec.config?.headline || sec.type}</h4>
-                      {sec.config?.subtitle && <p className="text-xs opacity-80">{sec.config.subtitle}</p>}
-                      {sec.config?.buttonText && (
-                        <button className="px-4 py-1.5 rounded-full bg-orange-500 text-white font-bold text-xs mt-2">
-                          {sec.config.buttonText}
-                        </button>
-                      )}
-                    </div>
+                {previewDataSource === 'real' ? (
+                  <PageRenderer
+                    schema={previewTemplate}
+                    isEditorMode={false}
+                    viewMode={previewDevice}
+                  />
+                ) : (
+                  <div className="space-y-4">
+                    {(previewTemplate as any).sections?.map((sec: any, idx: number) => (
+                      <div
+                        key={idx}
+                        className="p-6 rounded-2xl border border-slate-800 text-center relative overflow-hidden"
+                        style={{
+                          backgroundColor: sec.config?.styleOverrides?.backgroundColor || '#0F172A',
+                          color: sec.config?.styleOverrides?.textColor || '#FFFFFF',
+                        }}
+                      >
+                        {sec.config?.mediaUrl && (
+                          <img
+                            src={sec.config.mediaUrl}
+                            alt="Media"
+                            className="absolute inset-0 w-full h-full object-cover opacity-30"
+                          />
+                        )}
+                        <div className="relative z-10 space-y-2">
+                          <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-wider bg-black/50">
+                            {sec.type}
+                          </span>
+                          <h4 className="text-lg font-black">{sec.config?.headline || sec.type}</h4>
+                          {sec.config?.subtitle && <p className="text-xs opacity-80">{sec.config.subtitle}</p>}
+                          {sec.config?.buttonText && (
+                            <button className="px-4 py-1.5 rounded-full bg-orange-500 text-white font-bold text-xs mt-2">
+                              {sec.config.buttonText}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
             </div>
 

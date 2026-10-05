@@ -17,6 +17,9 @@
     "build:electron": "npm run build:frontend && electron-builder --win --x64 --config electron-builder.json",
     "build:mac": "npm run build:frontend && electron-builder --mac --config electron-builder.json"
   },
+  "engines": {
+    "node": ">=24 <25"
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1104.0",
     "@aws-sdk/s3-request-presigner": "^3.1104.0",
@@ -30,7 +33,7 @@
     "@capacitor/ios": "^8.5.0",
     "@capacitor/push-notifications": "^8.1.1",
     "@google-cloud/recaptcha-enterprise": "^6.4.2",
-    "@google/genai": "latest",
+    "@google/genai": "2.19.0",
     "@google/generative-ai": "^0.24.1",
     "@google/stitch-sdk": "^0.3.5",
     "@langchain/core": "^1.2.2",

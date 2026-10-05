@@ -366,6 +366,12 @@ app.use('/phone', phoneVerificationRoutes);
 app.use('/api/phone', phoneVerificationRoutes);
 app.use('/truecaller', phoneVerificationRoutes);
 app.use('/api/truecaller', phoneVerificationRoutes);
+app.use('/auth/truecaller', phoneVerificationRoutes);
+app.use('/api/auth/truecaller', phoneVerificationRoutes);
+app.use('/api/v1/auth/truecaller', phoneVerificationRoutes);
+app.use('/api/v1/auth/truecaller/callback', phoneVerificationRoutes);
+app.use('/api/auth/truecaller/callback', phoneVerificationRoutes);
+app.use('/auth/truecaller/callback', phoneVerificationRoutes);
 
 app.use('/data-manager', dataManagerRoutes);
 app.use('/api/data-manager', dataManagerRoutes);

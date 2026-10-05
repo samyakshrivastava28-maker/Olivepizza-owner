@@ -18,7 +18,7 @@ export default function AnimationPreviewBadge({
   const displayLabel = label || animation;
 
   const renderVisualDemo = () => {
-    switch (animation) {
+    switch (animation as string) {
       case 'Fade':
       case 'Fade In':
         return (

@@ -30,7 +30,7 @@ export class TruecallerProvider implements PhoneVerificationProvider {
   private lastKeyFetch: number = 0;
   private readonly KEY_CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
   private webSessions: Map<string, TruecallerWebSession> = new Map();
-  private readonly CLIENT_ID = process.env.TRUECALLER_CLIENT_ID || 'um2vaxqdcr3nroydqvyg_hahzikmqrla8w_yxiptsry';
+  private readonly CLIENT_ID = process.env.TRUECALLER_CLIENT_ID || '';
 
   constructor() {
     // Periodic session cleanup
@@ -98,8 +98,12 @@ export class TruecallerProvider implements PhoneVerificationProvider {
     const expiresAt = now + 5 * 60 * 1000; // 5 minutes validity
 
     const normalizedExpected = expectedPhone ? this.normalizeE164(expectedPhone) : undefined;
-    const deepLink = `truecallersdk://truesdk/web_verify?requestNonce=${requestId}&partnerKey=${encodeURIComponent(this.CLIENT_ID)}&partnerName=Olive%20Pizza&lang=en&title=Verify%20Number`;
-    const bridgeUrl = `https://olivepizza-owner.onrender.com/api/phone/truecaller/bridge?requestId=${requestId}`;
+    const deepLink = `truecallersdk://truesdk/web_verify?type=btmsheet&requestNonce=${requestId}&partnerKey=${encodeURIComponent(this.CLIENT_ID)}&partnerName=Olive%20Pizza&lang=en&title=Verify%20Number`;
+    const apiBase = (process.env.API_BASE_URL || process.env.PUBLIC_API_URL || (process.env.NODE_ENV !== 'production' ? `http://localhost:${process.env.PORT || 5000}` : '')).replace(/\/$/, '');
+    if (!apiBase) {
+      throw new Error('API_BASE_URL is not configured; cannot create Truecaller web session.');
+    }
+    const bridgeUrl = `${apiBase}/api/phone/truecaller/bridge?requestId=${requestId}`;
 
     const session: TruecallerWebSession = {
       requestId,
@@ -161,18 +165,40 @@ export class TruecallerProvider implements PhoneVerificationProvider {
   }
 
   /**
+   * Returns the custom token once and deletes it everywhere (replay protection).
+   */
+  public async consumeCustomToken(requestId: string): Promise<string | undefined> {
+    const cleanId = (requestId || '').trim();
+    const session = await this.getWebSession(cleanId);
+    const token = session?.customToken;
+    if (!session || !token) return undefined;
+    delete session.customToken;
+    this.webSessions.set(cleanId, session);
+    await adminDb.collection('truecaller_web_sessions').doc(cleanId).update({
+      customToken: (await import('firebase-admin/firestore')).FieldValue.delete()
+    }).catch(() => {});
+    return token;
+  }
+
+  /**
    * Verifies Native or Web Base64 payload against Truecaller public keys
    */
   public async verifyNativePayload(
     payloadBase64: string,
     signature: string,
     signatureAlgorithm?: string,
-    expectedPhone?: string
+    expectedPhone?: string,
+    expectedNonce?: string
   ): Promise<VerificationResult> {
     try {
       // 1. Decode Payload
       const payloadString = Buffer.from(payloadBase64, 'base64').toString('utf8');
       const payload = JSON.parse(payloadString);
+
+      // 1b. Nonce/state correlation (when a server-issued request ID exists)
+      if (expectedNonce && payload.requestNonce !== expectedNonce) {
+        return { success: false, error: 'Truecaller response does not match this verification request.' };
+      }
 
       // 2. Validate Replay/Timestamp
       const requestTime = payload.requestTime; // Unix timestamp
@@ -306,6 +332,9 @@ export class TruecallerProvider implements PhoneVerificationProvider {
       console.warn(`[Truecaller Callback] Session ${cleanId} not found in memory or Firestore.`);
       return { success: false, error: 'Session not found or expired.' };
     }
+    if (session.status !== 'PENDING') {
+      return { success: false, error: 'This verification request was already used. Please start a new verification.' };
+    }
 
     // 1. Truecaller Web SDK Format: { accessToken, endpoint }
     const accessToken = payloadOrOptions?.accessToken || (typeof payloadOrOptions === 'object' ? payloadOrOptions.accessToken : undefined);
@@ -416,7 +445,7 @@ export class TruecallerProvider implements PhoneVerificationProvider {
     const sig = signature || payloadOrOptions?.signature;
 
     if (payloadStr && sig) {
-      const result = await this.verifyNativePayload(payloadStr, sig, undefined, session.expectedPhone);
+      const result = await this.verifyNativePayload(payloadStr, sig, undefined, session.expectedPhone, cleanId);
       const now = Date.now();
       if (result.success && result.phone) {
         session.status = 'VERIFIED';
@@ -475,17 +504,25 @@ export class TruecallerProvider implements PhoneVerificationProvider {
       }
     }
 
-    // Strictly enforce role: customer
-    await adminAuth.setCustomUserClaims(uid, { role: 'customer' }).catch(() => {});
-    const customToken = await adminAuth.createCustomToken(uid, { role: 'customer' });
+    // Truecaller only proves phone ownership. Never overwrite an existing role/claims.
+    const existing = await adminAuth.getUser(uid);
+    const existingClaims = (existing.customClaims || {}) as Record<string, any>;
+    if (!existingClaims.role) {
+      await adminAuth.setCustomUserClaims(uid, { ...existingClaims, role: 'customer' });
+    }
+    const customToken = await adminAuth.createCustomToken(uid);
 
-    // Ensure Firestore profile is synced
+    // Ensure Firestore profile is synced without demoting existing privileged roles
+    const userDocSnap = await adminDb.collection('users').doc(uid).get().catch(() => null);
+    const currentDocRole = userDocSnap?.exists ? userDocSnap.data()?.role : null;
+    const resolvedRole = currentDocRole || existingClaims.role || 'customer';
+
     await adminDb.collection('users').doc(uid).set({
       phone,
       phoneVerified: true,
       phoneSetupCompleted: true,
       verificationMethod: 'truecaller',
-      role: 'customer',
+      role: resolvedRole,
       updatedAt: new Date().toISOString(),
       ...(name ? { name, displayName: name } : {}),
     }, { merge: true }).catch((err) => {

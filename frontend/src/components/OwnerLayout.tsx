@@ -1,11 +1,12 @@
 import { Outlet, Link, useLocation, useNavigate } from 'react-router';
 import { useAuthStore } from '../lib/store';
-import { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { db } from '../lib/firebase';
 import { collection, query, orderBy, limit, onSnapshot, doc, getDoc } from 'firebase/firestore';
 import { PremiumBackground } from './ui/glass/PremiumBackground';
 import { GlassPanel } from './ui/glass/GlassSystem';
-import PixelSnow from './ui/PixelSnow';
+
+const PixelSnow = lazy(() => import('./ui/PixelSnow'));
 
 export default function OwnerLayout() {
   const user = useAuthStore(state => state.user);
@@ -63,16 +64,18 @@ export default function OwnerLayout() {
       <PremiumBackground />
       {/* Three.js PixelSnow is enabled on desktop only to avoid GPU bottlenecking on mobile devices */}
       <div className="fixed inset-0 z-0 pointer-events-none opacity-40 hidden md:block">
-        <PixelSnow 
-          color="#ffffff"
-          flakeSize={0.01}
-          minFlakeSize={1.25}
-          pixelResolution={160}
-          speed={1.0}
-          density={0.2}
-          direction={125}
-          brightness={0.8}
-        />
+        <Suspense fallback={null}>
+          <PixelSnow 
+            color="#ffffff"
+            flakeSize={0.01}
+            minFlakeSize={1.25}
+            pixelResolution={160}
+            speed={1.0}
+            density={0.2}
+            direction={125}
+            brightness={0.8}
+          />
+        </Suspense>
       </div>
       
       {/* Mobile Sidebar Overlay */}

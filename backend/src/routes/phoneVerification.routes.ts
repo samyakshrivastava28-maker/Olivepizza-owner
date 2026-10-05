@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import { adminDb, adminAuth } from '../config/firebase.js';
 import { phoneVerificationService } from '../services/phone-verification/PhoneVerificationService.js';
 import { authLimiter } from '../config/security.config.js';
+import { DevOtpBypassService } from '../services/phone-verification/DevOtpBypassService.js';
 
 const router = express.Router();
 const truecaller = phoneVerificationService.getTruecallerProvider();
@@ -81,7 +82,7 @@ router.get(['/truecaller/bridge', '/bridge'], async (req: Request, res: Response
     return res.status(404).send('<h3>Session Expired: Please generate a new QR code on Olive Pizza.</h3>');
   }
 
-  const deepLink = session.deepLink || `truecallersdk://truesdk/web_verify?requestNonce=${requestId}&partnerKey=${encodeURIComponent(truecaller.getClientId())}&partnerName=Olive%20Pizza&lang=en&title=Verify%20Number`;
+  const deepLink = session.deepLink || `truecallersdk://truesdk/web_verify?type=btmsheet&requestNonce=${requestId}&partnerKey=${encodeURIComponent(truecaller.getClientId())}&partnerName=Olive%20Pizza&lang=en&title=Verify%20Number`;
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -173,6 +174,7 @@ router.get('/truecaller/session/:requestId', async (req: Request, res: Response)
         error: 'Verification session not found or expired.'
       });
     }
+    const customToken = session.status === 'VERIFIED' ? session.customToken : undefined;
     return res.json({
       success: true,
       status: session.status,
@@ -180,7 +182,7 @@ router.get('/truecaller/session/:requestId', async (req: Request, res: Response)
       error: session.error,
       name: session.name,
       country: session.country,
-      customToken: session.customToken,
+      customToken,
       userId: session.userId
     });
   } catch (error: any) {
@@ -193,7 +195,7 @@ router.get('/truecaller/session/:requestId', async (req: Request, res: Response)
 });
 
 // Probe / Health verification endpoint for Truecaller Developer Portal
-router.get(['/truecaller/callback', '/callback'], (_req: Request, res: Response) => {
+router.get(['/truecaller/callback', '/callback', '/'], (_req: Request, res: Response) => {
   return res.json({
     success: true,
     message: 'Truecaller webhook callback endpoint is active and listening.'
@@ -254,7 +256,13 @@ const handleTruecallerWebhook = async (req: Request, res: Response) => {
   }
 };
 
-router.post(['/truecaller/callback', '/callback'], handleTruecallerWebhook);
+// Development OTP Bypass Status endpoint (Publicly checkable by dev frontend)
+router.get('/dev-status', (_req: Request, res: Response) => {
+  return res.json({
+    success: true,
+    ...DevOtpBypassService.getStatus()
+  });
+});
 
 router.use(authenticateUser);
 
@@ -273,7 +281,14 @@ router.post('/send-otp', authLimiter, async (req: Request, res: Response) => {
       return res.status(400).json(result);
     }
 
-    return res.json(result);
+    const isBypass = DevOtpBypassService.isDevOtpBypassActive();
+    return res.json({
+      ...result,
+      devOtpBypass: isBypass,
+      message: isBypass
+        ? '⚡ DEV OTP BYPASS ACTIVE: You may enter any code to verify.'
+        : result.message
+    });
   } catch (error: any) {
     console.error('[PhoneVerification] send-otp error:', error);
     return res.status(500).json({ success: false, error: error.message || 'Internal server error while sending OTP.' });
@@ -388,37 +403,69 @@ router.post('/truecaller', authLimiter, async (req: Request, res: Response) => {
     const verifyInput = payload ? (typeof payload === 'string' && signature ? { payload, signature, signatureAlgorithm } : payload) : { requestId };
     const result = await truecaller.verifyProfile(verifyInput, uid, expectedPhone);
     
-    if (!result.success) {
+    if (!result.success || !result.phone) {
       return res.status(400).json(result);
     }
 
-    if (result.success && uid && !uid.startsWith('anon_')) {
-      const userRef = adminDb.collection('users').doc(uid);
-      await userRef.set({
-        phone: result.phone,
-        phoneVerified: true,
-        verificationMethod: 'truecaller',
-        verifiedAt: Date.now(),
-        truecallerName: (result as any).name || null,
-        truecallerCountry: (result as any).country || 'IN',
-        phoneSetupCompleted: true
-      }, { merge: true });
-
-      const identityRef = adminDb.collection('customer_identities').doc(result.phone!);
-      await identityRef.set({
-        primaryUid: uid,
-        verifiedAt: Date.now()
-      }, { merge: true });
+    // Resolve or provision account
+    let targetUid = uid && !uid.startsWith('anon_') ? uid : null;
+    if (!targetUid) {
+      try {
+        const userRecord = await adminAuth.getUserByPhoneNumber(result.phone);
+        targetUid = userRecord.uid;
+      } catch (err: any) {
+        if (err.code === 'auth/user-not-found') {
+          const newUser = await adminAuth.createUser({
+            phoneNumber: result.phone,
+            displayName: (result as any).name || 'Customer'
+          });
+          targetUid = newUser.uid;
+        } else {
+          throw err;
+        }
+      }
     }
 
-    return res.json(result);
+    // Preserve existing claims/roles without demoting privileged users
+    const existing = await adminAuth.getUser(targetUid);
+    const existingClaims = (existing.customClaims || {}) as Record<string, any>;
+    if (!existingClaims.role) {
+      await adminAuth.setCustomUserClaims(targetUid, { ...existingClaims, role: 'customer' });
+    }
+
+    const customToken = await adminAuth.createCustomToken(targetUid);
+
+    const userRef = adminDb.collection('users').doc(targetUid);
+    await userRef.set({
+      phone: result.phone,
+      phoneVerified: true,
+      verificationMethod: 'truecaller',
+      verifiedAt: Date.now(),
+      truecallerName: (result as any).name || null,
+      truecallerCountry: (result as any).country || 'IN',
+      phoneSetupCompleted: true,
+      role: existingClaims.role || 'customer',
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
+    const identityRef = adminDb.collection('customer_identities').doc(result.phone);
+    await identityRef.set({
+      primaryUid: targetUid,
+      verifiedAt: Date.now()
+    }, { merge: true });
+
+    return res.json({
+      ...result,
+      customToken,
+      uid: targetUid
+    });
   } catch (e: any) {
     console.error('[PhoneVerification] Truecaller endpoint exception:', e);
     return res.status(500).json({ success: false, error: e.message || 'Truecaller verification failed.' });
   }
 });
 
-router.post('/signin', authLimiter, async (req: Request, res: Response) => {
+export const handlePhoneSignin = async (req: Request, res: Response) => {
   const { method, phoneNumber, otp, pinId, requestId, payload, signature } = req.body;
 
   try {
@@ -426,10 +473,10 @@ router.post('/signin', authLimiter, async (req: Request, res: Response) => {
     let verifiedName: string | null = null;
 
     if (method === 'sms') {
-      if (!phoneNumber || !otp) {
+      if (!phoneNumber || !otp || typeof otp !== 'string' || !otp.trim()) {
         return res.status(400).json({ success: false, error: 'Phone number and OTP code are required.' });
       }
-      const verifyRes = await phoneVerificationService.verifyOtp(phoneNumber, otp, 'phone_signin', pinId);
+      const verifyRes = await phoneVerificationService.verifyOtp(phoneNumber, otp.trim(), 'phone_signin', pinId);
       if (!verifyRes.success || !verifyRes.phone) {
         return res.status(400).json({ success: false, error: verifyRes.error || 'Invalid OTP code.' });
       }
@@ -543,13 +590,16 @@ router.post('/signin', authLimiter, async (req: Request, res: Response) => {
     console.error('[PhoneVerification] signin error:', err);
     return res.status(500).json({ success: false, error: 'Sign in with phone failed. Please try again.' });
   }
-});
+};
+
+router.post('/signin', authLimiter, handlePhoneSignin);
 
 router.get('/status', async (_req: Request, res: Response) => {
   const health = await phoneVerificationService.getHealthStatus();
   res.json({
     success: true,
     service: 'Firebase Auth & Truecaller Verification Service',
+    devOtpBypass: DevOtpBypassService.isDevOtpBypassActive(),
     firebase: health.firebase,
     truecaller: health.truecaller
   });

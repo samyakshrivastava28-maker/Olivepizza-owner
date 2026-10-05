@@ -127,23 +127,23 @@ export class CloudflareReportService {
   /**
    * Lists all monthly reports from Firestore and updates signed URLs.
    */
-  static async listMonthlyReports(): Promise<MonthlyReportMetadata[]> {
+  static async listMonthlyReports(limitCount: number = 100): Promise<MonthlyReportMetadata[]> {
     try {
-      const snap = await db.collection('monthly_reports').orderBy('createdTime', 'desc').get();
-      const reports: MonthlyReportMetadata[] = [];
-
-      for (const doc of snap.docs) {
-        const item = doc.data() as MonthlyReportMetadata;
-        item.id = item.id || doc.id;
-        const urls = await this.getReportUrls(item.cloudflarePath || `reports/${item.id}.pdf`, item.id);
-        item.viewUrl = urls.viewUrl;
-        item.reportUrl = urls.viewUrl;
-        item.downloadUrl = urls.downloadUrl;
-        if (!item.period) {
-          item.period = `${item.month} ${item.year}`;
-        }
-        reports.push(item);
-      }
+      const snap = await db.collection('monthly_reports').orderBy('createdTime', 'desc').limit(limitCount).get();
+      const reports: MonthlyReportMetadata[] = await Promise.all(
+        snap.docs.map(async (doc) => {
+          const item = doc.data() as MonthlyReportMetadata;
+          item.id = item.id || doc.id;
+          const urls = await this.getReportUrls(item.cloudflarePath || `reports/${item.id}.pdf`, item.id);
+          item.viewUrl = urls.viewUrl;
+          item.reportUrl = urls.viewUrl;
+          item.downloadUrl = urls.downloadUrl;
+          if (!item.period) {
+            item.period = `${item.month} ${item.year}`;
+          }
+          return item;
+        })
+      );
 
       return reports;
     } catch (err: any) {

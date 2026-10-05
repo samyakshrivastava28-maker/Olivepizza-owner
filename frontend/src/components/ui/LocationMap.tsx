@@ -30,8 +30,8 @@ export default function LocationMap({ className = "w-full h-64 md:h-96 rounded-2
         className="w-full h-full z-0"
       >
         <TileLayer
-          url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-          attribution='&copy; CARTO &copy; OpenStreetMap'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors'
           maxZoom={19}
         />
         <Marker position={position} icon={restaurantIcon}>

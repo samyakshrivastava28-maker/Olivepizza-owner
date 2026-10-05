@@ -430,17 +430,28 @@ export class FranchiseAccessService {
     const resolvedBranchId = activeAccessEntry?.branchId || assignedFranchiseDoc?.mainBranchId || assignedFranchiseDoc?.id || userData?.branchId || requestedBranchId || 'main_branch';
 
     // 7. Verify franchise status: NOT DELETED OR SUSPENDED
-    if (resolvedFranchiseId) {
-      const fCheckDoc = await adminDb.collection('franchises').doc(resolvedFranchiseId).get().catch(() => null);
-      const feCheckDoc = await adminDb.collection('franchise_entities').doc(resolvedFranchiseId).get().catch(() => null);
+    const idsToCheck = Array.from(new Set([resolvedFranchiseId, resolvedBranchId].filter(Boolean)));
+    for (const checkId of idsToCheck) {
+      const fCheckDoc = await adminDb.collection('franchises').doc(checkId).get().catch(() => null);
+      const feCheckDoc = await adminDb.collection('franchise_entities').doc(checkId).get().catch(() => null);
       const fData = fCheckDoc?.exists ? fCheckDoc.data() : (feCheckDoc?.exists ? feCheckDoc.data() : null);
 
-      if (fData && (fData.status === 'deleted' || fData.status === 'DELETED' || fData.deletedAt)) {
-        return {
-          authorized: false,
-          code: 'FRANCHISE_DEACTIVATED',
-          reason: 'This franchise has been deactivated or deleted by the Owner.'
-        };
+      if (fData) {
+        const fStatus = String(fData?.status || '').toUpperCase();
+        if (fStatus === 'DELETED' || fData.deletedAt) {
+          return {
+            authorized: false,
+            code: 'FRANCHISE_DEACTIVATED',
+            reason: 'This franchise has been deactivated or deleted by the Owner.'
+          };
+        }
+        if (fStatus === 'DISABLED' || fStatus === 'SUSPENDED' || fStatus === 'INACTIVE' || fData.isActive === false) {
+          return {
+            authorized: false,
+            code: 'FRANCHISE_DISABLED',
+            reason: 'This franchise has been disabled by the Owner.'
+          };
+        }
       }
     }
 
@@ -564,8 +575,8 @@ export class FranchiseAccessService {
       // Check users doc role & status
       const userRole = (userData?.role || '').toLowerCase();
       const userStatus = (userData?.status || '').toUpperCase();
-      if ((userRole === 'pos_operator' || userRole === 'cashier' || userRole === 'pos' || userRole === 'manager' || userRole === 'restaurant_manager') && 
-          (userStatus === 'APPROVED' || userStatus === 'ACTIVE' || userData?.isActive === true)) {
+      if ((userRole === 'pos_operator' || userRole === 'cashier' || userRole === 'pos' || userRole === 'manager' || userRole === 'restaurant_manager' || userRole === 'admin' || userRole === 'franchise_owner' || userRole === 'owner') && 
+          (userStatus === 'APPROVED' || userStatus === 'ACTIVE' || userData?.isActive === true || !userData?.status)) {
         isApproved = true;
       }
 

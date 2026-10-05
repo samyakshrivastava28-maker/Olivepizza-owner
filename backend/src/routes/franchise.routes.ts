@@ -53,6 +53,43 @@ const handleOrderingContextResolve = async (req: Request, res: Response): Promis
 router.post('/ordering-context/resolve', handleOrderingContextResolve);
 router.post('/service-area/resolve', handleOrderingContextResolve);
 
+// ============================================================================
+// OPERATIONAL APP SCOPE & AUTHORIZATION RESOLUTION ALIAS (/api/franchises/auth/resolve)
+// ============================================================================
+router.all('/auth/resolve', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    if (!user || !user.uid) {
+      res.status(401).json({ authorized: false, reason: 'Authentication required' });
+      return;
+    }
+
+    const targetApp = (req.body?.targetApp || req.query?.targetApp || req.headers['x-app-target'] || 'FRANCHISE_MANAGER') as any;
+    const requestedBranchId = (req.body?.requestedBranchId || req.query?.requestedBranchId || req.headers['x-branch-id']) as string;
+    const terminalId = (req.body?.terminalId || req.query?.terminalId) as string;
+
+    const resolution = await FranchiseAccessService.resolveAuthorization({
+      uid: user.uid,
+      email: user.email,
+      phoneNumber: user.phone_number,
+      emailVerified: user.email_verified,
+      targetApp,
+      requestedBranchId,
+      terminalId
+    });
+
+    if (!resolution.authorized) {
+      res.status(403).json(resolution);
+      return;
+    }
+
+    res.json(resolution);
+  } catch (err: any) {
+    console.error('[FranchiseRoutes] Error in /auth/resolve:', err);
+    res.status(500).json({ authorized: false, reason: err.message || 'Internal server error' });
+  }
+});
+
 const DEFAULT_ORGANIZATION = {
   id: 'org_olive_pizza',
   name: 'Olive Pizza India',
@@ -492,10 +529,12 @@ router.patch('/:id', requireRole(['owner', 'admin', 'developer', 'platform_owner
     if (body.restaurantManagerEmail && branchDoc.exists) {
       const oldManagerEmail = branchDoc.data()?.restaurantManagerEmail;
       const newManagerEmail = body.restaurantManagerEmail.trim().toLowerCase();
-      if (oldManagerEmail && oldManagerEmail.toLowerCase() !== newManagerEmail) {
+      const PROTECTED_EMAILS = ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com', 'olivepizzamaker@gmail.com'];
+      if (oldManagerEmail && oldManagerEmail.toLowerCase() !== newManagerEmail && !PROTECTED_EMAILS.includes(oldManagerEmail.toLowerCase())) {
         try {
           const oldUser = await adminAuth.getUserByEmail(oldManagerEmail).catch(() => null);
-          if (oldUser) {
+          const oldRole = oldUser ? String(((await adminDb.collection('users').doc(oldUser.uid).get()).data()?.role) || '').toLowerCase() : '';
+          if (oldUser && !['owner', 'platform_owner', 'admin', 'developer'].includes(oldRole)) {
             await adminAuth.revokeRefreshTokens(oldUser.uid);
             await adminAuth.setCustomUserClaims(oldUser.uid, { role: 'REVOKED', revokedAt: now });
             await adminDb.collection('users').doc(oldUser.uid).set({

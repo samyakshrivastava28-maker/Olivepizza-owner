@@ -55,9 +55,16 @@ class RedisService {
           password: process.env.REDIS_PASSWORD,
           ...commonOptions
         });
-      } else {
-        const url = redisUrl || 'redis://localhost:6379';
+      } else if (redisUrl) {
+        this.client = new Redis(redisUrl, commonOptions);
+      } else if (process.env.NODE_ENV !== 'production') {
+        const url = 'redis://localhost:6379';
         this.client = new Redis(url, commonOptions);
+      } else {
+        console.log('[RedisService] No Redis configuration in production environment — operating in resilient Firestore fallback mode.');
+        this.client = null;
+        this.isConnected = false;
+        return;
       }
 
       this.client.on('connect', () => {
@@ -300,13 +307,42 @@ class RedisService {
     if (branchId) {
       await this.del(`cache:menu:${branchId}`);
     } else {
-      // Invalidate all branch menus
+      // Invalidate all branch menus via non-blocking scan
       if (this.isConnected && this.client) {
         try {
-          const keys = await this.client.keys('cache:menu:*');
+          let cursor = '0';
+          const keys: string[] = [];
+          do {
+            const [nextCursor, matchedKeys] = await this.client.scan(cursor, 'MATCH', 'cache:menu:*', 'COUNT', 50);
+            cursor = nextCursor;
+            keys.push(...matchedKeys);
+          } while (cursor !== '0');
           if (keys.length > 0) await this.client.del(...keys);
         } catch {}
       }
+    }
+  }
+
+  /**
+   * Monitor Redis Memory against ~30MB Free Tier limits
+   */
+  public async getMemoryInfo(): Promise<{ usedMemoryHuman: string; peakMemoryHuman: string; isWithinBound: boolean } | null> {
+    if (!this.isConnected || !this.client) return null;
+    try {
+      const info = await this.client.info('memory');
+      const usedMatch = info.match(/used_memory_human:([^\r\n]+)/);
+      const peakMatch = info.match(/used_memory_peak_human:([^\r\n]+)/);
+      const usedBytesMatch = info.match(/used_memory:([^\r\n]+)/);
+      const usedBytes = usedBytesMatch ? parseInt(usedBytesMatch[1], 10) : 0;
+      // 30MB bound = 30 * 1024 * 1024 bytes = 31457280 bytes
+      const isWithinBound = usedBytes < 28 * 1024 * 1024;
+      return {
+        usedMemoryHuman: usedMatch ? usedMatch[1] : 'unknown',
+        peakMemoryHuman: peakMatch ? peakMatch[1] : 'unknown',
+        isWithinBound
+      };
+    } catch {
+      return null;
     }
   }
 

@@ -219,8 +219,8 @@ export default function DeliveryManagement() {
         zoomControl: false,
       });
 
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-        attribution: '&copy; OpenStreetMap &copy; CARTO',
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
         maxZoom: 19,
       }).addTo(map);
 
@@ -265,12 +265,9 @@ export default function DeliveryManagement() {
     ];
 
     partners.forEach((partner) => {
-      const loc = locations[partner.id] || {
-        lat: partner.lat || (partner.latitude ?? partner.lat) || (restaurantCoords[0] + (Math.random() - 0.5) * 0.015),
-        lng: partner.lng || (partner.longitude ?? partner.lng) || (restaurantCoords[1] + (Math.random() - 0.5) * 0.015),
-      };
+      const loc = locations[partner.id] || (partner.lat && partner.lng ? { lat: partner.lat, lng: partner.lng } : null) || (partner.latitude && partner.longitude ? { lat: partner.latitude, lng: partner.longitude } : null);
 
-      if (!loc.lat || !loc.lng) return;
+      if (!loc || !loc.lat || !loc.lng) return;
 
       const isOnline = partner.status === 'online' || partner.status === 'busy';
       const isSelected = selectedPartnerId === partner.id;
@@ -400,8 +397,9 @@ export default function DeliveryManagement() {
         vehicleNumber: newPartnerReg || 'Standard',
         rating: 5.0,
         totalDeliveries: 0,
-        lat: RESTAURANT_LOCATION.lat + (Math.random() - 0.5) * 0.01,
-        lng: RESTAURANT_LOCATION.lng + (Math.random() - 0.5) * 0.01,
+        lat: null,
+        lng: null,
+        locationSource: 'none',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });

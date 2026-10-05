@@ -152,7 +152,7 @@ export class FranchiseLifecycleService {
     ].filter(Boolean).map(e => e.toLowerCase().trim());
 
     for (const email of keyEmails) {
-      if (email === 'olivepizzarjn@gmail.com' || email === 'webhub2811@gmail.com') {
+      if (email === 'olivepizzarjn@gmail.com' || email === 'webhub2811@gmail.com' || email === 'olivepizzamaker@gmail.com') {
         continue; // Never deactivate platform owner
       }
       const uSnap = await adminDb.collection('users').where('email', '==', email).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
@@ -205,7 +205,7 @@ export class FranchiseLifecycleService {
     // 6. Deactivate accounts & revoke sessions (except platform owners)
     for (const acc of accountsSnapshot) {
       const emailLower = acc.email.toLowerCase().trim();
-      if (emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com') {
+      if (emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com' || emailLower === 'olivepizzamaker@gmail.com') {
         continue;
       }
 

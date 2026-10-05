@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { RecaptchaEnterpriseServiceClient } from '@google-cloud/recaptcha-enterprise';
+import { authLimiter } from '../config/security.config.js';
 
 const router = Router();
 let client: RecaptchaEnterpriseServiceClient | null = null;
@@ -189,24 +190,15 @@ router.post('/context-session', verifyToken, async (req: AuthRequest, res: Respo
     }
 
     const { targetFranchiseId, targetBranchId, targetBranchName } = req.body;
-    const requestedTarget = (req.body.targetApp || req.body.context || '').toLowerCase();
+    const requestedTarget = (req.body.targetApp || req.body.context || 'franchise_management').toLowerCase();
 
-    if (
-      requestedTarget === 'restaurant_management' ||
-      requestedTarget === 'delivery' ||
-      requestedTarget === 'customer' ||
-      requestedTarget === 'restaurant_manager' ||
-      requestedTarget === 'delivery_rider' ||
-      requestedTarget === 'delivery_partner'
-    ) {
-      res.status(403).json({ error: 'Forbidden: Owner accounts cannot generate operational impersonation sessions for Restaurant Management or Delivery.' });
+    if (requestedTarget === 'customer') {
+      res.status(403).json({ error: 'Forbidden: Owner accounts cannot generate context sessions for customer accounts.' });
       return;
     }
 
-    if (!targetFranchiseId || !targetBranchId) {
-      res.status(400).json({ error: 'targetFranchiseId and targetBranchId are required for context session generation.' });
-      return;
-    }
+    const effectiveFranchiseId = targetFranchiseId || 'fra_rajnandgaon';
+    const effectiveBranchId = targetBranchId || 'main_branch';
 
     const targetApp = req.body.targetApp || req.body.context || 'franchise_management';
 
@@ -214,9 +206,9 @@ router.post('/context-session', verifyToken, async (req: AuthRequest, res: Respo
       ownerUid: user.uid,
       ownerEmail: user.email,
       targetApp,
-      targetFranchiseId,
-      targetBranchId,
-      targetBranchName: targetBranchName || `Branch ${targetBranchId}`,
+      targetFranchiseId: effectiveFranchiseId,
+      targetBranchId: effectiveBranchId,
+      targetBranchName: targetBranchName || `Branch ${effectiveBranchId}`,
       issuedAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString() // 8 hour session
     };
@@ -233,10 +225,16 @@ router.post('/context-session', verifyToken, async (req: AuthRequest, res: Respo
 
     const franchiseBaseUrl = process.env.FRANCHISE_URL || 'https://franchise.olivepizza.in';
     const managerBaseUrl = process.env.MANAGER_URL || 'https://manager.olivepizza.in';
+    const posBaseUrl = process.env.POS_URL || 'https://pos.olivepizza.in';
+    const deliveryBaseUrl = process.env.DELIVERY_URL || 'https://delivery.olivepizza.in';
 
     let targetUrl = managerBaseUrl;
-    if (targetApp === 'franchise') {
+    if (requestedTarget === 'franchise' || requestedTarget === 'franchise_management') {
       targetUrl = `${franchiseBaseUrl}?context=${sessionKey}&franchiseId=${encodeURIComponent(tokenPayload.targetFranchiseId)}`;
+    } else if (requestedTarget === 'pos') {
+      targetUrl = `${posBaseUrl}?context=${sessionKey}&branchId=${encodeURIComponent(tokenPayload.targetBranchId)}&franchiseId=${encodeURIComponent(tokenPayload.targetFranchiseId)}`;
+    } else if (requestedTarget === 'delivery' || requestedTarget === 'delivery_rider' || requestedTarget === 'delivery_partner') {
+      targetUrl = `${deliveryBaseUrl}?context=${sessionKey}&branchId=${encodeURIComponent(tokenPayload.targetBranchId)}`;
     } else {
       targetUrl = `${managerBaseUrl}?context=${sessionKey}&branchId=${encodeURIComponent(tokenPayload.targetBranchId)}&branchName=${encodeURIComponent(tokenPayload.targetBranchName)}`;
     }
@@ -881,5 +879,8 @@ router.post('/password-reset/reject', verifyToken, requireRole(['owner', 'admin'
     res.status(500).json({ success: false, message: 'Failed to reject reset request' });
   }
 });
+
+import { handlePhoneSignin } from './phoneVerification.routes.js';
+router.post('/signin', authLimiter, handlePhoneSignin);
 
 export default router;

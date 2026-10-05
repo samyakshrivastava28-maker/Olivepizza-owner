@@ -45,6 +45,7 @@ export default function TruecallerQRModal({
           setVerified(true);
           setTimeout(() => {
             onSuccess({
+              success: true,
               status: 'VERIFIED',
               phone: data.phone,
               profile: data.profile,

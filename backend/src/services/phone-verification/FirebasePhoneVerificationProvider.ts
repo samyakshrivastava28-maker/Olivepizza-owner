@@ -1,5 +1,6 @@
 import { PhoneVerificationProvider, OTPRequestResult, VerificationResult } from './PhoneVerificationProvider.js';
 import { adminAuth, adminDb } from '../../config/firebase.js';
+import { DevOtpBypassService } from './DevOtpBypassService.js';
 
 export class FirebasePhoneVerificationProvider implements PhoneVerificationProvider {
   private isDevelopment: boolean;
@@ -70,15 +71,21 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
 
   /**
    * Verifies Firebase Phone Authentication
-   * Supports verifying Firebase ID Tokens directly, as well as test environment PINs
+   * Supports verifying Firebase ID Tokens directly, development-only OTP bypass, as well as test environment PINs
    */
   public async verifyOtp(phone: string, code: string, userId: string, pinId?: string): Promise<VerificationResult> {
+    // 1. Mandatory non-empty OTP validation
+    if (!code || typeof code !== 'string' || !code.trim()) {
+      return { success: false, error: 'OTP code cannot be empty.' };
+    }
+
+    // 2. Mandatory phone number format validation
     const norm = this.normalizePhone(phone);
     if (!norm.valid) {
       return { success: false, error: norm.error };
     }
 
-    // 1. If code or pinId is a Firebase ID Token (JWT format)
+    // 3. If code or pinId is a Firebase ID Token (JWT format)
     const tokenCandidate = (code && code.split('.').length === 3) ? code : (pinId && pinId.split('.').length === 3 ? pinId : null);
     if (tokenCandidate) {
       try {
@@ -110,7 +117,22 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
       }
     }
 
-    // 2. Test / Sandbox phone numbers in development mode
+    // 4. Strict Development-Only OTP Bypass
+    // Allows any non-empty OTP code to pass during local development/testing without requiring real SMS delivery
+    if (DevOtpBypassService.isDevOtpBypassActive()) {
+      const now = Date.now();
+      if (userId && !userId.startsWith('anon_')) {
+        await this.syncVerifiedPhone(userId, norm.formattedPhone);
+      }
+      return {
+        success: true,
+        phone: norm.formattedPhone,
+        provider: 'dev_bypass',
+        verifiedAt: now
+      };
+    }
+
+    // 5. Test / Sandbox phone numbers in development mode
     if (this.isDevelopment) {
       const isTestPhone = norm.formattedPhone === '+919999999999' || norm.formattedPhone === '+918305500767' || norm.formattedPhone.endsWith('123456');
       if (isTestPhone && (code === '123456' || code === '000000')) {
@@ -127,7 +149,7 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
       }
     }
 
-    // 3. If passed numeric OTP without ID token in production, require client Firebase Auth confirmation
+    // 6. If passed numeric OTP without ID token in production, require client Firebase Auth confirmation
     return {
       success: false,
       error: 'Please verify the phone OTP using Firebase Phone Auth on your device.'

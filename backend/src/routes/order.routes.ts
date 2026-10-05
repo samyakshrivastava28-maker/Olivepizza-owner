@@ -507,7 +507,14 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       console.warn('[Orders] User doc read notice:', uErr);
     }
     
-    const userPhone = req.body.contactPhone || req.body.phone || userData.phone || userData.contactPhone || (req.user as any)?.phone_number || (req.user as any)?.phone || '9999999999';
+    const incomingOrderSource = (req.body.orderSource || 'ONLINE').toUpperCase();
+    const rawUserPhone = req.body.contactPhone || req.body.phone || userData.phone || userData.contactPhone || (req.user as any)?.phone_number || (req.user as any)?.phone;
+    const cleanDigits = (rawUserPhone || '').replace(/\D/g, '');
+    if (incomingOrderSource === 'ONLINE' && (!rawUserPhone || cleanDigits.length < 10 || cleanDigits === '9999999999')) {
+      res.status(400).json({ error: 'A valid customer mobile number is required to place an order.', code: 'PHONE_REQUIRED' });
+      return;
+    }
+    const userPhone = rawUserPhone || (incomingOrderSource.startsWith('POS') ? 'POS-Walkin' : 'N/A');
 
     const effectiveLocation = location || (typeof req.body.deliveryAddress === 'object' && req.body.deliveryAddress?.lat != null ? { lat: req.body.deliveryAddress.lat, lng: req.body.deliveryAddress.lng } : null);
     const userAddress = (typeof address === 'string' ? address : null) || 
@@ -926,13 +933,15 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
 
     // ── PHASE 3: ORDER SOURCE TAGGING ─────────────────────────────────────────
     // Distinguishes online customer orders from POS-originated orders.
-    // POS routes supply their own orderSource; online checkout defaults to 'ONLINE'.
+    // Only authenticated staff/terminals can create POS or offline orders.
+    const userRole = (req.user as any)?.role || 'customer';
+    const isStaff = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(userRole);
     const orderSource: string = req.body.orderSource || 'ONLINE';
-    const VALID_ORDER_SOURCES = ['ONLINE', 'POS_DINE_IN', 'POS_TAKEAWAY', 'POS_DELIVERY', 'OFFLINE_RESTAURANT'];
-    const resolvedOrderSource = VALID_ORDER_SOURCES.includes(orderSource) ? orderSource : 'ONLINE';
+    const VALID_POS_SOURCES = ['POS_DINE_IN', 'POS_TAKEAWAY', 'POS_DELIVERY', 'OFFLINE_RESTAURANT'];
+    const resolvedOrderSource = (isStaff && VALID_POS_SOURCES.includes(orderSource)) ? orderSource : 'ONLINE';
 
-    // Allow POS cashier manual discounts when no coupon is used
-    if (resolvedOrderSource !== 'ONLINE' && req.body.discountAmount && !clientCouponCode) {
+    // Allow POS cashier manual discounts only when originating from authorized staff without a coupon
+    if (isStaff && resolvedOrderSource !== 'ONLINE' && req.body.discountAmount && !clientCouponCode) {
       discountAmount = Math.min(Math.max(0, Number(req.body.discountAmount) || 0), serverCalculatedTotal);
     }
 
@@ -964,9 +973,6 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
     // 3. Atomically allocate Permanent Bill No. and Daily Order No. & commit to PostgreSQL
     const newOrderId = crypto.randomUUID();
 
-    const userRole = req.user?.role || 'customer';
-    const isStaff = ['cashier', 'kitchen_staff', 'restaurant_manager', 'franchise_owner', 'admin', 'owner'].includes(userRole);
-
     const resolvedTerminalId = isStaff ? (req.user?.terminalId || null) : null;
     const resolvedCashierName = isStaff ? ((req.user as any)?.name || req.user?.email || null) : null;
 
@@ -983,16 +989,29 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         const incomingPaymentId = req.body.paymentId;
         if (incomingPaymentId) {
           try {
-            const payRes = await query('SELECT status, amount FROM payments WHERE id = $1 OR provider_payment_id = $1', [incomingPaymentId]);
+            const payRes = await query(
+              'SELECT id, status, amount, order_id FROM payments WHERE (id = $1 OR provider_payment_id = $1) AND (order_id IS NULL OR order_id = $2)',
+              [incomingPaymentId, newOrderId]
+            );
             if (payRes.rows.length > 0) {
               const payRow = payRes.rows[0];
               if (payRow.status === 'PAYMENT_CAPTURED' && Number(payRow.amount) >= finalOrderTotal - 0.05) {
                 initialPaymentStatus = 'PAID';
+                // Tie payment to newOrderId to prevent replay attacks
+                await query('UPDATE payments SET order_id = $1 WHERE id = $2', [newOrderId, payRow.id]);
               }
             }
           } catch (e) {
             console.warn('[Orders] Canonical payment verification lookup notice:', e);
           }
+        }
+
+        if (initialPaymentStatus !== 'PAID') {
+          res.status(402).json({
+            error: 'Online payment verification failed or payment has not been captured in PostgreSQL authority. Order cannot be placed.',
+            code: 'PAYMENT_REQUIRED'
+          });
+          return;
         }
       }
 

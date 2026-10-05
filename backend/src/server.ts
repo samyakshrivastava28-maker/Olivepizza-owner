@@ -107,11 +107,22 @@ async function startServer() {
     console.warn('[KnowledgeSync] Warning:', err?.message);
   }
 
-  const server = app.listen(Number(PORT), '0.0.0.0', () => {
+  const server = app.listen(Number(PORT), '0.0.0.0', async () => {
     console.log(`🍕 Olive Pizza Standalone Full Owner Backend running on http://localhost:${PORT}`);
     initKeepAlive();
     webSocketServer.attach(server);
     console.log('[WebSocketServer] Attached on path /ws');
+
+    try {
+      const { DevOtpBypassService } = await import('./services/phone-verification/DevOtpBypassService.js');
+      if (DevOtpBypassService.isDevOtpBypassActive()) {
+        console.log('⚡ Development OTP bypass: ENABLED (DEV_OTP_BYPASS=true) — Any non-empty OTP will pass in dev mode.');
+      } else {
+        console.log('🔒 Development OTP bypass: DISABLED (Production OTP verification active)');
+      }
+    } catch (e: any) {
+      console.warn('[DevOtpBypass] Status check notice:', e?.message);
+    }
   });
 
   // ── GRACEFUL SHUTDOWN HANDLER ──────────────────────────────────────────────

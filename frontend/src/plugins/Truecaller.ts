@@ -38,6 +38,7 @@ export interface TruecallerSessionStatusResponse {
   country?: string;
   customToken?: string;
   userId?: string;
+  profile?: any;
 }
 
 export const TruecallerService = {
