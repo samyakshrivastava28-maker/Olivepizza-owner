@@ -3,6 +3,7 @@ import { adminDb, adminAuth } from '../config/firebase.js';
 import { phoneVerificationService } from '../services/phone-verification/PhoneVerificationService.js';
 import { authLimiter } from '../config/security.config.js';
 import { DevOtpBypassService } from '../services/phone-verification/DevOtpBypassService.js';
+import { veriphoneService } from '../services/phone-verification/VeriphoneService.js';
 
 const router = express.Router();
 const truecaller = phoneVerificationService.getTruecallerProvider();
@@ -566,6 +567,34 @@ export const handlePhoneSignin = async (req: Request, res: Response) => {
       }, { merge: true });
     }
 
+    // Enrich and persist phone intelligence in background without blocking login
+    if (veriphoneService.isConfigured()) {
+      veriphoneService.verifyNumber(verifiedPhone).then(async (intel) => {
+        if (intel && intel.status === 'success') {
+          await adminDb.collection('users').doc(uid).set({
+            phoneIntelligence: {
+              phone_valid: intel.phone_valid,
+              phone_type: intel.phone_type || null,
+              carrier: intel.carrier || null,
+              country: intel.country || null,
+              country_code: intel.country_code || null,
+              region: intel.phone_region || null,
+              international_format: intel.international_number || null,
+              verifiedAt: Date.now()
+            }
+          }, { merge: true }).catch(() => {});
+
+          await adminDb.collection('phone_intelligence').doc(verifiedPhone).set({
+            ...intel,
+            primaryUid: uid,
+            verifiedAt: Date.now()
+          }, { merge: true }).catch(() => {});
+        }
+      }).catch((e) => {
+        console.warn('[PhoneVerification] Background Veriphone lookup error:', e.message);
+      });
+    }
+
     // Update customer_identities
     await adminDb.collection('customer_identities').doc(verifiedPhone).set({
       primaryUid: uid,
@@ -596,12 +625,60 @@ export const handlePhoneSignin = async (req: Request, res: Response) => {
 
 router.post('/signin', authLimiter, handlePhoneSignin);
 
+// Veriphone Phone Number Validation & Intelligence Endpoint
+router.post('/intel-verify', authLimiter, async (req: Request, res: Response) => {
+  try {
+    const { phone } = req.body;
+    if (!phone || typeof phone !== 'string' || phone.trim().length < 8) {
+      return res.status(400).json({
+        success: false,
+        error: 'A valid phone number is required.'
+      });
+    }
+
+    const intel = await veriphoneService.verifyNumber(phone);
+
+    // Save/enrich intelligence to Firestore if valid
+    const cleanPhone = intel.e164 || phone.trim();
+    if (intel.status === 'success' && intel.phone_valid) {
+      await adminDb.collection('phone_intelligence').doc(cleanPhone).set({
+        phone: cleanPhone,
+        phone_valid: intel.phone_valid,
+        phone_type: intel.phone_type || null,
+        phone_region: intel.phone_region || null,
+        country: intel.country || null,
+        country_code: intel.country_code || null,
+        carrier: intel.carrier || null,
+        international_number: intel.international_number || null,
+        local_number: intel.local_number || null,
+        timezone: intel.timezone || [],
+        verifiedAt: Date.now()
+      }, { merge: true }).catch((err) => {
+        console.warn('[PhoneVerification] Failed to cache phone intelligence:', err.message);
+      });
+    }
+
+    return res.json({
+      success: true,
+      valid: intel.phone_valid,
+      data: intel
+    });
+  } catch (error: any) {
+    console.error('[PhoneVerification] Veriphone verification error:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: error.message || 'Phone intelligence verification failed.'
+    });
+  }
+});
+
 router.get('/status', async (_req: Request, res: Response) => {
   const health = await phoneVerificationService.getHealthStatus();
   res.json({
     success: true,
-    service: 'Firebase Auth & Truecaller Verification Service',
+    service: 'Firebase Auth, Truecaller & Veriphone Verification Service',
     devOtpBypass: DevOtpBypassService.isDevOtpBypassActive(),
+    veriphoneConfigured: veriphoneService.isConfigured(),
     firebase: health.firebase,
     truecaller: health.truecaller
   });
