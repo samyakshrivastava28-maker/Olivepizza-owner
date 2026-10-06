@@ -256,6 +256,8 @@ const handleTruecallerWebhook = async (req: Request, res: Response) => {
   }
 };
 
+router.post(['/truecaller/callback', '/callback', '/'], handleTruecallerWebhook);
+
 // Development OTP Bypass Status endpoint (Publicly checkable by dev frontend)
 router.get('/dev-status', (_req: Request, res: Response) => {
   return res.json({
