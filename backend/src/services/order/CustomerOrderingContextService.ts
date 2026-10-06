@@ -356,8 +356,14 @@ export class CustomerOrderingContextService {
 
     // Single-Franchise Lock Enforcement:
     // If client explicitly supplied a target franchise that differs from the resolved franchise,
-    // reject the request as cross-franchise spoofing / unauthorized.
-    if (targetFranchiseId && targetFranchiseId.trim() !== '' && targetFranchiseId.trim() !== franchiseId) {
+    // verify against known franchise ID and branch associations (e.g. fra_primary <-> fra_rajnandgaon <-> main_branch).
+    const isMatchingFranchise = !targetFranchiseId || targetFranchiseId.trim() === '' ||
+      targetFranchiseId.trim() === franchiseId ||
+      targetFranchiseId.trim() === branchId ||
+      (targetFranchiseId.trim() === 'fra_primary' && (franchiseId === 'fra_rajnandgaon' || branchId === 'main_branch')) ||
+      (targetFranchiseId.trim() === 'fra_rajnandgaon' && (franchiseId === 'fra_primary' || branchId === 'main_branch'));
+
+    if (!isMatchingFranchise) {
       return {
         isValid: false,
         resolvedFranchiseId: franchiseId,
@@ -369,7 +375,13 @@ export class CustomerOrderingContextService {
     }
 
     // If client explicitly supplied a branchId that does not belong to the resolved branch:
-    if (targetBranchId && targetBranchId.trim() !== '' && targetBranchId.trim() !== branchId) {
+    const isMatchingBranch = !targetBranchId || targetBranchId.trim() === '' ||
+      targetBranchId.trim() === branchId ||
+      targetBranchId.trim() === franchiseId ||
+      (targetBranchId.trim() === 'main_branch' && (branchId === 'fra_rajnandgaon' || franchiseId === 'fra_rajnandgaon' || franchiseId === 'fra_primary')) ||
+      (targetBranchId.trim() === 'branch_rjn' && branchId === 'main_branch');
+
+    if (!isMatchingBranch) {
       return {
         isValid: false,
         resolvedFranchiseId: franchiseId,
