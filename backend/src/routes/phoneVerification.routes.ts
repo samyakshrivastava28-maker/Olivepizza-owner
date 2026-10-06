@@ -330,6 +330,34 @@ router.post('/verify-otp', authLimiter, async (req: Request, res: Response) => {
           primaryUid: uid,
           verifiedAt: Date.now()
         }, { merge: true });
+
+        // Enrich with Veriphone intelligence in background
+        if (veriphoneService.isConfigured() && result.phone) {
+          veriphoneService.verifyNumber(result.phone).then(async (intel) => {
+            if (intel && intel.status === 'success') {
+              await userRef.set({
+                phoneIntelligence: {
+                  phone_valid: intel.phone_valid,
+                  phone_type: intel.phone_type || null,
+                  carrier: intel.carrier || null,
+                  country: intel.country || null,
+                  country_code: intel.country_code || null,
+                  region: intel.phone_region || null,
+                  international_format: intel.international_number || null,
+                  verifiedAt: Date.now()
+                }
+              }, { merge: true }).catch(() => {});
+
+              await adminDb.collection('phone_intelligence').doc(result.phone!).set({
+                ...intel,
+                primaryUid: uid,
+                verifiedAt: Date.now()
+              }, { merge: true }).catch(() => {});
+            }
+          }).catch((e) => {
+            console.warn('[PhoneVerification] Background Veriphone lookup error:', e.message);
+          });
+        }
       } catch (e: any) {
         console.warn('[PhoneVerification] Firestore update warning:', e.message);
       }
