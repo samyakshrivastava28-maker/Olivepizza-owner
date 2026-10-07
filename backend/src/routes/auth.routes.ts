@@ -880,6 +880,265 @@ router.post('/password-reset/reject', verifyToken, requireRole(['owner', 'admin'
   }
 });
 
+// ============================================================================
+// DESKTOP APP AUTHENTICATION BRIDGE (System Browser Loopback Gateway)
+// ============================================================================
+router.get('/desktop-login', async (req: Request, res: Response): Promise<void> => {
+  const desktopCallback = String(req.query.desktop_callback || '');
+  const appTarget = String(req.query.app || 'POS').toUpperCase();
+
+  // Validate loopback IP callback safety
+  const isLoopbackCallback = desktopCallback.startsWith('http://127.0.0.1:') || desktopCallback.startsWith('http://localhost:');
+  
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Olive Pizza — Desktop App Authentication</title>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0B0F17;
+      color: #F8FAFC;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .card {
+      background: #131B2B;
+      border: 1px solid #1E293B;
+      border-radius: 24px;
+      padding: 40px 32px;
+      max-width: 440px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    }
+    .logo {
+      font-size: 48px;
+      margin-bottom: 12px;
+      display: inline-block;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: #FFFFFF;
+    }
+    p {
+      font-size: 14px;
+      color: #94A3B8;
+      margin-bottom: 28px;
+      line-height: 1.5;
+    }
+    .btn {
+      width: 100%;
+      padding: 14px 20px;
+      border-radius: 14px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+    }
+    .btn-google {
+      background: #FFFFFF;
+      color: #0F172A;
+      box-shadow: 0 4px 12px rgba(255, 255, 255, 0.1);
+    }
+    .btn-google:hover {
+      background: #F1F5F9;
+      transform: translateY(-1px);
+    }
+    .status {
+      margin-top: 20px;
+      font-size: 13px;
+      color: #38BDF8;
+      display: none;
+    }
+    .error {
+      margin-top: 20px;
+      font-size: 13px;
+      color: #F87171;
+      display: none;
+      word-break: break-word;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 9999px;
+      background: rgba(249, 115, 22, 0.1);
+      color: #FB923C;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      border: 1px solid rgba(249, 115, 22, 0.2);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">🍕</div>
+    <div><span class="badge">Desktop Authentication • ${appTarget}</span></div>
+    <h1>Sign in to Olive Pizza</h1>
+    <p>Authenticate securely using your system browser. Upon successful sign-in, your desktop app will activate automatically.</p>
+
+    <button id="googleBtn" class="btn btn-google" onclick="handleGoogleSignIn()">
+      <svg width="18" height="18" viewBox="0 0 18 18">
+        <path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.616z"/>
+        <path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z"/>
+        <path fill="#FBBC05" d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707 0-.59.102-1.167.282-1.707V4.961H.957C.347 6.175 0 7.55 0 9s.347 2.825.957 4.039l3.007-2.332z"/>
+        <path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.293C4.672 5.166 6.656 3.58 9 3.58z"/>
+      </svg>
+      Continue with Google
+    </button>
+
+    <div id="statusMsg" class="status">Authenticating & transferring session to desktop app...</div>
+    <div id="errorMsg" class="error"></div>
+  </div>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "${process.env.VITE_FIREBASE_API_KEY || 'AIzaSyAqkcY-WQrW3WoZWRrv8oo7MTAI_nVrLw4'}",
+      authDomain: "olive-pizza-08.firebaseapp.com",
+      projectId: "olive-pizza-08",
+      storageBucket: "olive-pizza-08.firebasestorage.app",
+      messagingSenderId: "1017239455106",
+      appId: "1:1017239455106:web:0607d00669decfd9007b9b"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+    const desktopCallback = "${desktopCallback}";
+
+    async function handleGoogleSignIn() {
+      const btn = document.getElementById('googleBtn');
+      const status = document.getElementById('statusMsg');
+      const errEl = document.getElementById('errorMsg');
+      btn.disabled = true;
+      btn.style.opacity = '0.6';
+      status.style.display = 'block';
+      errEl.style.display = 'none';
+
+      try {
+        const provider = new firebase.auth.GoogleAuthProvider();
+        provider.setCustomParameters({ prompt: 'select_account' });
+        const result = await auth.signInWithPopup(provider);
+        const user = result.user;
+        const idToken = await user.getIdToken();
+
+        // Exchange for desktop custom token and authorize
+        const resp = await fetch('/api/auth/desktop-login/complete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            idToken,
+            appTarget: "${appTarget}",
+            uid: user.uid,
+            email: user.email
+          })
+        });
+
+        const data = await resp.json();
+        if (!data.success) {
+          throw new Error(data.message || 'Authorization failed for desktop terminal.');
+        }
+
+        status.innerText = '✓ Success! Returning to desktop application...';
+        status.style.color = '#4ADE80';
+
+        if (desktopCallback && ("${isLoopbackCallback}" === "true")) {
+          const redirectUrl = new URL(desktopCallback);
+          redirectUrl.searchParams.set('customToken', data.customToken);
+          redirectUrl.searchParams.set('idToken', idToken);
+          redirectUrl.searchParams.set('email', user.email || '');
+          window.location.href = redirectUrl.toString();
+        } else {
+          status.innerText = '✓ Authenticated! Please return to your Olive Pizza desktop app.';
+        }
+      } catch (err) {
+        console.error('Desktop auth error:', err);
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        status.style.display = 'none';
+        errEl.innerText = err.message || 'Authentication failed. Please try again.';
+        errEl.style.display = 'block';
+
+        if (desktopCallback && ("${isLoopbackCallback}" === "true")) {
+          try {
+            const redirectUrl = new URL(desktopCallback);
+            redirectUrl.searchParams.set('error', err.message || 'Auth failed');
+            window.location.href = redirectUrl.toString();
+          } catch (_) {}
+        }
+      }
+    }
+  </script>
+</body>
+</html>`;
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
+});
+
+router.post('/desktop-login/complete', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { idToken, appTarget, uid, email } = req.body;
+    if (!idToken) {
+      res.status(400).json({ success: false, message: 'Identity token is required' });
+      return;
+    }
+
+    const decoded = await adminAuth.verifyIdToken(idToken);
+    const targetUid = decoded.uid;
+    const targetEmail = (decoded.email || email || '').toLowerCase().trim();
+
+    // Verify operational permissions with FranchiseAccessService
+    const resolution = await FranchiseAccessService.resolveAuthorization({
+      uid: targetUid,
+      email: targetEmail,
+      phoneNumber: decoded.phone_number,
+      emailVerified: decoded.email_verified,
+      targetApp: appTarget || 'POS'
+    });
+
+    if (!resolution.authorized) {
+      res.status(403).json({
+        success: false,
+        authorized: false,
+        code: resolution.code,
+        message: resolution.reason || 'This account is not authorized for this desktop application.'
+      });
+      return;
+    }
+
+    // Generate authenticated Custom Token for desktop client session
+    const customToken = await adminAuth.createCustomToken(targetUid, {
+      role: resolution.user?.role || 'staff',
+      targetApp: appTarget || 'POS'
+    });
+
+    res.json({
+      success: true,
+      customToken,
+      user: resolution.user
+    });
+  } catch (err: any) {
+    console.error('[AuthRoutes] Desktop auth completion error:', err);
+    res.status(500).json({ success: false, message: err.message || 'Failed to complete desktop authentication' });
+  }
+});
+
 import { handlePhoneSignin } from './phoneVerification.routes.js';
 router.post('/signin', authLimiter, handlePhoneSignin);
 

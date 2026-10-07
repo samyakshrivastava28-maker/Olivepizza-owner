@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router';
 import { auth, googleProvider } from '../lib/firebase';
-import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, GoogleAuthProvider } from 'firebase/auth';
+import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, signInWithCustomToken, GoogleAuthProvider } from 'firebase/auth';
 import { Capacitor } from '@capacitor/core';
 import { useAuthStore, isAuthorizedOwnerEmail } from '../lib/store';
 import { Lock, Mail, AlertCircle, ArrowRight } from 'lucide-react';
@@ -62,7 +62,15 @@ export default function Login() {
     setLoading(true);
     try {
       let user: any = null;
-      if (Capacitor.isNativePlatform()) {
+      const electronAPI = (window as any).electronAPI;
+      if (electronAPI?.startBrowserAuth) {
+        const authResult = await electronAPI.startBrowserAuth();
+        if (!authResult || !authResult.customToken) {
+          throw new Error('Desktop browser authentication did not complete');
+        }
+        const userCredential = await signInWithCustomToken(auth, authResult.customToken);
+        user = userCredential.user;
+      } else if (Capacitor.isNativePlatform()) {
         const { FirebaseAuthentication } = await import('@capacitor-firebase/authentication');
         const nativeResult = await FirebaseAuthentication.signInWithGoogle();
         if (nativeResult.credential?.idToken) {
