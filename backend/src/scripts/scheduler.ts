@@ -4,10 +4,14 @@ import { OrderTimeoutWorker } from '../services/order/OrderTimeoutWorker.js';
 import { DailySheetsSyncJob } from '../jobs/DailySheetsSyncJob.js';
 import { AbandonedCartJob } from '../jobs/AbandonedCartJob.js';
 import { MonthlyReportJob } from '../jobs/MonthlyReportJob.js';
+import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
 
 export function initScheduler() {
   // Initialize 10-minute unaccepted order auto-cancellation worker
   OrderTimeoutWorker.init();
+
+  // Initialize durable order archival reconciliation worker (Phase 1.F)
+  OrderPersistenceArchiveService.initWorker();
 
   // Initialize expiry engine
   DataExpiryJob.schedule();

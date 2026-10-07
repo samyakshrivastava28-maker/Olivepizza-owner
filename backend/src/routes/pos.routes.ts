@@ -418,7 +418,13 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
       deliveryFee: calc.deliveryFee,
       totalAmount: calc.finalTotal,
       paymentMethod: (paymentMethod || 'CASH').toUpperCase(),
-      paymentStatus: 'PAID',
+      paymentStatus: ((): string => {
+        const m = (paymentMethod || 'CASH').toUpperCase();
+        if (m === 'CASH') return Number(amountReceived || 0) >= (calc.finalTotal - 0.05) ? 'PAID' : 'PENDING';
+        if (m === 'CARD') return (edcAuthCode && String(edcAuthCode).trim().length > 0) ? 'PAID' : 'PENDING';
+        if (m === 'UPI') return (edcAuthCode || req.body.upiRef || req.body.transactionId) ? 'PAID' : 'PENDING';
+        return 'PAID';
+      })(),
       orderStatus: resolvedOrderType === 'DINE_IN' ? 'preparing' : 'pending_acceptance',
       franchiseId,
       branchId,
@@ -434,6 +440,14 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
     const orderNumber = `#${dailyOrderNumber}`;
     const billNumber = `#${permanentBillNo}`;
     const today = canonical.orderDate;
+
+    const resolvedPaymentStatus = ((): string => {
+      const m = (paymentMethod || 'CASH').toUpperCase();
+      if (m === 'CASH') return Number(amountReceived || 0) >= (calc.finalTotal - 0.05) ? 'PAID' : 'PENDING';
+      if (m === 'CARD') return (edcAuthCode && String(edcAuthCode).trim().length > 0) ? 'PAID' : 'PENDING';
+      if (m === 'UPI') return (edcAuthCode || req.body.upiRef || req.body.transactionId) ? 'PAID' : 'PENDING';
+      return 'PAID';
+    })();
 
     const orderDocData = {
       id: newOrderId,
@@ -457,13 +471,13 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
       finalTotal: calc.finalTotal,
       status: resolvedOrderType === 'DINE_IN' ? 'preparing' : 'pending_acceptance',
       paymentMethod: (paymentMethod || 'CASH').toUpperCase(),
-      paymentStatus: 'PAID',
+      paymentStatus: resolvedPaymentStatus,
       paymentDetails: {
         method: paymentMethod || 'CASH',
         amountReceived: Number(amountReceived || calc.finalTotal),
         changeDue: Number(changeDue || 0),
         edcAuthCode: edcAuthCode || null,
-        paidAt: new Date().toISOString()
+        paidAt: resolvedPaymentStatus === 'PAID' ? new Date().toISOString() : null
       },
       orderType: resolvedOrderType.toLowerCase(),
       source: 'POS',

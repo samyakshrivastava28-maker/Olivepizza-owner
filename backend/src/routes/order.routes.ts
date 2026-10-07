@@ -989,8 +989,16 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         });
         return;
       }
-    } catch (lockErr) {
-      console.warn('[Orders] Checkout lock skipped (DB table unavailable/optional):', lockErr);
+    } catch (lockErr: any) {
+      console.error('[Orders] Critical: Checkout lock service unavailable:', lockErr?.message);
+      if (isDebug) trace.steps.push({ step: 'Idempotency Lock', status: 'failed', error: lockErr?.message });
+      res.status(503).json({
+        success: false,
+        error: 'Order checkout lock service temporarily unavailable. Please retry placing your order.',
+        code: 'LOCK_SERVICE_UNAVAILABLE',
+        trace: isDebug ? trace : undefined
+      });
+      return;
     }
     trace.steps.push({ step: 'Idempotency Lock', status: 'success' });
 
@@ -1008,7 +1016,24 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       const rawPaymentMethod = (req.body.paymentMethod || 'COD').toUpperCase();
 
       if (resolvedOrderSource !== 'ONLINE') {
-        initialPaymentStatus = rawPaymentMethod === 'COD' ? 'PENDING' : 'PAID';
+        // Enforce POS payment authority (Requirement 1.E)
+        if (!isStaff) {
+          res.status(403).json({
+            error: 'Forbidden: Non-online order creation requires authenticated staff credentials.',
+            code: 'FORBIDDEN_ORDER_SOURCE'
+          });
+          return;
+        }
+        if (rawPaymentMethod === 'COD') {
+          initialPaymentStatus = 'PENDING';
+        } else if (rawPaymentMethod === 'CASH') {
+          const cashReceived = Number(req.body.amountReceived || req.body.paymentDetails?.amountReceived || finalOrderTotal);
+          initialPaymentStatus = cashReceived >= finalOrderTotal - 0.05 ? 'PAID' : 'PENDING';
+        } else {
+          // Card / UPI / Split: verify settlement details
+          const isSettled = req.body.paymentDetails?.settled === true || !!req.body.paymentDetails?.edcAuthCode || !!req.body.paymentDetails?.transactionId;
+          initialPaymentStatus = isSettled ? 'PAID' : 'PENDING';
+        }
       } else if (rawPaymentMethod !== 'COD') {
         const incomingPaymentId = req.body.paymentId;
         if (incomingPaymentId) {

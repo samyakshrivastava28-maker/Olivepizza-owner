@@ -1,4 +1,4 @@
-﻿# Dependencies
+# Dependencies
 node_modules/
 .pnp
 .pnp.js
@@ -20,6 +20,8 @@ coverage/
 *.key
 *.p12
 *.pfx
+*.keystore
+*.jks
 credentials/
 serviceAccountKey*.json
 service-account*.json

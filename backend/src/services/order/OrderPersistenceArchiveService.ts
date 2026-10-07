@@ -39,6 +39,8 @@ export interface VerificationResult {
   statusMatches: boolean;
   totalMatches: boolean;
   permanentBillNo?: number;
+  paymentConsistent?: boolean;
+  itemsConsistent?: boolean;
   reason?: string;
 }
 
@@ -90,11 +92,24 @@ export class OrderPersistenceArchiveService {
       else if (rawStatus === 'cancelled' || rawStatus === 'rejected') pgOrderStatus = 'CANCELLED';
 
       const paymentMethod = (orderData.paymentMethod || 'COD').toUpperCase();
-      let paymentStatus = (orderData.paymentStatus || (paymentMethod === 'COD' ? 'PENDING' : 'PAID')).toUpperCase();
-      if (rawStatus === 'delivered' && paymentMethod === 'COD') {
+      // Requirement 1.B: NEVER infer PAID from missing payment status!
+      // Unknown/missing payment state remains PENDING.
+      // Only explicitly verified payment becomes PAID.
+      // COD becomes PAID only upon legitimate delivery collection.
+      let paymentStatus = 'PENDING';
+      const rawPaymentStatus = orderData.paymentStatus ? String(orderData.paymentStatus).toUpperCase() : null;
+      if (rawPaymentStatus === 'PAID') {
         paymentStatus = 'PAID';
-      } else if (rawStatus === 'cancelled' && paymentStatus === 'PAID') {
+      } else if (rawPaymentStatus === 'REFUNDED') {
         paymentStatus = 'REFUNDED';
+      } else if (rawPaymentStatus === 'FAILED') {
+        paymentStatus = 'FAILED';
+      } else if (rawStatus === 'delivered' && paymentMethod === 'COD' && orderData.codCollected === true) {
+        paymentStatus = 'PAID';
+      } else if (rawStatus === 'cancelled' && rawPaymentStatus === 'PAID') {
+        paymentStatus = 'REFUNDED';
+      } else {
+        paymentStatus = rawPaymentStatus || 'PENDING';
       }
 
       const subtotal = Number(orderData.subtotal || 0);
@@ -194,10 +209,16 @@ export class OrderPersistenceArchiveService {
           rawStatus === 'delivered' || rawStatus === 'cancelled' ? 'TERMINAL' : 'ACTIVE'
         ]);
 
-        // 2. Insert line items if present
+        // 2. Insert/Upsert line items deterministically (Requirement 1.A)
         const rawItems = Array.isArray(orderData.items) ? orderData.items : [];
-        for (const it of rawItems) {
-          const itemId = crypto.randomUUID();
+        const currentItemIds: string[] = [];
+
+        for (let idx = 0; idx < rawItems.length; idx++) {
+          const it = rawItems[idx];
+          // Deterministic identity derived from orderId + lineIndex
+          const itemId = `item_${orderId}_${idx}`;
+          currentItemIds.push(itemId);
+
           const itName = it.name || it.productName || 'Pizza';
           const itQty = Math.max(1, Number(it.quantity) || 1);
           const itPrice = Number(it.price || it.unitPrice || 0);
@@ -210,12 +231,27 @@ export class OrderPersistenceArchiveService {
             ) VALUES (
               $1, $2, $3, $4, $5,
               $6, $7, $8, $9::jsonb, $10
-            ) ON CONFLICT (id) DO NOTHING;
+            ) ON CONFLICT (id) DO UPDATE SET
+              item_name = EXCLUDED.item_name,
+              size_variant = EXCLUDED.size_variant,
+              crust = EXCLUDED.crust,
+              quantity = EXCLUDED.quantity,
+              unit_price = EXCLUDED.unit_price,
+              addons_json = EXCLUDED.addons_json,
+              line_total = EXCLUDED.line_total;
           `, [
             itemId, orderId, it.menuItemId || it.id || null, itName,
             it.size || 'Regular', it.crust || 'Normal', itQty, itPrice,
             JSON.stringify(it.addons || []), lineTotal
           ]);
+        }
+
+        // Clean up any stale items for this order not in current payload
+        if (currentItemIds.length > 0) {
+          await client.query(`
+            DELETE FROM canonical_order_items 
+            WHERE order_id = $1 AND id != ALL($2::text[])
+          `, [orderId, currentItemIds]);
         }
 
         // 3. Upsert canonical financial bill
@@ -309,7 +345,7 @@ export class OrderPersistenceArchiveService {
   ): Promise<VerificationResult> {
     try {
       const orderRes = await query(
-        `SELECT id, order_status, total_amount, permanent_bill_no FROM canonical_orders WHERE id = $1`,
+        `SELECT id, order_status, total_amount, permanent_bill_no, payment_status FROM canonical_orders WHERE id = $1`,
         [orderId]
       );
 
@@ -327,7 +363,7 @@ export class OrderPersistenceArchiveService {
 
       const orderRow = orderRes.rows[0];
       const billRes = await query(
-        `SELECT id, net_amount, payment_status, is_cancelled FROM canonical_bills WHERE order_id = $1`,
+        `SELECT id, net_amount, payment_status, is_cancelled, permanent_bill_no FROM canonical_bills WHERE order_id = $1`,
         [orderId]
       );
 
@@ -353,7 +389,38 @@ export class OrderPersistenceArchiveService {
       const dbTotal = Number(orderRow.total_amount || 0);
       const totalMatches = Math.abs(dbTotal - Number(expectedTotal || 0)) <= 0.05;
 
-      const isVerified = statusMatches && totalMatches;
+      // 1. Permanent Bill Number check (must be a positive integer)
+      const permBillNo = parseInt(orderRow.permanent_bill_no, 10);
+      const hasValidBillNo = !isNaN(permBillNo) && permBillNo > 0;
+
+      // 2. Payment State consistency check (canonical_bills vs canonical_orders)
+      const billPaymentStatus = (billRes.rows[0].payment_status || '').toUpperCase();
+      const orderPaymentStatus = (orderRow.payment_status || '').toUpperCase();
+      const paymentStateConsistent = (
+        billPaymentStatus === orderPaymentStatus ||
+        (normalizedExpectedStatus === 'CANCELLED' && (billRes.rows[0].is_cancelled === true || billPaymentStatus === 'REFUNDED'))
+      );
+
+      // 3. Line items consistency check (at least 1 line item persisted)
+      const itemRes = await query(
+        `SELECT COUNT(*) AS count FROM canonical_order_items WHERE order_id = $1`,
+        [orderId]
+      );
+      const itemCount = parseInt(itemRes.rows[0]?.count || '0', 10);
+      const itemsConsistent = itemCount > 0;
+
+      const isVerified = statusMatches && totalMatches && hasValidBillNo && paymentStateConsistent && itemsConsistent;
+
+      let failureReason: string | undefined = undefined;
+      if (!isVerified) {
+        const issues: string[] = [];
+        if (!statusMatches) issues.push(`statusMismatch (${pgStatus} vs ${normalizedExpectedStatus})`);
+        if (!totalMatches) issues.push(`totalMismatch (PG: ${dbTotal} vs expected: ${expectedTotal})`);
+        if (!hasValidBillNo) issues.push(`invalidBillNo (${orderRow.permanent_bill_no})`);
+        if (!paymentStateConsistent) issues.push(`paymentStateInconsistent (order: ${orderPaymentStatus}, bill: ${billPaymentStatus})`);
+        if (!itemsConsistent) issues.push(`missingLineItems (count: ${itemCount})`);
+        failureReason = `Verification failed: ${issues.join(', ')}`;
+      }
 
       return {
         verified: isVerified,
@@ -362,8 +429,10 @@ export class OrderPersistenceArchiveService {
         billRowExists: true,
         statusMatches,
         totalMatches,
-        permanentBillNo: parseInt(orderRow.permanent_bill_no, 10),
-        reason: isVerified ? undefined : `Mismatch: statusMatch=${statusMatches} (${pgStatus} vs ${normalizedExpectedStatus}), totalMatch=${totalMatches} (${dbTotal} vs ${expectedTotal})`
+        permanentBillNo: hasValidBillNo ? permBillNo : undefined,
+        paymentConsistent: paymentStateConsistent,
+        itemsConsistent,
+        reason: failureReason
       };
     } catch (err: any) {
       return {
@@ -718,7 +787,26 @@ export class OrderPersistenceArchiveService {
         }
       }
 
-      // 2. Check for active orders where postgresPersistence is PENDING
+      // 2. Check for orders stuck in transitional/failed archival lifecycle states
+      const finalizingSnap = await adminDb.collection('orders')
+        .where('lifecycle', 'in', ['FINALIZING', 'ARCHIVE_SYNC_FAILED', 'ARCHIVE_VERIFICATION_FAILED'])
+        .limit(25)
+        .get();
+
+      for (const doc of finalizingSnap.docs) {
+        try {
+          const res = await this.finalizeAndArchiveTerminalOrder(doc.id);
+          if (res.success && res.deletedFromFirestore) {
+            archived++;
+          } else if (!res.success) {
+            errors++;
+          }
+        } catch {
+          errors++;
+        }
+      }
+
+      // 3. Check for active orders where postgresPersistence is PENDING
       const pendingSnap = await adminDb.collection('orders')
         .where('postgresPersistence', '==', 'PENDING')
         .limit(25)
@@ -741,5 +829,32 @@ export class OrderPersistenceArchiveService {
     }
 
     return { synced, archived, errors };
+  }
+
+  private static workerInterval: NodeJS.Timeout | null = null;
+
+  /**
+   * Initializes periodic archival reconciliation worker (runs every 2 minutes).
+   */
+  public static initWorker(intervalMs: number = 120000): void {
+    if (this.workerInterval) return;
+
+    // Initial sweep 10 seconds after server boot
+    setTimeout(() => {
+      this.reconcileArchivalWorker().catch(() => {});
+    }, 10000);
+
+    this.workerInterval = setInterval(() => {
+      this.reconcileArchivalWorker().catch(() => {});
+    }, intervalMs);
+
+    console.log(`[OrderPersistence] Durable order archival reconciliation worker scheduled (every ${intervalMs / 1000}s).`);
+  }
+
+  public static stopWorker(): void {
+    if (this.workerInterval) {
+      clearInterval(this.workerInterval);
+      this.workerInterval = null;
+    }
   }
 }

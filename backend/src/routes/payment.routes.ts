@@ -147,46 +147,79 @@ router.post('/verify', verifyToken, async (req: AuthRequest, res: Response) => {
       providerTransactionId,
     });
 
-    // 5. Enforce Amount Matching and Captured Status
-    if (verifyResult.verified && verifyResult.status === 'captured') {
-      const expectedAmount = Number(canonicalPayment.amount || 0);
-      const receivedAmount = Number(verifyResult.amount || 0);
-
-      // Verify amount (skip only if provider returned 0 for non-monetary check, but strict if receivedAmount > 0)
-      if (receivedAmount > 0 && Math.abs(expectedAmount - receivedAmount) > 0.05) {
-        console.error(`[PaymentSecurity][${requestId}] AMOUNT TAMPER ALERT for payment ${paymentId}: Expected ₹${expectedAmount}, received ₹${receivedAmount}`);
-        return res.status(400).json({
-          success: false,
-          verified: false,
-          error: `Payment amount mismatch: Expected ₹${expectedAmount}, received ₹${receivedAmount}`,
-        });
-      }
-
-      const finalTxId = verifyResult.providerTransactionId || providerTransactionId || `tx_${Date.now()}`;
-
-      await query(
-        "UPDATE payments SET status = 'PAYMENT_CAPTURED', provider_transaction_id = $2, verified_at = NOW() WHERE id = $1",
-        [paymentId, finalTxId]
-      );
-
-      console.log(`[PaymentSecurity][${requestId}] Payment ${paymentId} successfully verified & CAPTURED via ${providerName} (txId: ${finalTxId})`);
-
-      return res.json({
-        success: true,
-        verified: true,
-        status: 'captured',
-        providerPaymentId: verifyResult.providerPaymentId || providerPaymentId,
-        providerTransactionId: finalTxId,
-      });
-    } else {
+    // 5. Enforce Strict Provider Verification, Amount Matching and Captured Status (Requirement 1.C)
+    const finalTxId = verifyResult.providerTransactionId || providerTransactionId;
+    if (!verifyResult.verified || verifyResult.status !== 'captured') {
       console.warn(`[PaymentSecurity][${requestId}] Verification rejected for ${paymentId}: ${verifyResult.errorReason || 'Not captured'}`);
       return res.status(400).json({
         success: false,
         verified: false,
         status: verifyResult.status || 'failed',
-        error: verifyResult.errorReason || 'Payment verification failed at provider',
+        error: verifyResult.errorReason || 'Payment verification failed at provider (not captured)',
       });
     }
+
+    // Require real non-empty provider transaction ID (never fall back to fake random ID)
+    if (!finalTxId || typeof finalTxId !== 'string' || finalTxId.trim().length === 0) {
+      console.error(`[PaymentSecurity][${requestId}] REJECT: Missing provider transaction ID for payment ${paymentId}`);
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        status: 'failed',
+        error: 'Payment provider transaction ID is missing or invalid',
+      });
+    }
+
+    const expectedAmount = Number(canonicalPayment.amount || 0);
+    const receivedAmount = Number(verifyResult.amount || 0);
+
+    // Require positive monetary value
+    if (receivedAmount <= 0) {
+      console.error(`[PaymentSecurity][${requestId}] REJECT: Zero or non-positive amount received for payment ${paymentId}`);
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        status: 'failed',
+        error: 'Invalid payment amount received from provider (must be greater than 0)',
+      });
+    }
+
+    // Amount must match canonical PostgreSQL amount within accepted precision
+    if (Math.abs(expectedAmount - receivedAmount) > 0.05) {
+      console.error(`[PaymentSecurity][${requestId}] AMOUNT TAMPER ALERT for payment ${paymentId}: Expected ₹${expectedAmount}, received ₹${receivedAmount}`);
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        status: 'failed',
+        error: `Payment amount mismatch: Expected ₹${expectedAmount}, received ₹${receivedAmount}`,
+      });
+    }
+
+    // Currency check if provided
+    if (verifyResult.currency && String(verifyResult.currency).toUpperCase() !== 'INR') {
+      console.error(`[PaymentSecurity][${requestId}] Currency mismatch for payment ${paymentId}: ${verifyResult.currency}`);
+      return res.status(400).json({
+        success: false,
+        verified: false,
+        status: 'failed',
+        error: `Payment currency mismatch: Expected INR, received ${verifyResult.currency}`,
+      });
+    }
+
+    await query(
+      "UPDATE payments SET status = 'PAYMENT_CAPTURED', provider_transaction_id = $2, verified_at = NOW() WHERE id = $1",
+      [paymentId, finalTxId]
+    );
+
+    console.log(`[PaymentSecurity][${requestId}] Payment ${paymentId} successfully verified & CAPTURED via ${providerName} (txId: ${finalTxId})`);
+
+    return res.json({
+      success: true,
+      verified: true,
+      status: 'captured',
+      providerPaymentId: verifyResult.providerPaymentId || providerPaymentId,
+      providerTransactionId: finalTxId,
+    });
   } catch (error: any) {
     console.error(`[PaymentSecurity][${requestId}] Internal error during verification:`, error.message);
     res.status(500).json({ success: false, error: 'Internal payment verification failure' });

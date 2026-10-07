@@ -21,11 +21,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 2. Setup Node.js 22
+      # 2. Setup Node.js 24
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: 'frontend/package.json'
 
@@ -99,15 +99,19 @@ jobs:
       - name: Prepare Keystore
         env:
           KEYSTORE_BASE64: '${{ secrets.KEYSTORE_BASE64 }}'
+          KEYSTORE_PASSWORD: '${{ secrets.KEYSTORE_PASSWORD }}'
+          KEY_ALIAS: '${{ secrets.KEY_ALIAS }}'
         run: |
           KEYSTORE_PATH="android/app/release.keystore"
+          PASS="${KEYSTORE_PASSWORD:-olivepizza}"
+          ALIAS="${KEY_ALIAS:-olivepizza}"
           VALID_KEYSTORE=false
 
           # 1. Try decoding KEYSTORE_BASE64 secret if available
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > "$KEYSTORE_PATH.tmp" 2>/dev/null || true
             if [ -s "$KEYSTORE_PATH.tmp" ]; then
-              if keytool -list -keystore "$KEYSTORE_PATH.tmp" -storepass olivepizza -alias olivepizza >/dev/null 2>&1; then
+              if keytool -list -keystore "$KEYSTORE_PATH.tmp" -storepass "$PASS" -alias "$ALIAS" >/dev/null 2>&1; then
                 mv "$KEYSTORE_PATH.tmp" "$KEYSTORE_PATH"
                 VALID_KEYSTORE=true
                 echo "✅ Successfully decoded and verified keystore from KEYSTORE_BASE64 secret."
@@ -116,26 +120,30 @@ jobs:
             rm -f "$KEYSTORE_PATH.tmp"
           fi
 
-          # 2. Check committed keystore in repository
+          # 2. Check keystore in repository
           if [ "$VALID_KEYSTORE" = false ] && [ -f "$KEYSTORE_PATH" ]; then
-            if keytool -list -keystore "$KEYSTORE_PATH" -storepass olivepizza -alias olivepizza >/dev/null 2>&1; then
+            if keytool -list -keystore "$KEYSTORE_PATH" -storepass "$PASS" -alias "$ALIAS" >/dev/null 2>&1; then
               VALID_KEYSTORE=true
-              echo "✅ Verified existing release.keystore from repository."
+              echo "✅ Verified release.keystore."
             fi
           fi
 
           if [ "$VALID_KEYSTORE" = false ]; then
-            echo "❌ No valid release.keystore found!"
+            echo "❌ No valid release.keystore found or credentials mismatch!"
             exit 1
           fi
 
-          keytool -list -keystore "$KEYSTORE_PATH" -storepass olivepizza -alias olivepizza \
-            && echo "✅ Keystore ready and verified — alias 'olivepizza' found."
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$PASS" -alias "$ALIAS" \
+            && echo "✅ Keystore ready and verified — alias '$ALIAS' found."
 
       # 11. Build Signed Release APK
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon
         working-directory: android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || 'olivepizza' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || secrets.ANDROID_KEY_ALIAS || 'olivepizza' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.ANDROID_KEY_PASSWORD || secrets.KEYSTORE_PASSWORD || 'olivepizza' }}
 
       # 12. Verify the APK is properly signed
       - name: Verify APK Signature

@@ -13,7 +13,7 @@ const config: CapacitorConfig = {
     contentInset: 'always',
   },
   android: {
-    allowMixedContent: true,
+    allowMixedContent: false,
     captureInput: true,
     webContentsDebuggingEnabled: false,
     backgroundColor: '#0B0F17',
