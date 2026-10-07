@@ -485,6 +485,18 @@ export class OrderStateMachine {
         await client.query('COMMIT').catch(() => {});
       }
 
+      // Terminal Order Finalization: Synchronize to PostgreSQL and purge live Firestore document after grace period
+      if (toState === 'delivered' || toState === 'cancelled') {
+        setTimeout(async () => {
+          try {
+            const { OrderPersistenceArchiveService } = await import('./OrderPersistenceArchiveService.js');
+            await OrderPersistenceArchiveService.finalizeAndArchiveTerminalOrder(orderId);
+          } catch (archiveErr: any) {
+            console.warn(`[OrderStateMachine] Terminal archival background notice for ${orderId}:`, archiveErr.message);
+          }
+        }, 15000); // 15s grace period for live sound & UI delivery notifications
+      }
+
       return {
         success: true,
         orderId,

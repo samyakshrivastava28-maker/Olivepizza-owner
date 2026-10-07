@@ -19,6 +19,7 @@ import { CanonicalOrderService } from '../services/pos/CanonicalOrderService.js'
 import { BillingNumberService } from '../services/pos/BillingNumberService.js';
 import { calculateDistance } from '../lib/utils.js';
 import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
+import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
 import crypto from 'crypto';
 
 // Restaurant local timezone for daily order counter reset
@@ -92,21 +93,31 @@ router.get('/', verifyToken, async (req: AuthRequest, res: Response): Promise<vo
       return;
     }
 
-    // Normal customer: fetch only their own orders
-    const snapshot = await adminDb.collection('orders')
-      .where('userId', '==', user.uid)
-      .orderBy('createdAt', 'desc')
-      .limit(50)
-      .get()
-      .catch(async () => {
-        return await adminDb.collection('orders').where('userId', '==', user.uid).limit(50).get();
-      });
+    // Normal customer: fetch both active Firestore orders and archived PostgreSQL orders
+    const [snapshot, pgHistorical] = await Promise.all([
+      adminDb.collection('orders')
+        .where('userId', '==', user.uid)
+        .orderBy('createdAt', 'desc')
+        .limit(50)
+        .get()
+        .catch(async () => {
+          return await adminDb.collection('orders').where('userId', '==', user.uid).limit(50).get();
+        }),
+      OrderPersistenceArchiveService.getCustomerHistoricalOrders(user.uid, (user as any).phone || (user as any).phone_number)
+    ]);
       
-    const orders = snapshot.docs
+    const activeOrders = snapshot.docs
       .map((doc: any) => OrderProjectionService.projectForCustomer(doc.data(), user.uid, doc.id))
       .filter(Boolean);
 
-    res.json(orders);
+    const activeIds = new Set(activeOrders.map((o: any) => o.id));
+    const pastOrders = (pgHistorical || [])
+      .filter((po: any) => !activeIds.has(po.id))
+      .map((po: any) => OrderProjectionService.projectForCustomer(po, user.uid, po.id))
+      .filter(Boolean);
+
+    const combined = [...activeOrders, ...pastOrders];
+    res.json(combined);
   } catch (error) {
     console.error("[Orders] Failed to fetch orders:", error);
     res.status(500).json({ error: 'Failed to fetch orders' });
@@ -378,13 +389,20 @@ router.get('/:id', verifyToken, async (req: AuthRequest, res: Response): Promise
       return;
     }
 
+    let data: any = null;
     const docSnap = await adminDb.collection('orders').doc(id).get();
-    if (!docSnap.exists) {
+    if (docSnap.exists) {
+      data = { id: docSnap.id, ...docSnap.data() };
+    } else {
+      // Fallback: check PostgreSQL canonical archive for completed/archived order
+      data = await OrderPersistenceArchiveService.getHistoricalOrder(id);
+    }
+
+    if (!data) {
       res.status(404).json({ error: 'Order not found' });
       return;
     }
 
-    const data = docSnap.data()!;
     const scope = FranchiseScopeService.resolveScope(user);
     try {
       FranchiseScopeService.assertOrderAccess(scope, data, user.uid);
@@ -393,7 +411,7 @@ router.get('/:id', verifyToken, async (req: AuthRequest, res: Response): Promise
       return;
     }
 
-    const projected = OrderProjectionService.projectByRole({ id: docSnap.id, ...data }, user);
+    const projected = OrderProjectionService.projectByRole(data, user);
     res.json({ success: true, order: projected });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to fetch order' });
@@ -1015,50 +1033,29 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         }
       }
 
-      const canonical = await CanonicalOrderService.createCanonicalOrder({
-        id: newOrderId,
-        orderSource: resolvedOrderSource as any,
-        orderType: deliveryType === 'delivery' ? 'delivery' : 'pickup',
-        customerName: userData.name || (req.user as any)?.name || 'Gourmet Customer',
-        customerPhone: userPhone || 'N/A',
-        deliveryAddress: userAddress || undefined,
-        items: validatedItems.map(it => ({
-          menuItemId: it.menuItemId,
-          name: it.name,
-          price: it.price,
-          quantity: it.quantity,
-          size: it.size || 'Regular',
-          crust: it.crust || 'Normal',
-          addons: it.addons || []
-        })),
-        subtotal: serverCalculatedTotal,
-        discountAmount,
-        couponCode: appliedCouponCode || undefined,
-        taxAmount: taxes,
-        cgst: Math.round(taxes / 2),
-        sgst: taxes - Math.round(taxes / 2),
-        deliveryFee,
-        totalAmount: finalOrderTotal,
-        paymentMethod: rawPaymentMethod,
-        paymentStatus: initialPaymentStatus,
-        orderStatus: 'PLACED',
-        franchiseId: resolvedFranchiseId,
-        branchId: resolvedBranchId,
-        cashierName: resolvedCashierName || 'Online App',
-        terminalId: resolvedTerminalId || 'ONLINE-APP',
-        notes: req.body.notes || ''
-      });
+      let permanentBillNo: number | null = null;
+      let dailyOrderNumber: number | null = null;
+      let orderDateLocal = BillingNumberService.getLocalDateString();
 
-    const permanentBillNo = canonical.permanentBillNo;
-    const dailyOrderNumber = canonical.dailyOrderNo;
-    const orderNumber = `#${dailyOrderNumber}`;
-    const billNumber = `#${permanentBillNo}`;
-    const billReference = 'bill_' + crypto.randomBytes(12).toString('hex');
-    const orderDateLocal = canonical.orderDate;
+      try {
+        const nums = await BillingNumberService.allocateNumbers();
+        permanentBillNo = nums.permanentBillNo;
+        dailyOrderNumber = nums.dailyOrderNo;
+        orderDateLocal = nums.orderDate;
+      } catch (numErr) {
+        console.warn('[Orders] Number allocation notice during checkout:', numErr);
+      }
 
-    try {
-      await adminDb.collection('orders').doc(newOrderId).set({
+      const orderNumber = dailyOrderNumber ? `#${dailyOrderNumber}` : `#${newOrderId.slice(0, 6).toUpperCase()}`;
+      const billNumber = permanentBillNo ? `#${permanentBillNo}` : `#BILL-${newOrderId.slice(0, 6).toUpperCase()}`;
+      const billReference = 'bill_' + crypto.randomBytes(12).toString('hex');
+
+      const orderFirestoreDoc = {
         id: newOrderId,
+        orderId: newOrderId,
+        lifecycle: 'ACTIVE',
+        postgresPersistence: 'PENDING',
+        postgresSyncError: null,
         permanentBillNo,
         billNumber,
         billReference,
@@ -1066,6 +1063,7 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         orderNumber,
         orderDateLocal,
         userId,
+        customerId: userId,
         items: validatedItems,
         totalAmount: finalOrderTotal,
         subtotal: serverCalculatedTotal,
@@ -1093,6 +1091,7 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         daily_order_number: orderNumber,
         paymentMethod: req.body.paymentMethod || 'COD',
         paymentId: req.body.paymentId || ('pay_' + newOrderId.slice(0, 8)),
+        paymentStatus: initialPaymentStatus,
         // Phase 3 canonical order fields
         source: resolvedOrderSource.startsWith('POS') ? 'POS' : 'ONLINE',
         orderSource: resolvedOrderSource,
@@ -1112,54 +1111,66 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         notificationDispatched: true,
         createdAt: new Date(),
         updatedAt: new Date(),
+      };
+
+      try {
+        await adminDb.collection('orders').doc(newOrderId).set(orderFirestoreDoc);
+
+        // Mark order as already processed in FirestoreListener to prevent duplicate new-order alert
+        FirestoreListener.markOrderProcessed(newOrderId);
+
+        trace.steps.push({ step: 'Firestore Write', status: 'success', orderId: newOrderId, dailyOrderNumber, permanentBillNo, billReference });
+
+        // Reset user's active cart upon successful order placement (prevents abandoned cart reminder)
+        adminDb.collection('user_carts').doc(userId).set({
+          userId,
+          items: [],
+          total: 0,
+          itemCount: 0,
+          lastOrderId: newOrderId,
+          lastOrderPlacedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          abandonedCartReminderSentAt: null
+        }, { merge: true }).catch(() => {});
+
+        // Asynchronously sync online order to franchise-specific Google Spreadsheet
+        FranchiseGoogleSheetsService.syncOrderToFranchise({
+          id: newOrderId,
+          userId,
+          items: validatedItems,
+          totalAmount: finalOrderTotal,
+          subtotal: serverCalculatedTotal,
+          deliveryFee,
+          taxes,
+          discountAmount,
+          status: 'pending',
+          contactPhone: userPhone,
+          customerName: userData.name || (req.user as any)?.name || 'Gourmet Customer',
+          dailyOrderNumber,
+          orderSource: resolvedOrderSource,
+          paymentMethod: req.body.paymentMethod || 'COD',
+          paymentStatus: (req.body.paymentMethod || 'COD').toUpperCase() === 'ONLINE' ? 'PAID' : 'PENDING',
+          branchId: resolvedBranchId,
+          branchName: resolvedBranchName,
+          franchiseId: resolvedFranchiseId,
+          deliveryAddress: { addressLine: userAddress || 'Pickup' },
+          createdAt: new Date()
+        }).catch(e => console.warn('[OnlineOrderSheetSync] Notice:', e.message));
+      } catch (err: any) {
+        console.warn('[Orders] Firestore write failed:', err);
+        trace.steps.push({ step: 'Firestore Write', status: 'error', error: err.message });
+        res.status(500).json({ error: 'Failed to save order' });
+        return;
+      }
+
+      // STEP 4: Asynchronously sync order to PostgreSQL without blocking customer or failing live order
+      setImmediate(async () => {
+        try {
+          await OrderPersistenceArchiveService.syncLiveOrderToPostgres(newOrderId, orderFirestoreDoc);
+        } catch (syncErr: any) {
+          console.error(`[Orders] Background PostgreSQL sync failed for order ${newOrderId}:`, syncErr.message);
+        }
       });
-
-      // Mark order as already processed in FirestoreListener to prevent duplicate new-order alert
-      FirestoreListener.markOrderProcessed(newOrderId);
-
-      trace.steps.push({ step: 'Firestore Write', status: 'success', orderId: newOrderId, dailyOrderNumber, permanentBillNo, billReference });
-
-      // Reset user's active cart upon successful order placement (prevents abandoned cart reminder)
-      adminDb.collection('user_carts').doc(userId).set({
-        userId,
-        items: [],
-        total: 0,
-        itemCount: 0,
-        lastOrderId: newOrderId,
-        lastOrderPlacedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        abandonedCartReminderSentAt: null
-      }, { merge: true }).catch(() => {});
-
-      // Asynchronously sync online order to franchise-specific Google Spreadsheet
-      FranchiseGoogleSheetsService.syncOrderToFranchise({
-        id: newOrderId,
-        userId,
-        items: validatedItems,
-        totalAmount: finalOrderTotal,
-        subtotal: serverCalculatedTotal,
-        deliveryFee,
-        taxes,
-        discountAmount,
-        status: 'pending',
-        contactPhone: userPhone,
-        customerName: userData.name || (req.user as any)?.name || 'Gourmet Customer',
-        dailyOrderNumber,
-        orderSource: resolvedOrderSource,
-        paymentMethod: req.body.paymentMethod || 'COD',
-        paymentStatus: (req.body.paymentMethod || 'COD').toUpperCase() === 'ONLINE' ? 'PAID' : 'PENDING',
-        branchId: resolvedBranchId,
-        branchName: resolvedBranchName,
-        franchiseId: resolvedFranchiseId,
-        deliveryAddress: { addressLine: userAddress || 'Pickup' },
-        createdAt: new Date()
-      }).catch(e => console.warn('[OnlineOrderSheetSync] Notice:', e.message));
-    } catch (err: any) {
-      console.warn('[Orders] Firestore write failed:', err);
-      trace.steps.push({ step: 'Firestore Write', status: 'error', error: err.message });
-      res.status(500).json({ error: 'Failed to save order' });
-      return;
-    }
 
     trace.processingTime = Date.now() - startTime;
     res.status(201).json({ 

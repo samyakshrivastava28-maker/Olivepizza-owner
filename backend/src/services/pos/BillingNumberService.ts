@@ -68,6 +68,14 @@ export class BillingNumberService {
 
     // PostgreSQL is the single authoritative source of truth
     return await withTransaction(async (client) => {
+      // Ensure sequence is strictly ahead of any existing canonical orders
+      await client.query(`
+        SELECT setval('permanent_bill_seq', GREATEST(
+          (SELECT COALESCE(MAX(permanent_bill_no), 0) FROM canonical_orders),
+          (SELECT last_value FROM permanent_bill_seq)
+        ));
+      `).catch(() => {});
+
       const seqRes = await client.query(`SELECT nextval('permanent_bill_seq') AS bill_no;`);
       const permanentBillNo = parseInt(seqRes.rows[0].bill_no, 10);
 

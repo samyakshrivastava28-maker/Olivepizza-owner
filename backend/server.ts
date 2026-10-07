@@ -122,6 +122,17 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
     }
 
     FirestoreListener.init();
+
+    // Archival safeguard & reconciliation worker (runs every 3 minutes)
+    setInterval(() => {
+      import('./src/services/order/OrderPersistenceArchiveService.js')
+        .then(({ OrderPersistenceArchiveService }) => {
+          OrderPersistenceArchiveService.reconcileArchivalWorker().catch(e => 
+            console.warn('[OrderPersistence] Background reconciliation notice:', e.message)
+          );
+        })
+        .catch(() => {});
+    }, 3 * 60 * 1000);
   })();
 });
 
