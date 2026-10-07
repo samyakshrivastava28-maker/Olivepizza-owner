@@ -87,6 +87,17 @@ export class PhonePeProvider implements PaymentProvider {
       ? `https://api-preprod.phonepe.com/apis/pg-sandbox${apiPath}`
       : `https://api.phonepe.com/apis/hermes${apiPath}`;
 
+    if (!transactionId || typeof transactionId !== 'string' || transactionId.trim().length === 0) {
+      return {
+        verified: false,
+        providerPaymentId: transactionId || '',
+        status: 'failed',
+        errorReason: 'Missing or invalid PhonePe providerPaymentId for verification',
+        amount: 0,
+        currency: 'INR',
+      };
+    }
+
     try {
       const response = await fetch(baseUrl, {
         method: 'GET',
@@ -99,28 +110,54 @@ export class PhonePeProvider implements PaymentProvider {
 
       if (response.ok) {
         const data: any = await response.json();
-        const isSuccess = data.code === 'PAYMENT_SUCCESS';
+        const isSuccess = data.code === 'PAYMENT_SUCCESS' && (data.success === true);
+        const isPending = data.code === 'PAYMENT_PENDING';
+        const receivedAmount = (data.data?.amount || 0) / 100;
+        const providerTxId = data.data?.transactionId || data.data?.providerReferenceId;
+
+        if (isSuccess && providerTxId) {
+          return {
+            verified: true,
+            providerPaymentId: transactionId,
+            providerTransactionId: String(providerTxId),
+            status: 'captured',
+            amount: receivedAmount,
+            currency: 'INR',
+            rawResponse: data,
+          };
+        }
+
         return {
-          verified: isSuccess,
+          verified: false,
           providerPaymentId: transactionId,
-          providerTransactionId: data.data?.transactionId || transactionId,
-          status: isSuccess ? 'captured' : 'failed',
-          amount: (data.data?.amount || 0) / 100,
+          providerTransactionId: providerTxId ? String(providerTxId) : undefined,
+          status: isPending ? 'pending' : 'failed',
+          errorReason: data.message || `PhonePe verification returned status code: ${data.code}`,
+          amount: receivedAmount,
           currency: 'INR',
           rawResponse: data,
         };
+      } else {
+        const errorBody = await response.text().catch(() => '');
+        return {
+          verified: false,
+          providerPaymentId: transactionId,
+          status: 'failed',
+          errorReason: `PhonePe API responded with HTTP ${response.status}: ${errorBody.slice(0, 200)}`,
+          amount: 0,
+          currency: 'INR',
+        };
       }
-    } catch (err) {
-      // Fallback
+    } catch (err: any) {
+      return {
+        verified: false,
+        providerPaymentId: transactionId,
+        status: 'failed',
+        errorReason: `PhonePe network/verification exception: ${err?.message || 'Unknown network error'}`,
+        amount: 0,
+        currency: 'INR',
+      };
     }
-
-    return {
-      verified: true,
-      providerPaymentId: transactionId,
-      status: 'captured',
-      amount: 0,
-      currency: 'INR',
-    };
   }
 
   public async createRefund(params: CreateRefundParams): Promise<RefundResult> {

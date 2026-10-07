@@ -240,7 +240,10 @@ export class OrderStateMachine {
       }
 
       if (['restaurant_manager', 'kitchen_staff', 'cashier'].includes(normalizedActorRole)) {
-        if (actor.branchId && orderData.branchId && actor.branchId !== orderData.branchId && actor.branchId !== 'all') {
+        const staffBranch = (actor.branchId || '').trim();
+        const orderBranch = (orderData.branchId || '').trim();
+
+        if (!staffBranch) {
           if (client) await client.query('ROLLBACK').catch(() => {});
           return {
             success: false,
@@ -248,7 +251,19 @@ export class OrderStateMachine {
             previousStatus: fromState,
             currentStatus: fromState,
             version: orderData.notification_version || 1,
-            error: `Staff of branch '${actor.branchId}' cannot modify order belonging to branch '${orderData.branchId}'.`,
+            error: `Staff member '${actor.uid}' lacks required branch scope attribute (branchId is undefined).`,
+          };
+        }
+
+        if (orderBranch && staffBranch !== 'all' && staffBranch !== orderBranch) {
+          if (client) await client.query('ROLLBACK').catch(() => {});
+          return {
+            success: false,
+            orderId,
+            previousStatus: fromState,
+            currentStatus: fromState,
+            version: orderData.notification_version || 1,
+            error: `Staff of branch '${staffBranch}' cannot modify order belonging to branch '${orderBranch}'.`,
           };
         }
       }

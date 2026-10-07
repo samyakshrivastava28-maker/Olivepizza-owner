@@ -82,6 +82,17 @@ export class CashfreeProvider implements PaymentProvider {
       ? `https://sandbox.cashfree.com/pg/orders/${params.providerPaymentId}`
       : `https://api.cashfree.com/pg/orders/${params.providerPaymentId}`;
 
+    if (!params.providerPaymentId || typeof params.providerPaymentId !== 'string') {
+      return {
+        verified: false,
+        providerPaymentId: params.providerPaymentId || '',
+        status: 'failed',
+        amount: 0,
+        currency: 'INR',
+        errorReason: 'Missing or invalid Cashfree providerPaymentId for verification',
+      };
+    }
+
     try {
       const response = await fetch(baseUrl, {
         method: 'GET',
@@ -91,27 +102,38 @@ export class CashfreeProvider implements PaymentProvider {
       if (response.ok) {
         const cfOrder: any = await response.json();
         const isPaid = cfOrder.order_status === 'PAID';
+        const isPending = cfOrder.order_status === 'ACTIVE';
         return {
           verified: isPaid,
           providerPaymentId: cfOrder.order_id,
-          providerTransactionId: cfOrder.cf_order_id || cfOrder.order_id,
-          status: isPaid ? 'captured' : 'failed',
-          amount: Number(cfOrder.order_amount),
+          providerTransactionId: String(cfOrder.cf_order_id || cfOrder.order_id),
+          status: isPaid ? 'captured' : (isPending ? 'pending' : 'failed'),
+          amount: Number(cfOrder.order_amount) || 0,
           currency: cfOrder.order_currency || 'INR',
+          errorReason: isPaid ? undefined : `Cashfree order status is '${cfOrder.order_status}', not PAID`,
           rawResponse: cfOrder,
         };
+      } else {
+        const errText = await response.text().catch(() => '');
+        return {
+          verified: false,
+          providerPaymentId: params.providerPaymentId,
+          status: 'failed',
+          amount: 0,
+          currency: 'INR',
+          errorReason: `Cashfree API returned HTTP ${response.status}: ${errText.slice(0, 180)}`,
+        };
       }
-    } catch (err) {
-      // Fallback
+    } catch (err: any) {
+      return {
+        verified: false,
+        providerPaymentId: params.providerPaymentId,
+        status: 'failed',
+        amount: 0,
+        currency: 'INR',
+        errorReason: `Cashfree verification network exception: ${err?.message || 'Connection error'}`,
+      };
     }
-
-    return {
-      verified: true,
-      providerPaymentId: params.providerPaymentId,
-      status: 'captured',
-      amount: 0,
-      currency: 'INR',
-    };
   }
 
   public async createRefund(params: CreateRefundParams): Promise<RefundResult> {

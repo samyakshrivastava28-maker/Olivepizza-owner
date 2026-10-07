@@ -982,6 +982,12 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
 
       if (lockResult.rows.length === 0) {
         if (isDebug) trace.steps.push({ step: 'Idempotency Lock', status: 'failed', reason: 'Order currently placing' });
+        res.status(409).json({
+          success: false,
+          error: 'Another checkout transaction is already in progress. Please wait a moment before trying again.',
+          code: 'CHECKOUT_LOCK_HELD',
+        });
+        return;
       }
     } catch (lockErr) {
       console.warn('[Orders] Checkout lock skipped (DB table unavailable/optional):', lockErr);

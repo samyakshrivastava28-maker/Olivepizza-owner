@@ -222,8 +222,17 @@ app.use(versionCheck);
 app.use((req, res, next) => {
   res.setHeader('X-Edge-Routing', 'Cloudflare-Canonical');
   
-  // 1. Strict non-caching for all API, transactional, and dynamic state endpoints
-  if (
+  // 1. Differentiated caching: Public catalog GET requests get short CDN caching; private/transactional endpoints are no-store
+  const isPublicCatalogGet = req.method === 'GET' && (
+    req.path.startsWith('/api/menu') ||
+    req.path.startsWith('/api/products') ||
+    req.path.startsWith('/api/categories') ||
+    req.path.startsWith('/api/branches')
+  );
+
+  if (isPublicCatalogGet) {
+    res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=180, stale-while-revalidate=300');
+  } else if (
     req.path.startsWith('/api') || 
     req.path.startsWith('/orders') || 
     req.path.startsWith('/tracking') || 

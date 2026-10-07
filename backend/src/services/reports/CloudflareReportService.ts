@@ -78,9 +78,10 @@ export class CloudflareReportService {
 
     if (CloudflareR2Service.isConfigured()) {
       try {
+        const disposition = `attachment; filename="${encodeURIComponent(filename)}"`;
         const viewUrl = await CloudflareR2Service.generatePreSignedUrl(cloudflarePath, expiresInSeconds);
-        if (viewUrl) {
-          const downloadUrl = `${viewUrl}&response-content-disposition=attachment%3B%20filename%3D%22${encodeURIComponent(filename)}%22`;
+        const downloadUrl = (await CloudflareR2Service.generatePreSignedUrl(cloudflarePath, expiresInSeconds, disposition)) || viewUrl;
+        if (viewUrl && downloadUrl) {
           return { viewUrl, downloadUrl };
         }
       } catch (err: any) {

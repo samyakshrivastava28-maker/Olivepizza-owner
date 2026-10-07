@@ -92,42 +92,104 @@ router.post('/create-intent', optionalAuth, async (req: AuthRequest, res: Respon
 });
 
 // ─── 2. Client Payment Verification Callback ──────────────────────────────────
-router.post('/verify', optionalAuth, async (req: AuthRequest, res: Response) => {
+router.post('/verify', verifyToken, async (req: AuthRequest, res: Response) => {
+  const requestId = `req_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
   try {
     const { paymentId, providerPaymentId, providerSignature, providerTransactionId } = req.body;
-    const config = getPaymentConfig();
+    const authenticatedUid = req.user?.uid;
+    const userRole = (req.user?.role || 'customer').toLowerCase();
+    const isStaffOrAdmin = ['owner', 'admin'].includes(userRole);
 
-    const providerName = config.activeProvider;
+    if (!paymentId || typeof paymentId !== 'string') {
+      return res.status(400).json({ success: false, error: 'Valid paymentId is required' });
+    }
+
+    // 1. Fetch canonical payment record from PostgreSQL
+    const payRecordRes = await query(
+      'SELECT id, user_id, amount, currency, status, provider, payment_method, metadata FROM payments WHERE id = $1 LIMIT 1',
+      [paymentId]
+    );
+
+    if (payRecordRes.rows.length === 0) {
+      console.warn(`[PaymentSecurity][${requestId}] Verification rejected: Payment record ${paymentId} not found`);
+      return res.status(404).json({ success: false, error: 'Payment record not found' });
+    }
+
+    const canonicalPayment = payRecordRes.rows[0];
+
+    // 2. Strict IDOR Check: Ensure payment belongs to authenticated user
+    if (!isStaffOrAdmin && canonicalPayment.user_id !== authenticatedUid) {
+      console.error(`[PaymentSecurity][${requestId}] IDOR ALERT: User ${authenticatedUid} attempted to verify payment ${paymentId} belonging to user ${canonicalPayment.user_id}`);
+      return res.status(403).json({ success: false, error: 'Unauthorized: Payment does not belong to this account' });
+    }
+
+    // 3. Idempotent check: If already captured, return success immediately
+    if (canonicalPayment.status === 'PAYMENT_CAPTURED' || canonicalPayment.status === 'CAPTURED') {
+      return res.json({
+        success: true,
+        verified: true,
+        status: 'captured',
+        idempotent: true,
+        paymentId,
+        providerPaymentId: providerPaymentId || canonicalPayment.id,
+      });
+    }
+
+    // 4. Delegate to authoritative provider
+    const config = getPaymentConfig();
+    const providerName = canonicalPayment.provider || config.activeProvider;
     const provider = (await import('../services/payment/PaymentProviderFactory.js')).PaymentProviderFactory.getProvider(providerName);
 
     const verifyResult = await provider.verifyPayment({
       paymentId,
-      providerPaymentId,
+      providerPaymentId: providerPaymentId || canonicalPayment.id,
       providerSignature,
       providerTransactionId,
     });
 
-    if (verifyResult.verified) {
-      try {
-        await query("UPDATE payments SET status = 'PAYMENT_CAPTURED', verified_at = NOW() WHERE id = $1", [paymentId]);
-      } catch (e) {}
+    // 5. Enforce Amount Matching and Captured Status
+    if (verifyResult.verified && verifyResult.status === 'captured') {
+      const expectedAmount = Number(canonicalPayment.amount || 0);
+      const receivedAmount = Number(verifyResult.amount || 0);
 
-      res.json({
+      // Verify amount (skip only if provider returned 0 for non-monetary check, but strict if receivedAmount > 0)
+      if (receivedAmount > 0 && Math.abs(expectedAmount - receivedAmount) > 0.05) {
+        console.error(`[PaymentSecurity][${requestId}] AMOUNT TAMPER ALERT for payment ${paymentId}: Expected ₹${expectedAmount}, received ₹${receivedAmount}`);
+        return res.status(400).json({
+          success: false,
+          verified: false,
+          error: `Payment amount mismatch: Expected ₹${expectedAmount}, received ₹${receivedAmount}`,
+        });
+      }
+
+      const finalTxId = verifyResult.providerTransactionId || providerTransactionId || `tx_${Date.now()}`;
+
+      await query(
+        "UPDATE payments SET status = 'PAYMENT_CAPTURED', provider_transaction_id = $2, verified_at = NOW() WHERE id = $1",
+        [paymentId, finalTxId]
+      );
+
+      console.log(`[PaymentSecurity][${requestId}] Payment ${paymentId} successfully verified & CAPTURED via ${providerName} (txId: ${finalTxId})`);
+
+      return res.json({
         success: true,
         verified: true,
-        status: verifyResult.status,
-        providerPaymentId: verifyResult.providerPaymentId,
-        providerTransactionId: verifyResult.providerTransactionId,
+        status: 'captured',
+        providerPaymentId: verifyResult.providerPaymentId || providerPaymentId,
+        providerTransactionId: finalTxId,
       });
     } else {
-      res.status(400).json({
+      console.warn(`[PaymentSecurity][${requestId}] Verification rejected for ${paymentId}: ${verifyResult.errorReason || 'Not captured'}`);
+      return res.status(400).json({
         success: false,
         verified: false,
-        error: verifyResult.errorReason || 'Payment verification failed',
+        status: verifyResult.status || 'failed',
+        error: verifyResult.errorReason || 'Payment verification failed at provider',
       });
     }
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error(`[PaymentSecurity][${requestId}] Internal error during verification:`, error.message);
+    res.status(500).json({ success: false, error: 'Internal payment verification failure' });
   }
 });
 

@@ -284,9 +284,15 @@ export class CloudflareR2Service {
   }
 
   /**
-   * Generates a signed URL for secure temporary download.
+   * Generates a signed URL for secure temporary view or attachment download.
+   * If responseContentDisposition is provided, it is included in GetObjectCommand before signing
+   * to preserve AWS S3 V4 signature integrity.
    */
-  static async generatePreSignedUrl(key: string, expiresInSeconds: number = 3600): Promise<string | null> {
+  static async generatePreSignedUrl(
+    key: string, 
+    expiresInSeconds: number = 3600,
+    responseContentDisposition?: string
+  ): Promise<string | null> {
     if (!this.isConfigured()) return null;
 
     try {
@@ -296,6 +302,7 @@ export class CloudflareR2Service {
       const command = new GetObjectCommand({
         Bucket: bucket,
         Key: key,
+        ...(responseContentDisposition ? { ResponseContentDisposition: responseContentDisposition } : {}),
       });
 
       return await getSignedUrl(client, command, { expiresIn: expiresInSeconds });

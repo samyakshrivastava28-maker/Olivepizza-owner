@@ -402,7 +402,13 @@ class RedisService {
     } else {
       if (this.isConnected && this.client) {
         try {
-          const keys = await this.client.keys('cache:franchise:*');
+          let cursor = '0';
+          const keys: string[] = [];
+          do {
+            const [nextCursor, matchedKeys] = await this.client.scan(cursor, 'MATCH', 'cache:franchise:*', 'COUNT', 50);
+            cursor = nextCursor;
+            keys.push(...matchedKeys);
+          } while (cursor !== '0');
           if (keys.length > 0) await this.client.del(...keys);
         } catch {}
       }

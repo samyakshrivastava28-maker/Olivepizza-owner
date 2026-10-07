@@ -8,6 +8,7 @@ import { User } from '../../types/models';
 import { RESTAURANT_LOCATION } from '../../lib/config';
 import { restaurantIcon } from '../../lib/mapIcons';
 import { useStoreStatus } from '../../lib/useStoreStatus';
+import { supabase, type DeliveryLocation } from '../../lib/supabase';
 
 // Fix leaflet icon issue in React
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -67,17 +68,43 @@ export default function OwnerLiveMap() {
     return () => unsubscribe();
   }, []);
 
-  // 2. Subscribe to real-time delivery telemetry
+  // 2. Subscribe to real-time delivery telemetry from Supabase Realtime (authoritative rider telemetry layer)
   useEffect(() => {
-    const unsubLoc = onSnapshot(collection(db, 'delivery_locations'), (snapshot) => {
-      const map: Record<string, any> = {};
-      snapshot.forEach((d) => {
-        map[d.id] = d.data();
+    // A. Initial fetch of active fleet locations from Supabase
+    supabase
+      .from('delivery_locations')
+      .select('*')
+      .then(({ data, error }) => {
+        if (!error && Array.isArray(data)) {
+          const map: Record<string, any> = {};
+          data.forEach((loc: DeliveryLocation) => {
+            map[loc.delivery_partner_id] = loc;
+          });
+          setTelemetryMap(map);
+        }
       });
-      setTelemetryMap(map);
-    });
 
-    return () => unsubLoc();
+    // B. Realtime subscription to live coordinates streaming from rider apps
+    const channel = supabase
+      .channel('owner-live-fleet-map')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'delivery_locations' },
+        (payload) => {
+          const newRecord = payload.new as DeliveryLocation;
+          if (newRecord && newRecord.delivery_partner_id) {
+            setTelemetryMap((prev) => ({
+              ...prev,
+              [newRecord.delivery_partner_id]: newRecord,
+            }));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   // 3. Load REAL completed delivery locations for genuine customer density heatmap

@@ -87,28 +87,46 @@ export class RazorpayProvider implements PaymentProvider {
     const config = getPaymentConfig();
     const { providerPaymentId, providerTransactionId, providerSignature } = params;
 
-    // Verify HMAC-SHA256 signature for client callback (order_id|payment_id)
-    if (providerPaymentId && providerTransactionId && providerSignature) {
+    // A real Razorpay payment ID (pay_...) is strictly required
+    if (!providerTransactionId || typeof providerTransactionId !== 'string' || !providerTransactionId.startsWith('pay_')) {
+      return {
+        verified: false,
+        providerPaymentId,
+        providerTransactionId,
+        status: 'failed',
+        amount: 0,
+        currency: 'INR',
+        errorReason: 'Missing or invalid Razorpay payment transaction ID (must start with "pay_")',
+      };
+    }
+
+    // Verify HMAC-SHA256 signature for client callback (order_id|payment_id) if signature provided
+    if (providerPaymentId && providerSignature) {
       const text = `${providerPaymentId}|${providerTransactionId}`;
       const expectedSignature = crypto
         .createHmac('sha256', config.razorpayKeySecret)
         .update(text)
         .digest('hex');
 
-      if (expectedSignature !== providerSignature) {
+      const sigBuf = Buffer.from(providerSignature);
+      const expBuf = Buffer.from(expectedSignature);
+      const matches = sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf);
+
+      if (!matches) {
         return {
           verified: false,
           providerPaymentId,
+          providerTransactionId,
           status: 'failed',
           amount: 0,
           currency: 'INR',
-          errorReason: 'Razorpay HMAC Signature verification failed',
+          errorReason: 'Razorpay HMAC Signature verification failed: invalid signature for order/payment pair',
         };
       }
     }
 
-    // Fetch verified details directly from Razorpay GET /v1/payments/{id}
-    if (providerTransactionId) {
+    // Always fetch and confirm authoritative details directly from Razorpay API GET /v1/payments/{id}
+    try {
       const response = await fetch(`https://api.razorpay.com/v1/payments/${providerTransactionId}`, {
         method: 'GET',
         headers: {
@@ -119,26 +137,55 @@ export class RazorpayProvider implements PaymentProvider {
       if (response.ok) {
         const paymentData: any = await response.json();
         const isCaptured = paymentData.status === 'captured';
+        const receivedAmount = Number(paymentData.amount) / 100;
+
+        // If an order ID was passed, confirm the payment actually belongs to this Razorpay order
+        if (providerPaymentId && paymentData.order_id && paymentData.order_id !== providerPaymentId) {
+          return {
+            verified: false,
+            providerPaymentId,
+            providerTransactionId: paymentData.id,
+            status: 'failed',
+            amount: receivedAmount,
+            currency: paymentData.currency || 'INR',
+            errorReason: `Razorpay payment ${paymentData.id} belongs to order ${paymentData.order_id}, not expected order ${providerPaymentId}`,
+            rawResponse: paymentData,
+          };
+        }
+
         return {
           verified: isCaptured,
-          providerPaymentId,
+          providerPaymentId: paymentData.order_id || providerPaymentId,
           providerTransactionId: paymentData.id,
-          status: isCaptured ? 'captured' : 'pending',
-          amount: Number(paymentData.amount) / 100,
+          status: isCaptured ? 'captured' : (paymentData.status === 'authorized' ? 'pending' : 'failed'),
+          amount: receivedAmount,
           currency: paymentData.currency || 'INR',
+          errorReason: isCaptured ? undefined : `Razorpay payment is in state '${paymentData.status}', not captured`,
           rawResponse: paymentData,
         };
+      } else {
+        const errText = await response.text().catch(() => '');
+        return {
+          verified: false,
+          providerPaymentId,
+          providerTransactionId,
+          status: 'failed',
+          amount: 0,
+          currency: 'INR',
+          errorReason: `Razorpay payment lookup failed with HTTP ${response.status}: ${errText.slice(0, 180)}`,
+        };
       }
+    } catch (err: any) {
+      return {
+        verified: false,
+        providerPaymentId,
+        providerTransactionId,
+        status: 'failed',
+        amount: 0,
+        currency: 'INR',
+        errorReason: `Razorpay verification network exception: ${err?.message || 'Connection error'}`,
+      };
     }
-
-    return {
-      verified: true,
-      providerPaymentId,
-      providerTransactionId: providerTransactionId || `rzp_pay_${Date.now()}`,
-      status: 'captured',
-      amount: 0,
-      currency: 'INR',
-    };
   }
 
   public async createRefund(params: CreateRefundParams): Promise<RefundResult> {
