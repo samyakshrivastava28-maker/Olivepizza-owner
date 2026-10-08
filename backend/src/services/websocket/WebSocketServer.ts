@@ -18,22 +18,34 @@ import { appEventBus, OrderStatusChangedEvent, OrderCreatedEvent } from '../even
 import { adminAuth, adminDb } from '../../config/firebase.js';
 import { sanitizeError } from '../../utils/logSanitizer.js';
 
-async function resolveAuthoritativeRole(uid: string, tokenRole?: string): Promise<string> {
-  if (tokenRole && tokenRole !== 'customer') return tokenRole;
+export interface AuthoritativeUserInfo {
+  role: string;
+  branchId?: string;
+  franchiseId?: string;
+}
+
+async function resolveAuthoritativeUserInfo(uid: string, tokenClaims?: any): Promise<AuthoritativeUserInfo> {
+  let role = tokenClaims?.role || 'customer';
+  let branchId = tokenClaims?.branchId || tokenClaims?.branch_id;
+  let franchiseId = tokenClaims?.franchiseId || tokenClaims?.franchise_id;
+
   try {
     const userDoc = await adminDb.collection('users').doc(uid).get();
     if (userDoc.exists) {
       const data = userDoc.data();
-      if (data?.role) return data.role;
+      if (data?.role) role = data.role;
+      if (data?.branchId) branchId = data.branchId;
+      if (data?.franchiseId) franchiseId = data.franchiseId;
     }
     const dpDoc = await adminDb.collection('delivery_partners').doc(uid).get();
     if (dpDoc.exists && dpDoc.data()?.isActive !== false) {
-      return 'delivery_partner';
+      role = 'delivery_partner';
+      if (dpDoc.data()?.branchId) branchId = dpDoc.data()?.branchId;
     }
   } catch (err) {
-    console.warn('[WebSocketServer] Failed to resolve role for', uid, err);
+    console.warn('[WebSocketServer] Failed to resolve user info for', uid, err);
   }
-  return 'customer';
+  return { role, branchId, franchiseId };
 }
 
 export interface ConnectedClient {
@@ -168,6 +180,8 @@ class OliveWebSocketServer {
       const branchIdParam = url.searchParams.get('branchId') || undefined;
       const franchiseIdParam = url.searchParams.get('franchiseId') || undefined;
       const terminalIdParam = url.searchParams.get('terminalId') || undefined;
+      let branchId: string | undefined = branchIdParam;
+      let franchiseId: string | undefined = franchiseIdParam;
       let uid = 'anonymous';
       let role = 'customer';
 
@@ -176,7 +190,10 @@ class OliveWebSocketServer {
         try {
           const decoded = await adminAuth.verifyIdToken(token);
           uid = decoded.uid;
-          role = await resolveAuthoritativeRole(uid, decoded.role as string);
+          const info = await resolveAuthoritativeUserInfo(uid, decoded);
+          role = info.role;
+          branchId = info.branchId || branchIdParam;
+          franchiseId = info.franchiseId || franchiseIdParam;
         } catch (tokenErr: any) {
           const safeErr = sanitizeError(tokenErr);
           console.warn('[WebSocketServer] Handshake token verification failed:', safeErr.message);
@@ -194,8 +211,8 @@ class OliveWebSocketServer {
         ws, 
         uid, 
         role,
-        branchId: branchIdParam,
-        franchiseId: franchiseIdParam,
+        branchId,
+        franchiseId,
         terminalId: terminalIdParam,
         connectedAt: Date.now(),
         subscribedOrders: new Set<string>()
@@ -206,7 +223,7 @@ class OliveWebSocketServer {
       if (!this.clients.has(uid)) this.clients.set(uid, new Set());
       this.clients.get(uid)!.add(client);
 
-      console.log(`[WebSocketServer] Client connected uid=${uid} role=${role} branch=${branchIdParam || 'none'} total=${this.totalConnections}`);
+      console.log(`[WebSocketServer] Client connected uid=${uid} role=${role} branch=${client.branchId || 'none'} total=${this.totalConnections}`);
 
       // Send connection acknowledgment
       this.safeSend(ws, { 
@@ -239,7 +256,8 @@ class OliveWebSocketServer {
 
               const decoded = await adminAuth.verifyIdToken(msg.token);
               authUid = decoded.uid;
-              authRole = await resolveAuthoritativeRole(authUid, decoded.role as string);
+              const info = await resolveAuthoritativeUserInfo(authUid, decoded);
+              authRole = info.role;
 
               // Update client registration with verified identity
               const oldSet = this.clients.get(client.uid);
@@ -247,8 +265,8 @@ class OliveWebSocketServer {
 
               client.uid = authUid;
               client.role = authRole;
-              if (msg.branchId) client.branchId = msg.branchId;
-              if (msg.franchiseId) client.franchiseId = msg.franchiseId;
+              client.branchId = info.branchId || msg.branchId || client.branchId;
+              client.franchiseId = info.franchiseId || msg.franchiseId || client.franchiseId;
               if (msg.terminalId) client.terminalId = msg.terminalId;
 
               if (!this.clients.has(authUid)) this.clients.set(authUid, new Set());
@@ -269,8 +287,31 @@ class OliveWebSocketServer {
 
           // 2b. Branch Registration (allows kitchen/POS terminals to associate with their branch & franchise)
           if (msg.type === 'register_branch') {
-            if (msg.branchId) client.branchId = msg.branchId;
-            if (msg.franchiseId) client.franchiseId = msg.franchiseId;
+            if (!client.uid || client.uid === 'anonymous') {
+              this.safeSend(ws, { type: 'error', data: { message: 'Authentication required to register branch' } });
+              return;
+            }
+
+            const userRole = (client.role || 'customer').toLowerCase();
+            const isPrivileged = ['owner', 'admin', 'developer'].includes(userRole);
+            const isAuthorizedStaff = ['restaurant_manager', 'branch_manager', 'pos', 'cashier', 'kitchen_staff'].includes(userRole);
+
+            if (!isPrivileged && !isAuthorizedStaff) {
+              this.safeSend(ws, { type: 'error', data: { message: 'Forbidden: role not authorized to register branch' } });
+              return;
+            }
+
+            if (isPrivileged) {
+              if (msg.branchId) client.branchId = msg.branchId;
+              if (msg.franchiseId) client.franchiseId = msg.franchiseId;
+            } else if (client.branchId) {
+              if (msg.branchId && msg.branchId !== client.branchId) {
+                this.safeSend(ws, { type: 'error', data: { message: 'Cannot register for unassigned branch' } });
+                return;
+              }
+            } else {
+              client.branchId = msg.branchId;
+            }
             if (msg.terminalId) client.terminalId = msg.terminalId;
 
             this.safeSend(ws, {
@@ -287,8 +328,22 @@ class OliveWebSocketServer {
 
           // 2c. Monotonic Sequence Synchronization on Reconnect (Resilience against slow / dropped Wi-Fi)
           if (msg.type === 'sync_request') {
-            const branchId = msg.branchId || client.branchId || 'main_branch';
-            const franchiseId = msg.franchiseId || client.franchiseId || 'default';
+            if (!client.uid || client.uid === 'anonymous') {
+              this.safeSend(ws, { type: 'error', data: { message: 'Authentication required for sync_request' } });
+              return;
+            }
+
+            const userRole = (client.role || 'customer').toLowerCase();
+            const isPrivileged = ['owner', 'admin', 'developer'].includes(userRole);
+            const isAuthorizedStaff = ['restaurant_manager', 'branch_manager', 'pos', 'cashier', 'kitchen_staff'].includes(userRole);
+
+            if (!isPrivileged && !isAuthorizedStaff) {
+              this.safeSend(ws, { type: 'error', data: { message: 'Forbidden: sync_request only permitted for branch operations' } });
+              return;
+            }
+
+            const branchId = isPrivileged ? (msg.branchId || client.branchId || 'main_branch') : (client.branchId || 'main_branch');
+            const franchiseId = isPrivileged ? (msg.franchiseId || client.franchiseId || 'default') : (client.franchiseId || 'default');
             const lastSeq = typeof msg.lastSequence === 'number' ? msg.lastSequence : 0;
             const { currentSeq, missedEvents } = this.getMissedEvents(franchiseId, branchId, lastSeq);
             client.lastSeenSeq = currentSeq;
@@ -309,12 +364,41 @@ class OliveWebSocketServer {
 
           // 3. Subscribe to specific order updates
           if (msg.type === 'subscribe_order' && msg.orderId) {
-            client.subscribedOrders.add(msg.orderId);
-            if (!this.orderSubscribers.has(msg.orderId)) {
-              this.orderSubscribers.set(msg.orderId, new Set());
+            if (!client.uid || client.uid === 'anonymous') {
+              this.safeSend(ws, { type: 'error', data: { message: 'Authentication required to subscribe to order updates' } });
+              return;
             }
-            this.orderSubscribers.get(msg.orderId)!.add(client);
-            this.safeSend(ws, { type: 'subscribed', data: { orderId: msg.orderId } });
+
+            const orderId = String(msg.orderId).trim();
+            try {
+              const orderDoc = await adminDb.collection('orders').doc(orderId).get();
+              if (!orderDoc.exists) {
+                this.safeSend(ws, { type: 'error', data: { message: 'Order not found', orderId } });
+                return;
+              }
+              const orderData = orderDoc.data() || {};
+              const userRole = (client.role || 'customer').toLowerCase();
+              const isPrivileged = ['owner', 'admin', 'developer'].includes(userRole);
+              const isStaff = ['restaurant_manager', 'branch_manager', 'cashier', 'kitchen_staff'].includes(userRole);
+              const isAssignedDriver = ['delivery_partner', 'rider', 'delivery'].includes(userRole) &&
+                (orderData.deliveryPartnerId === client.uid || orderData.assignedDeliveryPartnerId === client.uid);
+              const isOrderOwner = (orderData.userId === client.uid || orderData.customerUid === client.uid);
+              const isBranchStaff = isStaff && (!client.branchId || client.branchId === orderData.branchId);
+
+              if (!isPrivileged && !isOrderOwner && !isBranchStaff && !isAssignedDriver) {
+                this.safeSend(ws, { type: 'error', data: { message: 'Forbidden: You do not have access to this order', orderId } });
+                return;
+              }
+
+              client.subscribedOrders.add(orderId);
+              if (!this.orderSubscribers.has(orderId)) {
+                this.orderSubscribers.set(orderId, new Set());
+              }
+              this.orderSubscribers.get(orderId)!.add(client);
+              this.safeSend(ws, { type: 'subscribed', data: { orderId } });
+            } catch (err: any) {
+              this.safeSend(ws, { type: 'error', data: { message: 'Failed to subscribe to order', error: err.message } });
+            }
             return;
           }
 
@@ -331,22 +415,47 @@ class OliveWebSocketServer {
 
           // 5. Driver GPS location update (500ms streaming from delivery app)
           if (msg.type === 'driver_location' && msg.data) {
-            const allowedDriverRoles = ['delivery_partner', 'delivery', 'owner', 'admin', 'developer'];
-            if (!client.role || !allowedDriverRoles.includes(client.role) || client.uid === 'anonymous') {
+            const allowedDriverRoles = ['delivery_partner', 'delivery', 'rider', 'owner', 'admin', 'developer'];
+            if (!client.role || !allowedDriverRoles.includes(client.role) || !client.uid || client.uid === 'anonymous') {
               this.safeSend(ws, { type: 'error', data: { message: 'Unauthorized location publisher' } });
               return;
             }
 
+            const targetOrderId = msg.data.orderId ? String(msg.data.orderId).trim() : null;
+            let verifiedOrderId: string | null = null;
+
+            if (targetOrderId) {
+              try {
+                const orderDoc = await adminDb.collection('orders').doc(targetOrderId).get();
+                if (orderDoc.exists) {
+                  const oData = orderDoc.data() || {};
+                  const isAssigned = (oData.deliveryPartnerId === client.uid || oData.assignedDeliveryPartnerId === client.uid);
+                  const isPrivileged = ['owner', 'admin', 'developer'].includes(client.role);
+                  const status = String(oData.status || '').toUpperCase();
+                  const isActiveStage = ['OUT_FOR_DELIVERY', 'PICKED_UP', 'IN_TRANSIT'].includes(status);
+
+                  if ((isAssigned || isPrivileged) && isActiveStage) {
+                    verifiedOrderId = targetOrderId;
+                  } else {
+                    console.warn(`[WebSocketServer] Driver location discarded for order ${targetOrderId}: assigned=${isAssigned}, stage=${status}`);
+                  }
+                }
+              } catch (e: any) {
+                console.warn(`[WebSocketServer] Failed to verify order for driver location:`, e.message);
+              }
+            }
+
             const loc: DriverLocationData = {
               ...msg.data,
+              orderId: verifiedOrderId,
               deliveryPartnerId: client.uid,
               timestamp: Date.now()
             };
             this.driverLocations.set(client.uid, loc);
 
-            // Broadcast to any clients watching this driver's order
-            if (loc.orderId) {
-              this.broadcastToOrder(loc.orderId, {
+            // Broadcast to any clients watching this driver's verified order
+            if (verifiedOrderId) {
+              this.broadcastToOrder(verifiedOrderId, {
                 type: 'driver_location',
                 data: loc
               });

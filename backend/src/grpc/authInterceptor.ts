@@ -1,9 +1,20 @@
+import crypto from 'node:crypto';
 import * as grpc from '@grpc/grpc-js';
 
-export const FALLBACK_CLUSTER_SECRET = 'olive-cluster-internal-secret-2026';
-
 export function getInternalRpcSecret(): string {
-  return process.env.INTERNAL_RPC_SECRET || FALLBACK_CLUSTER_SECRET;
+  const secret = process.env.INTERNAL_RPC_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      console.error('FATAL: INTERNAL_RPC_SECRET environment variable is missing in production!');
+      process.exit(1);
+    }
+    const devSecret = process.env.DEV_INTERNAL_RPC_SECRET;
+    if (!devSecret) {
+      throw new Error('INTERNAL_RPC_SECRET must be configured in environment.');
+    }
+    return devSecret;
+  }
+  return secret;
 }
 
 export function createAuthMetadata(secret?: string): grpc.Metadata {
@@ -13,13 +24,24 @@ export function createAuthMetadata(secret?: string): grpc.Metadata {
 }
 
 export function verifyInternalAuth(metadata: grpc.Metadata): boolean {
-  const expectedSecret = getInternalRpcSecret();
-  const values = metadata.get('x-internal-auth');
-  if (!values || values.length === 0) {
+  try {
+    const expectedSecret = getInternalRpcSecret();
+    const values = metadata.get('x-internal-auth');
+    if (!values || values.length === 0) {
+      return false;
+    }
+    const token = String(values[0]);
+    if (!token || !expectedSecret) return false;
+
+    const tokenBuf = Buffer.from(token, 'utf8');
+    const expectedBuf = Buffer.from(expectedSecret, 'utf8');
+    if (tokenBuf.length !== expectedBuf.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(tokenBuf, expectedBuf);
+  } catch {
     return false;
   }
-  const token = String(values[0]);
-  return token === expectedSecret;
 }
 
 export type GrpcUnaryHandler<Req = any, Res = any> = (

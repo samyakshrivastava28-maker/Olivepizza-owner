@@ -1,7 +1,6 @@
 import * as grpc from '@grpc/grpc-js';
 import { BaseGrpcClient, ClientOptions, mapGrpcError } from './BaseGrpcClient.ts';
 import { loadProtoDefinition } from '../protoLoader.ts';
-import { PaymentService } from '../../services/payment/PaymentService.ts';
 
 export interface VerifyPaymentRequestDto {
   paymentId?: string;
@@ -62,7 +61,7 @@ export class PaymentGrpcClient extends BaseGrpcClient {
     const effectiveTimeout = timeoutMs || this.defaultDeadlineMs;
 
     if (!this.isGrpcEnabled()) {
-      return this.fallbackVerifyPayment(dto);
+      throw new Error('[PaymentGrpcClient] Fail-Closed: Payment verification strictly requires authoritative gRPC cluster. GRPC is disabled.');
     }
 
     const reqPayload = {
@@ -79,17 +78,9 @@ export class PaymentGrpcClient extends BaseGrpcClient {
     const deadline = this.createDeadline(effectiveTimeout);
 
     return new Promise((resolve, reject) => {
-      this.client.verifyAndReconcilePayment(reqPayload, metadata, { deadline }, async (err: any, response: any) => {
+      this.client.verifyAndReconcilePayment(reqPayload, metadata, { deadline }, (err: any, response: any) => {
         if (err) {
-          if (err.code === grpc.status.UNAVAILABLE) {
-            console.warn('[PaymentGrpcClient] gRPC unavailable, executing modular service fallback.');
-            try {
-              const fb = await this.fallbackVerifyPayment(dto);
-              return resolve(fb);
-            } catch (fbErr) {
-              return reject(fbErr);
-            }
-          }
+          console.error('[PaymentGrpcClient] Authoritative gRPC payment verification failed (fail-closed):', err.message);
           return reject(mapGrpcError(err, effectiveTimeout));
         }
 
@@ -119,7 +110,7 @@ export class PaymentGrpcClient extends BaseGrpcClient {
       : JSON.stringify(dto.payloadJson);
 
     if (!this.isGrpcEnabled()) {
-      return this.fallbackProcessWebhook(dto);
+      throw new Error('[PaymentGrpcClient] Fail-Closed: Webhook processing strictly requires authoritative gRPC cluster. GRPC is disabled.');
     }
 
     const reqPayload = {
@@ -133,16 +124,9 @@ export class PaymentGrpcClient extends BaseGrpcClient {
     const deadline = this.createDeadline(effectiveTimeout);
 
     return new Promise((resolve, reject) => {
-      this.client.processWebhook(reqPayload, metadata, { deadline }, async (err: any, response: any) => {
+      this.client.processWebhook(reqPayload, metadata, { deadline }, (err: any, response: any) => {
         if (err) {
-          if (err.code === grpc.status.UNAVAILABLE) {
-            try {
-              const fb = await this.fallbackProcessWebhook(dto);
-              return resolve(fb);
-            } catch (fbErr) {
-              return reject(fbErr);
-            }
-          }
+          console.error('[PaymentGrpcClient] Authoritative gRPC webhook processing failed (fail-closed):', err.message);
           return reject(mapGrpcError(err, effectiveTimeout));
         }
 
@@ -154,48 +138,5 @@ export class PaymentGrpcClient extends BaseGrpcClient {
         });
       });
     });
-  }
-
-  private async fallbackVerifyPayment(dto: VerifyPaymentRequestDto): Promise<PaymentResultDto> {
-    if (dto.currency && dto.currency.toUpperCase() !== 'INR') {
-      return {
-        verified: false,
-        paymentId: dto.paymentId || '',
-        orderId: dto.orderId || '',
-        status: 'REJECTED_CURRENCY',
-        amount: dto.amount,
-        currency: dto.currency,
-        error: 'Currency must be INR',
-      };
-    }
-    if (!dto.providerTxId) {
-      return {
-        verified: false,
-        paymentId: dto.paymentId || '',
-        orderId: dto.orderId || '',
-        status: 'REJECTED_MISSING_TXID',
-        amount: dto.amount,
-        currency: dto.currency || 'INR',
-        error: 'Missing provider tx id',
-      };
-    }
-
-    return {
-      verified: true,
-      paymentId: dto.paymentId || `pay_${dto.orderId}`,
-      orderId: dto.orderId || '',
-      status: 'PAYMENT_CAPTURED',
-      amount: dto.amount,
-      currency: dto.currency || 'INR',
-    };
-  }
-
-  private async fallbackProcessWebhook(dto: WebhookRequestDto): Promise<WebhookResultDto> {
-    const raw = typeof dto.payloadJson === 'string' ? dto.payloadJson : JSON.stringify(dto.payloadJson);
-    const res = await PaymentService.processWebhook(dto.provider, raw, dto.signature);
-    return {
-      success: res.success,
-      eventType: res.eventType,
-    };
   }
 }

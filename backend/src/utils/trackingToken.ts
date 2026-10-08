@@ -55,7 +55,10 @@ export function verifyTrackingToken(token: string): string | null {
     if (isNaN(exp) || Date.now() / 1000 > exp) return null; // expired
 
     const expectedHmac = crypto.createHmac('sha256', getSecret()).update(`${orderId}:${expStr}`).digest('hex');
-    if (!crypto.timingSafeEqual(Buffer.from(providedHmac), Buffer.from(expectedHmac))) return null;
+    const providedHmacBuf = Buffer.from(providedHmac, 'utf8');
+    const expectedHmacBuf = Buffer.from(expectedHmac, 'utf8');
+    if (providedHmacBuf.length !== expectedHmacBuf.length) return null;
+    if (!crypto.timingSafeEqual(providedHmacBuf, expectedHmacBuf)) return null;
 
     return orderId;
   } catch {

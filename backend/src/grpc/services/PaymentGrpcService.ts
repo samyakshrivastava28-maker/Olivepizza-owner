@@ -4,16 +4,9 @@ import { query } from '../../config/postgres.ts';
 import { PaymentService } from '../../services/payment/PaymentService.ts';
 import { loadProtoDefinition } from '../protoLoader.ts';
 import { withAuth } from '../authInterceptor.ts';
-
-interface CachedPaymentResult {
-  result: any;
-  timestamp: number;
-}
+import { FinancialIdempotencyRepository } from '../../repositories/FinancialIdempotencyRepository.ts';
 
 export class PaymentGrpcService {
-  // In-memory idempotency cache with TTL
-  private static idempotencyCache = new Map<string, CachedPaymentResult>();
-
   public static register(server: grpc.Server): void {
     const proto = loadProtoDefinition('payment/v1/payment.proto') as any;
     const serviceDef = proto.olivepizza.payment.v1.PaymentService.service;
@@ -25,17 +18,6 @@ export class PaymentGrpcService {
       ProcessWebhook: withAuth(PaymentGrpcService.processWebhook),
       processWebhook: withAuth(PaymentGrpcService.processWebhook),
     });
-
-    // Self-cleaning timer every 10 minutes
-    const interval = setInterval(() => {
-      const now = Date.now();
-      for (const [key, item] of PaymentGrpcService.idempotencyCache.entries()) {
-        if (now - item.timestamp > 3600000) { // 1 hour TTL
-          PaymentGrpcService.idempotencyCache.delete(key);
-        }
-      }
-    }, 600000);
-    if (interval.unref) interval.unref();
   }
 
   public static async verifyAndReconcilePayment(
@@ -51,19 +33,48 @@ export class PaymentGrpcService {
     const providerTxId = (req.provider_tx_id || req.providerTxId || '').trim();
     const idempotencyKey = (req.idempotency_key || req.idempotencyKey || '').trim();
 
-    // 1. Idempotency Key check
+    // 1. Idempotency Key check with persistent PostgreSQL/Redis repository
     if (idempotencyKey) {
-      const cached = PaymentGrpcService.idempotencyCache.get(idempotencyKey);
-      if (cached) {
+      const checkResult = await FinancialIdempotencyRepository.checkOrLock(
+        idempotencyKey,
+        'grpc.PaymentService.VerifyAndReconcilePayment',
+        { paymentId, orderId, amount, currency, provider, providerTxId }
+      );
+      if (checkResult.status === 'CONFLICT') {
         return callback(null, {
-          ...cached.result,
+          verified: false,
+          payment_id: paymentId,
+          order_id: orderId,
+          status: 'IDEMPOTENCY_CONFLICT',
+          amount,
+          currency,
+          error: checkResult.error || 'Idempotency conflict: Key was previously submitted with a different request payload.',
+          is_duplicate: false,
+        });
+      }
+      if (checkResult.status === 'CACHED' && checkResult.cachedResponse) {
+        return callback(null, {
+          ...checkResult.cachedResponse,
           is_duplicate: true,
+        });
+      }
+      if (checkResult.status === 'IN_PROGRESS') {
+        return callback(null, {
+          verified: false,
+          payment_id: paymentId,
+          order_id: orderId,
+          status: 'IN_PROGRESS',
+          amount,
+          currency,
+          error: 'Financial transaction is currently in progress for this idempotency key.',
+          is_duplicate: false,
         });
       }
     }
 
     // 2. Strict Currency Check: Must be INR
     if (!currency || currency !== 'INR') {
+      if (idempotencyKey) await FinancialIdempotencyRepository.releaseLock(idempotencyKey);
       return callback(null, {
         verified: false,
         payment_id: paymentId,
@@ -78,6 +89,7 @@ export class PaymentGrpcService {
 
     // 3. Provider Transaction ID check: Mandatory
     if (!providerTxId) {
+      if (idempotencyKey) await FinancialIdempotencyRepository.releaseLock(idempotencyKey);
       return callback(null, {
         verified: false,
         payment_id: paymentId,
@@ -92,6 +104,7 @@ export class PaymentGrpcService {
 
     // 4. Positive Amount Validation
     if (isNaN(amount) || amount <= 0) {
+      if (idempotencyKey) await FinancialIdempotencyRepository.releaseLock(idempotencyKey);
       return callback(null, {
         verified: false,
         payment_id: paymentId,
@@ -130,6 +143,7 @@ export class PaymentGrpcService {
       // If an authoritative record was found, enforce strict tolerance (<= 0.05 INR)
       if (authoritativeExpectedAmount != null && authoritativeExpectedAmount > 0) {
         if (Math.abs(authoritativeExpectedAmount - amount) > 0.05) {
+          if (idempotencyKey) await FinancialIdempotencyRepository.releaseLock(idempotencyKey);
           return callback(null, {
             verified: false,
             payment_id: paymentId,
@@ -185,16 +199,14 @@ export class PaymentGrpcService {
         is_duplicate: false,
       };
 
-      // Record in Idempotency Cache
+      // Record success in Financial Idempotency Repository
       if (idempotencyKey) {
-        PaymentGrpcService.idempotencyCache.set(idempotencyKey, {
-          result: responsePayload,
-          timestamp: Date.now(),
-        });
+        await FinancialIdempotencyRepository.saveSuccess(idempotencyKey, 200, responsePayload);
       }
 
       return callback(null, responsePayload);
     } catch (err: any) {
+      if (idempotencyKey) await FinancialIdempotencyRepository.releaseLock(idempotencyKey);
       return callback(null, {
         verified: false,
         payment_id: paymentId,
@@ -219,13 +231,31 @@ export class PaymentGrpcService {
     const idempotencyKey = req.idempotency_key || req.idempotencyKey || '';
 
     if (idempotencyKey) {
-      const cached = PaymentGrpcService.idempotencyCache.get(idempotencyKey);
-      if (cached) {
+      const checkResult = await FinancialIdempotencyRepository.checkOrLock(
+        idempotencyKey,
+        'grpc.PaymentService.ProcessWebhook',
+        { provider, rawPayload, signature }
+      );
+      if (checkResult.status === 'CONFLICT') {
         return callback(null, {
-          success: true,
-          event_type: 'duplicate_ignored',
-          error: '',
+          success: false,
+          event_type: 'conflict',
+          error: checkResult.error || 'Idempotency conflict for webhook payload',
+          is_duplicate: false,
+        });
+      }
+      if (checkResult.status === 'CACHED' && checkResult.cachedResponse) {
+        return callback(null, {
+          ...checkResult.cachedResponse,
           is_duplicate: true,
+        });
+      }
+      if (checkResult.status === 'IN_PROGRESS') {
+        return callback(null, {
+          success: false,
+          event_type: 'in_progress',
+          error: 'Webhook is already being processed for this idempotency key',
+          is_duplicate: false,
         });
       }
     }
@@ -241,14 +271,12 @@ export class PaymentGrpcService {
       };
 
       if (idempotencyKey) {
-        PaymentGrpcService.idempotencyCache.set(idempotencyKey, {
-          result: resp,
-          timestamp: Date.now(),
-        });
+        await FinancialIdempotencyRepository.saveSuccess(idempotencyKey, 200, resp);
       }
 
       return callback(null, resp);
     } catch (err: any) {
+      if (idempotencyKey) await FinancialIdempotencyRepository.releaseLock(idempotencyKey);
       return callback(null, {
         success: false,
         event_type: '',

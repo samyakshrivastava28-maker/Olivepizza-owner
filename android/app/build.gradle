@@ -18,10 +18,22 @@ android {
     }
     signingConfigs {
         release {
-            storeFile file("release.keystore")
-            storePassword System.getenv("KEYSTORE_PASSWORD") ?: "olivepizza"
-            keyAlias System.getenv("KEY_ALIAS") ?: "olivepizza"
-            keyPassword System.getenv("KEY_PASSWORD") ?: "olivepizza"
+            def keystoreFile = file("release.keystore")
+            def keystorePassword = System.getenv("KEYSTORE_PASSWORD")
+            def keyAlias = System.getenv("KEY_ALIAS")
+            def keyPassword = System.getenv("KEY_PASSWORD") ?: keystorePassword
+
+            if (!keystoreFile.exists()) {
+                throw new GradleException("Release build failed: android/app/release.keystore does not exist.")
+            }
+            if (!keystorePassword || !keyAlias) {
+                throw new GradleException("Release build failed: KEYSTORE_PASSWORD and KEY_ALIAS environment variables must be provided.")
+            }
+
+            storeFile keystoreFile
+            storePassword keystorePassword
+            keyAlias keyAlias
+            keyPassword keyPassword
             v1SigningEnabled true
             v2SigningEnabled true
         }

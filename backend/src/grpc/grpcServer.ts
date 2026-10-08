@@ -28,6 +28,11 @@ export function createGrpcServer(): grpc.Server {
 }
 
 export async function startGrpcServer(customPort?: number): Promise<{ server: grpc.Server; port: number; address: string }> {
+  if (process.env.NODE_ENV === 'production' && !process.env.INTERNAL_RPC_SECRET) {
+    console.error('FATAL: INTERNAL_RPC_SECRET must be configured in production for gRPC cluster security.');
+    process.exit(1);
+  }
+
   if (grpcServerInstance && boundAddress) {
     const port = Number(boundAddress.split(':')[1]);
     return { server: grpcServerInstance, port, address: boundAddress };

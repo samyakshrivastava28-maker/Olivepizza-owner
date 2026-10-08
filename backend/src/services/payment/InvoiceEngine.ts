@@ -13,13 +13,33 @@ export interface InvoiceParams {
   createdAt: string;
 }
 
+function escapeHtml(str: any): string {
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 export class InvoiceEngine {
   public static generateInvoiceHtml(params: InvoiceParams): string {
     const config = getPaymentConfig();
     const subtotal = Math.round(params.totalAmount / 1.05); // 5% GST calculation
     const gstAmount = params.totalAmount - subtotal;
-    const shortOrderId = params.orderId.slice(0, 8).toUpperCase();
-    const dateStr = new Date(params.createdAt || Date.now()).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const shortOrderId = escapeHtml(params.orderId.slice(0, 8).toUpperCase());
+    const dateStr = escapeHtml(new Date(params.createdAt || Date.now()).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
+
+    const safeCustomerName = escapeHtml(params.customerName || 'Gourmet Customer');
+    const safeCustomerPhone = escapeHtml(params.customerPhone || 'N/A');
+    const safeCustomerAddress = escapeHtml(params.customerAddress || 'Customer Address');
+    const safePaymentId = escapeHtml(params.paymentId || 'N/A');
+    const safePaymentMethod = escapeHtml(params.paymentMethod ? params.paymentMethod.toUpperCase() : 'COD');
+    const safeBusinessName = escapeHtml(config.businessName || 'Olive Pizza');
+    const safeGstNumber = escapeHtml(config.gstNumber || 'N/A');
+    const safeSupportEmail = escapeHtml(config.supportEmail || 'support@olivepizza.com');
+    const safeSupportPhone = escapeHtml(config.supportPhone || '+91 99999 99999');
 
     return `<!DOCTYPE html>
 <html>
@@ -44,21 +64,21 @@ export class InvoiceEngine {
   <div class="invoice-card">
     <div class="header">
       <div>
-        <div class="brand">🍕 ${config.businessName}</div>
+        <div class="brand">🍕 ${safeBusinessName}</div>
         <div style="font-size:12px; color:#94a3b8;">100% Pure Veg Gourmet Pizzeria</div>
-        <div style="font-size:12px; color:#94a3b8;">GSTIN: ${config.gstNumber}</div>
+        <div style="font-size:12px; color:#94a3b8;">GSTIN: ${safeGstNumber}</div>
       </div>
       <div class="meta">
         <div><strong>INVOICE #${shortOrderId}</strong></div>
         <div>Date: ${dateStr}</div>
-        <div>Payment: <span class="badge">${params.paymentMethod.toUpperCase()}</span></div>
+        <div>Payment: <span class="badge">${safePaymentMethod}</span></div>
       </div>
     </div>
 
     <div style="margin-bottom: 15px; font-size: 13px;">
-      <div><strong>Billed To:</strong> ${params.customerName} (${params.customerPhone || 'N/A'})</div>
-      <div><strong>Delivery Address:</strong> ${params.customerAddress || 'Customer Address'}</div>
-      <div><strong>Transaction ID:</strong> ${params.paymentId}</div>
+      <div><strong>Billed To:</strong> ${safeCustomerName} (${safeCustomerPhone})</div>
+      <div><strong>Delivery Address:</strong> ${safeCustomerAddress}</div>
+      <div><strong>Transaction ID:</strong> ${safePaymentId}</div>
     </div>
 
     <table class="table">
@@ -70,25 +90,31 @@ export class InvoiceEngine {
         </tr>
       </thead>
       <tbody>
-        ${params.items.map(item => `
+        ${(params.items || []).map(item => {
+          const itemName = escapeHtml(item.name || item.title || 'Item');
+          const itemSize = item.size ? ` (${escapeHtml(item.size)})` : '';
+          const itemQty = Number(item.quantity || 1);
+          const itemPrice = Number(item.price || 0);
+          return `
           <tr>
-            <td>${item.name} ${item.size ? `(${item.size})` : ''}</td>
-            <td style="text-align:center;">${item.quantity}</td>
-            <td style="text-align:right;">₹${(item.price * item.quantity).toFixed(2)}</td>
+            <td>${itemName}${itemSize}</td>
+            <td style="text-align:center;">${itemQty}</td>
+            <td style="text-align:right;">₹${(itemPrice * itemQty).toFixed(2)}</td>
           </tr>
-        `).join('')}
+        `;
+        }).join('')}
       </tbody>
     </table>
 
     <div style="text-align: right; line-height: 1.8; font-size: 14px;">
       <div>Subtotal: ₹${subtotal.toFixed(2)}</div>
       <div>GST (5% SGST/CGST): ₹${gstAmount.toFixed(2)}</div>
-      <div class="total-row" style="margin-top: 10px;">Grand Total: ₹${params.totalAmount.toFixed(2)}</div>
+      <div class="total-row" style="margin-top: 10px;">Grand Total: ₹${Number(params.totalAmount || 0).toFixed(2)}</div>
     </div>
 
     <div class="footer">
-      Thank you for ordering with ${config.businessName}! <br/>
-      For support contact ${config.supportEmail} | ${config.supportPhone}
+      Thank you for ordering with ${safeBusinessName}! <br/>
+      For support contact ${safeSupportEmail} | ${safeSupportPhone}
     </div>
   </div>
 </body>

@@ -245,18 +245,12 @@ router.post('/webhook/:provider', async (req: Request, res: Response) => {
       req.headers['signature']) as string;
 
     const idempotencyKey = ((req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || '') as string).trim();
-    let result: any;
-    try {
-      result = await paymentGrpcClient.processWebhook({
-        provider: providerName,
-        payloadJson: req.body,
-        signature: signature || '',
-        idempotencyKey: idempotencyKey || undefined,
-      });
-    } catch (gErr: any) {
-      console.warn('[WebhookRoute] gRPC boundary fallback to local service:', gErr.message);
-      result = await PaymentService.processWebhook(providerName, req.body, signature || '');
-    }
+    const result = await paymentGrpcClient.processWebhook({
+      provider: providerName,
+      payloadJson: req.body,
+      signature: signature || '',
+      idempotencyKey: idempotencyKey || undefined,
+    });
     res.json({ received: true, ...result });
   } catch (error: any) {
     console.error('[WebhookRoute] Webhook processing failed:', error.message);

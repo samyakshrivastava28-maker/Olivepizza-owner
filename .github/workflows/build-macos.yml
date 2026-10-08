@@ -7,6 +7,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+concurrency:
+  group: release-macos-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -84,6 +88,7 @@ jobs:
           name: OlivePizzaOwner-macOS-Installer
           path: artifact/*.dmg
           retention-days: 14
+          if-no-files-found: error
 
       # Publish to GitHub Release (Only Latest Commit Files)
       - name: Publish to GitHub Release

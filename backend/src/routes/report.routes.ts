@@ -27,6 +27,49 @@ const requireOwnerOrAdmin = (req: AuthRequest, res: Response, next: any) => {
   next();
 };
 
+function getReportCapabilitySecret(): string {
+  const secret = process.env.TRACKING_TOKEN_SECRET || process.env.INTERNAL_RPC_SECRET || process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('CRITICAL SECURITY ERROR: TRACKING_TOKEN_SECRET or INTERNAL_RPC_SECRET must be configured in production.');
+    }
+    return 'olive-capability-dev-secret-32-chars';
+  }
+  return secret;
+}
+
+export function verifyReportCapabilityToken(token: string): boolean {
+  try {
+    const raw = Buffer.from(token, 'base64url').toString('utf8');
+    const parts = raw.split(':');
+    if (parts.length !== 5) return false;
+    const [reportId, scope, purpose, expStr, sig] = parts;
+    const exp = parseInt(expStr, 10);
+    if (isNaN(exp) || Math.floor(Date.now() / 1000) > exp) return false;
+    if (scope !== 'reporting' && scope !== 'looker') return false;
+
+    const secret = getReportCapabilitySecret();
+    const expectedSig = crypto.createHmac('sha256', secret).update(`${reportId}:${scope}:${purpose}:${expStr}`).digest('hex');
+    const sigBuf = Buffer.from(sig, 'utf8');
+    const expBuf = Buffer.from(expectedSig, 'utf8');
+    if (sigBuf.length !== expBuf.length) return false;
+    return crypto.timingSafeEqual(sigBuf, expBuf);
+  } catch {
+    return false;
+  }
+}
+
+const requireReportCapabilityOrAdmin = (req: AuthRequest, res: Response, next: any) => {
+  const capHeader = (req.headers['x-capability-token'] || req.headers['x-report-token']) as string;
+  if (capHeader && typeof capHeader === 'string' && verifyReportCapabilityToken(capHeader.trim())) {
+    return next();
+  }
+
+  verifyToken(req, res, () => {
+    requireOwnerOrAdmin(req, res, next);
+  });
+};
+
 /**
  * Handles PDF streaming (View inline or Download attachment).
  * STRICT SECURITY: Validates HMAC signed link OR user scope authorization.
@@ -38,9 +81,18 @@ async function handleStreamPdf(req: AuthRequest, res: Response, forceDownload?: 
 
     // 1. Signature Check (HMAC deep links from owner emails)
     const sig = req.query.sig as string;
-    const trackingSecret = process.env.TRACKING_TOKEN_SECRET || 'olive-tracking-hmac-secret-change-in-prod-32chars';
-    const expectedSig = crypto.createHmac('sha256', trackingSecret).update(id).digest('hex');
-    const isSignedLink = Boolean(sig && sig === expectedSig);
+    let isSignedLink = false;
+    if (sig) {
+      try {
+        const trackingSecret = getReportCapabilitySecret();
+        const expectedSig = crypto.createHmac('sha256', trackingSecret).update(id).digest('hex');
+        const sigBuf = Buffer.from(sig, 'utf8');
+        const expBuf = Buffer.from(expectedSig, 'utf8');
+        if (sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf)) {
+          isSignedLink = true;
+        }
+      } catch {}
+    }
 
     if (!isSignedLink) {
       // Must authenticate via token
@@ -552,8 +604,9 @@ router.post('/looker-studio/set-embed-url', verifyToken, requireOwnerOrAdmin, as
 /**
  * GET /api/reports/looker-studio/feed
  * Provides continuous standardized time-series reporting feed for Looker Studio / BI ingestion.
+ * Protected by capability token or Owner/Admin authorization.
  */
-router.get('/looker-studio/feed', async (req: AuthRequest, res: Response) => {
+router.get('/looker-studio/feed', requireReportCapabilityOrAdmin, async (req: AuthRequest, res: Response) => {
   try {
     const { franchiseId, limit } = req.query;
     const feed = await GoogleSheetsReportService.getLookerStudioFeed({
@@ -571,23 +624,24 @@ router.get('/looker-studio/feed', async (req: AuthRequest, res: Response) => {
   }
 });
 
+// Looker Studio Config Aliases - Protected by capability token or Owner/Admin
+router.get('/looker/config', requireReportCapabilityOrAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const config = await GoogleSheetsReportService.getLookerStudioConfig();
+    res.json({ success: true, ...config });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/config', requireReportCapabilityOrAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const config = await GoogleSheetsReportService.getLookerStudioConfig();
+    res.json({ success: true, ...config });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 export default router;
 
-// Looker Studio Config Aliases
-router.get('/looker/config', async (req, res) => {
-  try {
-    const config = await GoogleSheetsReportService.getLookerStudioConfig();
-    res.json({ success: true, ...config });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get('/config', async (req, res) => {
-  try {
-    const config = await GoogleSheetsReportService.getLookerStudioConfig();
-    res.json({ success: true, ...config });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});

@@ -7,6 +7,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+concurrency:
+  group: release-android-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build Olive Pizza Owner APK
@@ -98,64 +102,55 @@ jobs:
       # 10. Validate Signing Secrets
       - name: Validate Signing Secrets
         run: |
-          if [ -n "$KEYSTORE_PASS" ] && [ -n "$KEY_ALIAS" ]; then
-            echo '✅ Custom repository signing secrets present'
-          else
-            echo 'ℹ️ Using repository release keystore credentials'
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "❌ CRITICAL SECURITY ERROR: KEYSTORE_BASE64 secret is not configured in repository secrets!"
+            exit 1
           fi
+          if [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "❌ CRITICAL SECURITY ERROR: KEYSTORE_PASSWORD secret is not configured in repository secrets!"
+            exit 1
+          fi
+          if [ -z "$KEY_ALIAS" ]; then
+            echo "❌ CRITICAL SECURITY ERROR: KEY_ALIAS secret is not configured in repository secrets!"
+            exit 1
+          fi
+          echo "✅ All required Android release signing secrets are present."
         env:
-          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
 
       # 11. Prepare Signing Keystore
       - name: Prepare Keystore
         env:
-          KEYSTORE_BASE64: '${{ secrets.KEYSTORE_BASE64 }}'
-          KEYSTORE_PASSWORD: '${{ secrets.KEYSTORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || 'olivepizza' }}'
-          KEY_ALIAS: '${{ secrets.KEY_ALIAS || secrets.ANDROID_KEY_ALIAS || 'olivepizza' }}'
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           KEYSTORE_PATH="android/app/release.keystore"
           PASS="${KEYSTORE_PASSWORD}"
           ALIAS="${KEY_ALIAS}"
-          VALID_KEYSTORE=false
 
-          # 1. Try decoding KEYSTORE_BASE64 secret if available
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > "$KEYSTORE_PATH.tmp" 2>/dev/null || true
-            if [ -s "$KEYSTORE_PATH.tmp" ]; then
-              if keytool -list -keystore "$KEYSTORE_PATH.tmp" -storepass "$PASS" -alias "$ALIAS" >/dev/null 2>&1; then
-                mv "$KEYSTORE_PATH.tmp" "$KEYSTORE_PATH"
-                VALID_KEYSTORE=true
-                echo "✅ Successfully decoded and verified keystore from KEYSTORE_BASE64 secret."
-              fi
-            fi
-            rm -f "$KEYSTORE_PATH.tmp"
-          fi
-
-          # 2. Check keystore in repository
-          if [ "$VALID_KEYSTORE" = false ] && [ -f "$KEYSTORE_PATH" ]; then
-            if keytool -list -keystore "$KEYSTORE_PATH" -storepass "$PASS" -alias "$ALIAS" >/dev/null 2>&1; then
-              VALID_KEYSTORE=true
-              echo "✅ Verified release.keystore."
-            fi
-          fi
-
-          if [ "$VALID_KEYSTORE" = false ]; then
-            echo "❌ No valid release.keystore found or credentials mismatch!"
+          echo "$KEYSTORE_BASE64" | tr -d ' \n\r' | base64 -d > "$KEYSTORE_PATH"
+          if [ ! -s "$KEYSTORE_PATH" ]; then
+            echo "❌ Failed to decode KEYSTORE_BASE64 into $KEYSTORE_PATH"
             exit 1
           fi
 
-          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$PASS" -alias "$ALIAS" \
-            && echo "✅ Keystore ready and verified — alias '$ALIAS' found."
+          # Verify keystore integrity with provided credentials
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$PASS" -alias "$ALIAS" >/dev/null 2>&1 \
+            || { echo "❌ Failed to verify keystore with alias '$ALIAS' and provided password!"; exit 1; }
+
+          echo "✅ Keystore successfully prepared and verified from KEYSTORE_BASE64 secret."
 
       # 12. Build Signed Release APK
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon
         working-directory: android
         env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || 'olivepizza' }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS || secrets.ANDROID_KEY_ALIAS || 'olivepizza' }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.ANDROID_KEY_PASSWORD || secrets.KEYSTORE_PASSWORD || 'olivepizza' }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.KEYSTORE_PASSWORD }}
 
       # 12. Verify the APK is properly signed
       - name: Verify APK Signature
