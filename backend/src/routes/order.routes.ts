@@ -493,6 +493,42 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       return;
     }
 
+    // 0. STRICT GUARD AGAINST FAKE / SYNTHETIC / TEST ORDERS
+    // Eliminates phantom orders that trigger false kitchen alarms and rider dispatches
+    const incomingId = (req.body.id || req.body.orderId || '').toString().trim().toLowerCase();
+    const incomingCustomerName = (req.body.customerName || req.body.name || '').toString().trim().toLowerCase();
+    const incomingSource = (req.body.orderSource || '').toString().trim().toUpperCase();
+    const isSyntheticPattern = 
+      incomingId.startsWith('test_') ||
+      incomingId.startsWith('mock_') ||
+      incomingId.startsWith('synthetic_') ||
+      incomingId.startsWith('dummy_') ||
+      incomingId.startsWith('online_test_') ||
+      incomingId.startsWith('ord_test_') ||
+      /^(test|mock|synthetic|dummy|fake|archival test|idempotency test)/i.test(incomingCustomerName) ||
+      ['TEST', 'MOCK', 'SYNTHETIC'].includes(incomingSource) ||
+      req.body.isTest === true ||
+      req.body.isMock === true ||
+      req.headers['x-test-order'] === 'true';
+
+    if (isSyntheticPattern) {
+      const isProduction = process.env.NODE_ENV === 'production';
+      const isAllowedMockTest = 
+        !isProduction && 
+        process.env.NODE_ENV === 'test' && 
+        process.env.ALLOW_SYNTHETIC_ORDERS === 'true' && 
+        Boolean(process.env.FIRESTORE_EMULATOR_HOST);
+
+      if (!isAllowedMockTest) {
+        console.warn(`[Orders] REJECT: Synthetic/test order blocked (ID: ${incomingId || 'none'}, Name: ${incomingCustomerName || 'none'}, Source: ${incomingSource || 'none'}).`);
+        res.status(400).json({
+          error: 'Synthetic, mock, or test orders are strictly prohibited in this environment.',
+          code: 'SYNTHETIC_ORDER_REJECTED'
+        });
+        return;
+      }
+    }
+
     // 0. Enforce 1 active order per customer policy
     const existingOrdersSnap = await adminDb.collection('orders')
       .where('userId', '==', userId)

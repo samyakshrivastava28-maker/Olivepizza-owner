@@ -7,6 +7,11 @@ import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 import { initPostgres } from '../config/postgres.js';
 
 async function runLifecycleTests() {
+  if (!process.env.FIRESTORE_EMULATOR_HOST && (process.env.NODE_ENV === 'production' || !process.env.RUN_LIVE_FIRESTORE_TESTS)) {
+    console.log('🔒 [Safety Guard] Live Firestore order creation bypassed outside emulator/isolated test env (set FIRESTORE_EMULATOR_HOST or RUN_LIVE_FIRESTORE_TESTS=true to run).');
+    return;
+  }
+
   console.log('====================================================');
   console.log('OLIVE PIZZA FIRESTORE-FIRST & POSTGRESQL ARCHIVE TESTS');
   console.log('====================================================\n');
@@ -147,9 +152,11 @@ async function runLifecycleTests() {
   }
 }
 
-runLifecycleTests()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error('❌ Test failed with error:', err);
-    process.exit(1);
-  });
+if (process.argv[1] && process.argv[1].includes('firestore_first_lifecycle')) {
+  runLifecycleTests()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error('❌ Test failed with error:', err);
+      process.exit(1);
+    });
+}

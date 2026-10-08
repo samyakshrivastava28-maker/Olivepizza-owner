@@ -4,6 +4,11 @@ import { adminDb } from '../config/firebase.js';
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
 
 async function runIdempotencyAndPaymentSafetyTests() {
+  if (!process.env.FIRESTORE_EMULATOR_HOST && (process.env.NODE_ENV === 'production' || !process.env.RUN_LIVE_FIRESTORE_TESTS)) {
+    console.log('🔒 [Safety Guard] Order archive tests bypassed outside emulator/isolated test env (set FIRESTORE_EMULATOR_HOST or RUN_LIVE_FIRESTORE_TESTS=true to run).');
+    return;
+  }
+
   console.log('====================================================');
   console.log('ORDER ARCHIVE IDEMPOTENCY & PAYMENT SAFETY TESTS');
   console.log('====================================================\n');
@@ -151,9 +156,11 @@ async function runIdempotencyAndPaymentSafetyTests() {
   }
 }
 
-runIdempotencyAndPaymentSafetyTests()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error('❌ Test failed with error:', err);
-    process.exit(1);
-  });
+if (process.argv[1] && process.argv[1].includes('order_archive_idempotency_and_payment_safety')) {
+  runIdempotencyAndPaymentSafetyTests()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error('❌ Test failed with error:', err);
+      process.exit(1);
+    });
+}

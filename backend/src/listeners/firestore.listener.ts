@@ -97,6 +97,28 @@ export class FirestoreListener {
         for (const change of snapshot.docChanges()) {
           const orderData = { id: change.doc.id, ...change.doc.data() } as any;
 
+          // ── SYNTHETIC / TEST ORDER SAFEGUARD ──────────────────────────────────
+          // Strictly drop test/mock/synthetic orders from alerting restaurant staff or riders
+          const isSynthetic = 
+            orderData.id.startsWith('test_') ||
+            orderData.id.startsWith('mock_') ||
+            orderData.id.startsWith('synthetic_') ||
+            orderData.id.startsWith('dummy_') ||
+            orderData.id.startsWith('online_test_') ||
+            orderData.id.startsWith('ord_test_') ||
+            (orderData.customerName && /^(test|mock|synthetic|dummy|fake|archival test|idempotency test)/i.test(orderData.customerName)) ||
+            (orderData.orderSource && /test|mock|synthetic/i.test(orderData.orderSource)) ||
+            (orderData.orderNumber && /test/i.test(String(orderData.orderNumber))) ||
+            orderData.isTest === true ||
+            orderData.isMock === true;
+
+          if (isSynthetic) {
+            console.warn(`[FirestoreListener] Safeguard: Dropping synthetic/test order ${orderData.id}. Suppressing alarms, FCM pushes, and rider assignments.`);
+            this.orderStatusCache.set(orderData.id, orderData.status);
+            this.processedOrderIds.add(orderData.id);
+            continue;
+          }
+
           // ── NEW ORDER ────────────────────────────────────────────────────────
           if (change.type === 'added') {
             let createdAt: Date = new Date(0);

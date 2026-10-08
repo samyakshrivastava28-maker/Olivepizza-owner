@@ -21,6 +21,18 @@ export class SheetsSyncWorker {
    */
   public static async queueOrder(orderId: string, orderData?: any): Promise<void> {
     try {
+      const id = String(orderId || '').toLowerCase();
+      if (
+        id.startsWith('test_') ||
+        id.startsWith('mock_') ||
+        id.startsWith('synthetic_') ||
+        id.startsWith('dummy_') ||
+        id.startsWith('online_test_') ||
+        id.startsWith('ord_test_') ||
+        orderData?.isTest
+      ) {
+        return;
+      }
       if (orderData) {
         // Attempt immediate sync non-blockingly
         setImmediate(async () => {

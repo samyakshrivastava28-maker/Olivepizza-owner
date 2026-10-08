@@ -84,6 +84,35 @@ export class CanonicalOrderService {
   public static async createCanonicalOrder(params: CreateOrderParams) {
     const orderId = params.id || crypto.randomUUID();
 
+    // STRICT GUARD AGAINST FAKE / SYNTHETIC / TEST ORDERS
+    const incomingId = (params.id || '').toString().trim().toLowerCase();
+    const customerName = (params.customerName || '').toString().trim().toLowerCase();
+    const orderSource = (params.orderSource || '').toString().trim().toUpperCase();
+    const isSynthetic = 
+      incomingId.startsWith('test_') ||
+      incomingId.startsWith('mock_') ||
+      incomingId.startsWith('synthetic_') ||
+      incomingId.startsWith('dummy_') ||
+      incomingId.startsWith('online_test_') ||
+      incomingId.startsWith('ord_test_') ||
+      /^(test|mock|synthetic|dummy|fake|archival test|idempotency test)/i.test(customerName) ||
+      ['TEST', 'MOCK', 'SYNTHETIC'].includes(orderSource) ||
+      (params as any).isTest === true ||
+      (params as any).isMock === true;
+
+    if (isSynthetic) {
+      const isProduction = process.env.NODE_ENV === 'production';
+      const isAllowedMockTest = 
+        !isProduction && 
+        process.env.NODE_ENV === 'test' && 
+        process.env.ALLOW_SYNTHETIC_ORDERS === 'true' && 
+        Boolean(process.env.FIRESTORE_EMULATOR_HOST);
+
+      if (!isAllowedMockTest) {
+        throw new Error(`[CanonicalOrderService] Synthetic/mock/test orders are strictly forbidden from canonical database commit (ID: ${params.id || 'none'}).`);
+      }
+    }
+
     // 1. Allocate continuous Permanent Bill No. and Daily Order No.
     const nums = await BillingNumberService.allocateNumbers();
     const { permanentBillNo, dailyOrderNo, orderDate, orderTime } = nums;
@@ -323,8 +352,11 @@ export class CanonicalOrderService {
     }
 
     // 3. Authoritative Firestore order persistence (maintains instant mobile/client notifications)
-    try {
-      await adminDb.collection('orders').doc(orderId).set({
+    if (isSynthetic && !process.env.FIRESTORE_EMULATOR_HOST) {
+      console.warn(`[CanonicalOrderService] Bypassed live Firestore order persistence for synthetic order ${orderId}.`);
+    } else {
+      try {
+        await adminDb.collection('orders').doc(orderId).set({
         id: orderId,
         permanentBillNo,
         billNumber: `#${permanentBillNo}`,
@@ -361,6 +393,7 @@ export class CanonicalOrderService {
     } catch (e: any) {
       console.warn('[CanonicalOrder] Firestore mirror warning:', e.message);
     }
+  }
 
     return {
       id: orderId,
