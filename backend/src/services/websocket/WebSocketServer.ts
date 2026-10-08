@@ -16,6 +16,7 @@ import { WebSocketServer as WSSNative, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import { appEventBus, OrderStatusChangedEvent, OrderCreatedEvent } from '../eventBus/AppEventBus.js';
 import { adminAuth, adminDb } from '../../config/firebase.js';
+import { sanitizeError } from '../../utils/logSanitizer.js';
 
 async function resolveAuthoritativeRole(uid: string, tokenRole?: string): Promise<string> {
   if (tokenRole && tokenRole !== 'customer') return tokenRole;
@@ -149,26 +150,42 @@ class OliveWebSocketServer {
 
     this.wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
       const url = new URL(req.url || '/', `ws://${req.headers.host || 'localhost'}`);
-      const token = url.searchParams.get('token');
+
+      // PHASE 91: Reject tokens in URL query strings to avoid leaking credentials in access logs & proxy histories
+      if (url.searchParams.has('token') || url.searchParams.has('idToken') || url.searchParams.has('access_token') || url.searchParams.has('auth')) {
+        console.warn('[WebSocketServer] Connection rejected: Token in query string forbidden.');
+        ws.close(1008, 'Token in URL query string is forbidden. Use Authorization header or in-band auth message.');
+        return;
+      }
+
+      // Check Authorization header for handshake auth
+      let token: string | undefined;
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        token = authHeader.split('Bearer ')[1].trim();
+      }
+
       const branchIdParam = url.searchParams.get('branchId') || undefined;
       const franchiseIdParam = url.searchParams.get('franchiseId') || undefined;
       const terminalIdParam = url.searchParams.get('terminalId') || undefined;
       let uid = 'anonymous';
       let role = 'customer';
 
-      // Verify token if supplied during connection handshake
+      // Verify token if supplied via handshake Authorization header
       if (token) {
         try {
           const decoded = await adminAuth.verifyIdToken(token);
           uid = decoded.uid;
           role = await resolveAuthoritativeRole(uid, decoded.role as string);
-        } catch (tokenErr) {
-          console.warn('[WebSocketServer] Handshake token verification failed:', tokenErr);
+        } catch (tokenErr: any) {
+          const safeErr = sanitizeError(tokenErr);
+          console.warn('[WebSocketServer] Handshake token verification failed:', safeErr.message);
           uid = 'anonymous';
           role = 'customer';
         }
       } else {
-        // If unauthenticated, default to anonymous customer.
+        // If unauthenticated at handshake, default to anonymous customer.
+        // Client can authenticate in-band via { type: 'auth', token: '...' } message.
         uid = 'anonymous';
         role = 'customer';
       }
@@ -243,7 +260,8 @@ class OliveWebSocketServer {
                 data: { uid: authUid, role: authRole, branchId: client.branchId, franchiseId: client.franchiseId, timestamp: new Date().toISOString() }
               });
             } catch (err: any) {
-              console.warn('[WebSocketServer] Message auth failed:', err.message);
+              const safeErr = sanitizeError(err);
+              console.warn('[WebSocketServer] Message auth failed:', safeErr.message);
               this.safeSend(ws, { type: 'auth_error', data: { message: 'Invalid token' } });
             }
             return;

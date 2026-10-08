@@ -47,7 +47,7 @@ async function handleStreamPdf(req: AuthRequest, res: Response, forceDownload?: 
       let user = req.user;
       if (!user) {
         const authHeader = req.headers.authorization;
-        const token = authHeader?.startsWith('Bearer ') ? authHeader.split('Bearer ')[1] : (req.query.token as string);
+        const token = authHeader?.startsWith('Bearer ') ? authHeader.split('Bearer ')[1].trim() : undefined;
         if (token) {
           try {
             const { adminAuth } = await import('../config/firebase.js');

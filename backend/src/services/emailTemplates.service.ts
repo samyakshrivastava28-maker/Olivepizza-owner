@@ -17,6 +17,7 @@
  */
 
 import { FRONTEND_URL } from '../config/urls.js';
+import { escapeHtml } from '../utils/escapeHtml.js';
 
 // ── Brand Tokens ──────────────────────────────────────────────────────────────
 const BRAND_GREEN   = '#4a7c59';
@@ -111,8 +112,8 @@ function statusBadge(label: string, color: string): string {
 
 function orderMetaRow(label: string, value: string): string {
   return `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid ${BRAND_BORDER};">
-    <span style="font-size:13px;color:${TEXT_MUTED};">${label}</span>
-    <span style="font-size:13px;color:${TEXT_PRIMARY};font-weight:500;">${value}</span>
+    <span style="font-size:13px;color:${TEXT_MUTED};">${escapeHtml(label)}</span>
+    <span style="font-size:13px;color:${TEXT_PRIMARY};font-weight:500;">${escapeHtml(value)}</span>
   </div>`;
 }
 
@@ -122,7 +123,8 @@ function ctaButton(label: string, url: string, style: 'primary' | 'accent' | 'gh
            : 'rgba(255,255,255,0.07)';
   const border = style === 'ghost' ? `border: 1px solid ${BRAND_BORDER};` : '';
   const color = '#ffffff';
-  return `<a href="${url}" class="btn" style="background:${bg};${border}color:${color};display:inline-block;padding:14px 28px;border-radius:12px;font-weight:700;font-size:15px;text-decoration:none;">${label}</a>`;
+  const safeUrl = escapeHtml(url);
+  return `<a href="${safeUrl}" class="btn" style="background:${bg};${border}color:${color};display:inline-block;padding:14px 28px;border-radius:12px;font-weight:700;font-size:15px;text-decoration:none;">${escapeHtml(label)}</a>`;
 }
 
 function progressTimeline(steps: string[], activeIndex: number): string {
@@ -134,7 +136,7 @@ function progressTimeline(steps: string[], activeIndex: number): string {
       const icon = done ? '✓' : active ? '●' : '○';
       return `<div style="display:flex;align-items:center;gap:12px;${i < steps.length - 1 ? 'margin-bottom:14px;' : ''}">
         <div style="width:28px;height:28px;border-radius:50%;background:${done || active ? BRAND_GREEN : 'rgba(255,255,255,0.06)'};display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:12px;color:#fff;font-weight:700;">${icon}</div>
-        <span style="font-size:14px;color:${active ? TEXT_PRIMARY : (done ? '#d1d5db' : TEXT_MUTED)};font-weight:${active ? 700 : 400};">${step}</span>
+        <span style="font-size:14px;color:${active ? TEXT_PRIMARY : (done ? '#d1d5db' : TEXT_MUTED)};font-weight:${active ? 700 : 400};">${escapeHtml(step)}</span>
         ${active ? `<span style="margin-left:auto;font-size:11px;background:${BRAND_GREEN}22;color:${BRAND_GREEN};padding:2px 10px;border-radius:20px;border:1px solid ${BRAND_GREEN}44;font-weight:600;">Current</span>` : ''}
       </div>`;
     }).join('')}
@@ -154,6 +156,8 @@ export function buildOrderStatusEmail(params: {
   orderData?: any; // FULL ORDER OBJECT if provided by NotifQueue
 }): string {
   const { customerName, stage, orderId, data, orderData } = params;
+  const safeCustomerName = escapeHtml(customerName);
+  const safePartner = escapeHtml(data.deliveryPartnerName || 'Your partner');
   const orderNumber = data.orderNumber || data.dailyOrderNumber || orderData?.order_number || orderData?.daily_order_number || '';
   const totalAmount = data.totalAmount || orderData?.total_amount || '';
   const eta = data.eta || orderData?.estimated_delivery_time || '';
@@ -161,16 +165,16 @@ export function buildOrderStatusEmail(params: {
   const orderUrl = `${FRONTEND_URL}/customer/dashboard`;
 
   const stageMap: Record<string, () => string> = {
-    pending:           () => buildOrderPlacedEmailSimple(customerName, orderNumber, totalAmount, eta, trackUrl, orderData),
-    accepted:          () => buildOrderConfirmedEmailSimple(customerName, orderNumber, eta, trackUrl, orderData),
-    preparing:         () => buildOrderPreparingEmailSimple(customerName, orderNumber, eta, trackUrl, orderData),
-    baking:            () => buildOrderBakingEmailSimple(customerName, orderNumber, eta, trackUrl, orderData),
-    ready:             () => buildOrderPackedEmailSimple(customerName, orderNumber, eta, trackUrl, orderData),
-    partner_assigned:  () => buildDeliveryAssignedEmailSimple(customerName, orderNumber, data.deliveryPartnerName || 'Your partner', eta, trackUrl, orderData),
-    picked_up:         () => buildDeliveryAssignedEmailSimple(customerName, orderNumber, data.deliveryPartnerName || 'Your partner', eta, trackUrl, orderData),
-    out_for_delivery:  () => buildOutForDeliveryEmailSimple(customerName, orderNumber, data.deliveryPartnerName || 'Your partner', eta, trackUrl, orderData),
-    delivered:         () => buildOrderDeliveredEmailSimple(customerName, orderNumber, orderUrl, trackUrl, orderData),
-    cancelled:         () => buildOrderCancelledEmailSimple(customerName, orderNumber, orderUrl, orderData),
+    pending:           () => buildOrderPlacedEmailSimple(safeCustomerName, orderNumber, totalAmount, eta, trackUrl, orderData),
+    accepted:          () => buildOrderConfirmedEmailSimple(safeCustomerName, orderNumber, eta, trackUrl, orderData),
+    preparing:         () => buildOrderPreparingEmailSimple(safeCustomerName, orderNumber, eta, trackUrl, orderData),
+    baking:            () => buildOrderBakingEmailSimple(safeCustomerName, orderNumber, eta, trackUrl, orderData),
+    ready:             () => buildOrderPackedEmailSimple(safeCustomerName, orderNumber, eta, trackUrl, orderData),
+    partner_assigned:  () => buildDeliveryAssignedEmailSimple(safeCustomerName, orderNumber, safePartner, eta, trackUrl, orderData),
+    picked_up:         () => buildDeliveryAssignedEmailSimple(safeCustomerName, orderNumber, safePartner, eta, trackUrl, orderData),
+    out_for_delivery:  () => buildOutForDeliveryEmailSimple(safeCustomerName, orderNumber, safePartner, eta, trackUrl, orderData),
+    delivered:         () => buildOrderDeliveredEmailSimple(safeCustomerName, orderNumber, orderUrl, trackUrl, orderData),
+    cancelled:         () => buildOrderCancelledEmailSimple(safeCustomerName, orderNumber, orderUrl, orderData),
   };
 
   const builder = stageMap[stage] || stageMap['pending'];
@@ -181,25 +185,39 @@ function renderOrderSummary(orderData: any): string {
   if (!orderData || !orderData.items) return '';
   
   const itemsHtml = orderData.items.map((item: any) => {
-    const productName = item.product_name || item.name || 'Item';
+    const productName = escapeHtml(item.product_name || item.name || 'Item');
     const itemImage = item.image_url || item.image;
-    const itemPrice = item.unit_price || item.price || 0;
-    const variantName = item.variant_name || (item.size && item.size !== 'regular' ? `${item.size} ${item.crust && item.crust !== 'normal' ? '- ' + item.crust : ''}` : '');
-    const itemTotal = item.quantity * itemPrice;
+    const safeImage = itemImage && String(itemImage).startsWith('http') ? escapeHtml(itemImage) : null;
+    const itemPrice = Number(item.unit_price || item.price || 0);
+    const variantRaw = item.variant_name || (item.size && item.size !== 'regular' ? `${item.size} ${item.crust && item.crust !== 'normal' ? '- ' + item.crust : ''}` : '');
+    const variantName = variantRaw ? escapeHtml(variantRaw) : '';
+    const quantity = Number(item.quantity || 1);
+    const itemTotal = quantity * itemPrice;
     
     return `
     <div style="display:flex;padding:12px 0;border-bottom:1px solid ${BRAND_BORDER};">
-      ${itemImage ? `<img src="${itemImage}" width="60" height="60" style="border-radius:8px;object-fit:cover;margin-right:16px;background:#1f2937;" />` : ''}
+      ${safeImage ? `<img src="${safeImage}" width="60" height="60" style="border-radius:8px;object-fit:cover;margin-right:16px;background:#1f2937;" />` : ''}
       <div style="flex-grow:1;">
         <div style="font-weight:700;color:${TEXT_PRIMARY};font-size:15px;margin-bottom:4px;">${productName}</div>
         ${variantName ? `<div style="font-size:12px;color:${TEXT_SECONDARY};margin-bottom:4px;">Variant: ${variantName}</div>` : ''}
-        <div style="font-size:13px;color:${TEXT_MUTED};">Qty: ${item.quantity} × ₹${itemPrice}</div>
+        <div style="font-size:13px;color:${TEXT_MUTED};">Qty: ${quantity} × ₹${itemPrice.toFixed(2)}</div>
       </div>
       <div style="font-weight:700;color:${TEXT_PRIMARY};font-size:15px;">
         ₹${itemTotal.toFixed(2)}
       </div>
     </div>
   `}).join('');
+
+  const safeCustomerName = escapeHtml(orderData.customerName || (orderData.delivery_address && orderData.delivery_address.fullName) || 'Customer');
+  const rawAddr = orderData.deliveryAddress?.addressLine || (orderData.delivery_address && orderData.delivery_address.addressLine1) || orderData.deliveryAddress || '';
+  const safeAddrLine1 = escapeHtml(rawAddr);
+  const safeAddrLine2 = orderData.delivery_address?.addressLine2 ? escapeHtml(orderData.delivery_address.addressLine2) : '';
+  const safeCity = orderData.delivery_address?.city ? escapeHtml(orderData.delivery_address.city) : '';
+  const safeState = orderData.delivery_address?.state ? escapeHtml(orderData.delivery_address.state) : '';
+  const safePostal = orderData.delivery_address?.postalCode ? escapeHtml(orderData.delivery_address.postalCode) : '';
+  const safePhone = escapeHtml(orderData.contactPhone || (orderData.delivery_address && orderData.delivery_address.phone) || '');
+  const rawPaymentMethod = orderData.payment_method || orderData.paymentMethod;
+  const safePaymentMethod = rawPaymentMethod ? escapeHtml(String(rawPaymentMethod).toUpperCase()) : '';
 
   return `
     <div style="margin:24px 0;background:rgba(255,255,255,0.03);border:1px solid ${BRAND_BORDER};border-radius:14px;padding:20px;">
@@ -216,17 +234,17 @@ function renderOrderSummary(orderData: any): string {
         </div>
       </div>
     </div>
-    ${orderData.deliveryAddress || orderData.delivery_address ? `
+    ${(orderData.deliveryAddress || orderData.delivery_address) ? `
     <div style="margin:24px 0;background:rgba(255,255,255,0.03);border:1px solid ${BRAND_BORDER};border-radius:14px;padding:20px;">
       <h3 style="margin:0 0 12px 0;color:${TEXT_PRIMARY};font-size:14px;text-transform:uppercase;letter-spacing:1px;">Delivery Details</h3>
       <p style="margin:0;color:${TEXT_SECONDARY};font-size:14px;line-height:1.5;">
-        ${orderData.customerName || (orderData.delivery_address && orderData.delivery_address.fullName) || 'Customer'}<br/>
-        ${orderData.deliveryAddress?.addressLine || (orderData.delivery_address && orderData.delivery_address.addressLine1) || orderData.deliveryAddress || ''}<br/>
-        ${(orderData.delivery_address && orderData.delivery_address.addressLine2) ? orderData.delivery_address.addressLine2 + '<br/>' : ''}
-        ${(orderData.delivery_address && orderData.delivery_address.city) ? orderData.delivery_address.city + ', ' : ''}${(orderData.delivery_address && orderData.delivery_address.state) ? orderData.delivery_address.state : ''} ${(orderData.delivery_address && orderData.delivery_address.postalCode) ? orderData.delivery_address.postalCode + '<br/>' : ''}
-        📞 ${orderData.contactPhone || (orderData.delivery_address && orderData.delivery_address.phone) || ''}
+        ${safeCustomerName}<br/>
+        ${safeAddrLine1}<br/>
+        ${safeAddrLine2 ? safeAddrLine2 + '<br/>' : ''}
+        ${safeCity ? safeCity + ', ' : ''}${safeState} ${safePostal ? safePostal + '<br/>' : ''}
+        📞 ${safePhone}
       </p>
-      ${(orderData.payment_method || orderData.paymentMethod) ? `<p style="margin:12px 0 0 0;color:${TEXT_MUTED};font-size:13px;">Payment: <strong>${(orderData.payment_method || orderData.paymentMethod).toUpperCase()}</strong></p>` : ''}
+      ${safePaymentMethod ? `<p style="margin:12px 0 0 0;color:${TEXT_MUTED};font-size:13px;">Payment: <strong>${safePaymentMethod}</strong></p>` : ''}
     </div>
     ` : ''}
   `;

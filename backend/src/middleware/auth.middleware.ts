@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { adminAuth, adminDb } from '../config/firebase.js';
 import { FranchiseScopeService, ScopeContext } from '../services/franchise/FranchiseScopeService.js';
 import { ApiSecurityMiddleware } from '../security/ApiSecurityMiddleware.js';
+import { sanitizeError, redactSensitiveData } from '../utils/logSanitizer.js';
 
 export async function logSecurityEventServer(params: {
   action: string;
@@ -13,13 +14,15 @@ export async function logSecurityEventServer(params: {
   ip?: string;
 }) {
   try {
+    const sanitizedParams = redactSensitiveData(params);
     await adminDb.collection('security_logs').add({
-      ...params,
+      ...sanitizedParams,
       timestamp: new Date().toISOString(),
       source: 'backend_api'
     });
   } catch (error) {
-    console.error('Failed to log security event on server:', error);
+    const safeErr = sanitizeError(error);
+    console.error('Failed to log security event on server:', safeErr.message);
   }
 }
 
@@ -42,8 +45,17 @@ export interface AuthRequest extends Request {
 }
 
 export const verifyToken = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  // PHASE 91: Tokens must NEVER be passed via query string (?token=...). Only Authorization: Bearer <token>.
+  if (req.query && (req.query.token || req.query.idToken || req.query.access_token || req.query.auth)) {
+    res.status(400).json({
+      error: 'Bad Request: Passing authentication tokens in query strings is forbidden for security. Use Authorization: Bearer <token> header.',
+      code: 'TOKEN_IN_QUERY_FORBIDDEN'
+    });
+    return;
+  }
+
   const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.split('Bearer ')[1] : (req.query.token as string);
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.split('Bearer ')[1].trim() : undefined;
 
   if (!token) {
     res.status(401).json({ error: 'Unauthorized: No token provided' });
@@ -255,7 +267,8 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
 
     next();
   } catch (error: any) {
-    console.error('Token verification error:', error);
+    const safeErr = sanitizeError(error);
+    console.error('Token verification error:', safeErr.message, safeErr.code ? `[${safeErr.code}]` : '');
     if (error?.code === 'auth/id-token-revoked' || error?.message?.includes('revoked')) {
       res.status(401).json({ error: 'Unauthorized: Token has been revoked', code: 'TOKEN_REVOKED' });
       return;
@@ -450,13 +463,22 @@ export const requireTerminalScope = () => {
 };
 
 export const optionalAuth = async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+  // PHASE 91: Reject tokens in query strings
+  if (req.query && (req.query.token || req.query.idToken || req.query.access_token || req.query.auth)) {
+    res.status(400).json({
+      error: 'Bad Request: Passing authentication tokens in query strings is forbidden for security. Use Authorization: Bearer <token> header.',
+      code: 'TOKEN_IN_QUERY_FORBIDDEN'
+    });
+    return;
+  }
+
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     next();
     return;
   }
 
-  const token = authHeader.split('Bearer ')[1];
+  const token = authHeader.split('Bearer ')[1]?.trim();
 
   try {
     const decodedToken = await adminAuth.verifyIdToken(token);

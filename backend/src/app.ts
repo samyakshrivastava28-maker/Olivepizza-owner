@@ -46,15 +46,22 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
       scriptSrc: [
         "'self'", 
         "'unsafe-inline'", 
         "https://apis.google.com", 
+        "https://checkout.razorpay.com",
         "https://challenges.cloudflare.com", 
         "https://static.cloudflareinsights.com"
       ],
       frameSrc: [
         "'self'", 
+        "https://checkout.razorpay.com",
+        "https://api.razorpay.com",
+        "https://mercury.phonepe.com",
         "https://challenges.cloudflare.com"
       ],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
@@ -78,6 +85,10 @@ app.use(helmet({
         "https://*.googleapis.com", 
         "https://*.supabase.co", 
         "wss://*.supabase.co", 
+        "https://api.razorpay.com",
+        "https://api.phonepe.com",
+        "https://mercury.phonepe.com",
+        "https://mercury-t2.phonepe.com",
         "https://integrate.api.nvidia.com", 
         "https://tiles.openfreemap.org", 
         "https://*.cartocdn.com", 
@@ -96,6 +107,7 @@ app.use(helmet({
   noSniff: true,
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   crossOriginOpenerPolicy: { policy: 'same-origin' },
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 
 // ─── SOURCE LEAK & REVERSE ENGINEERING PROTECTION ────────────────────────────
