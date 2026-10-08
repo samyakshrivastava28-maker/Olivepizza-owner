@@ -470,6 +470,10 @@ app.use('/api/app-config', appConfigRoutes);
 app.use('/api/v1/app-config', appConfigRoutes);
 app.use('/v1/app-config', appConfigRoutes);
 
+import bootstrapRoutes from './routes/bootstrap.routes.js';
+app.use('/api/v1', bootstrapRoutes);
+app.use('/v1', bootstrapRoutes);
+
 app.use('/tts', ttsRoutes);
 app.use('/api/tts', ttsRoutes);
 

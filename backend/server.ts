@@ -19,6 +19,7 @@ import { webSocketServer } from './src/services/websocket/WebSocketServer.ts';
 import { AIHeartbeatJob } from './src/jobs/AIHeartbeatJob.ts';
 import { AiHealthMonitorService } from './src/services/AiHealthMonitorService.ts';
 import { SheetsSyncWorker } from './src/services/reports/SheetsSyncWorker.ts';
+import { startGrpcServer } from './src/grpc/grpcServer.ts';
 
 dotenv.config();
 
@@ -106,6 +107,7 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
 
   // Asynchronous background boots
   (async () => {
+    startGrpcServer().catch((err: any) => console.error('[gRPC Server] Startup failure:', err?.message));
     initPostgres().catch((err: any) => console.warn('[PostgreSQL] Init warning:', err?.message));
     initScheduler();
     DataRetentionJob.schedule();
