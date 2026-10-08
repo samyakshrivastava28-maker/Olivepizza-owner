@@ -40,8 +40,8 @@ jobs:
           mkdir -p dist
           cp -r frontend/dist/* dist/ || true
         env:
-          VITE_API_BASE_URL: https://olivepizza-owner.onrender.com
-          VITE_BACKEND_URL: https://olivepizza-owner.onrender.com
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL || 'https://olivepizza-owner.onrender.com' }}
+          VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL || 'https://olivepizza-owner.onrender.com' }}
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
           VITE_FIREBASE_PROJECT_ID: olive-pizza-08
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
@@ -95,7 +95,19 @@ jobs:
           sed -i "s/versionCode 1/versionCode ${VERSION_CODE}/g" android/app/build.gradle
           sed -i "s/versionName \"1.0\"/versionName \"1.0.${COMMIT_NUM}\"/g" android/app/build.gradle
 
-      # 10. Prepare Signing Keystore
+      # 10. Validate Signing Secrets
+      - name: Validate Signing Secrets
+        run: |
+          if [ -z "$KEYSTORE_PASS" ] || [ -z "$KEY_ALIAS" ]; then
+            echo '❌ ERROR: KEYSTORE_PASSWORD or KEY_ALIAS secrets not configured!'
+            exit 1
+          fi
+          echo '✅ Signing secrets present'
+        env:
+          KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+
+      # 11. Prepare Signing Keystore
       - name: Prepare Keystore
         env:
           KEYSTORE_BASE64: '${{ secrets.KEYSTORE_BASE64 }}'
@@ -103,8 +115,8 @@ jobs:
           KEY_ALIAS: '${{ secrets.KEY_ALIAS }}'
         run: |
           KEYSTORE_PATH="android/app/release.keystore"
-          PASS="${KEYSTORE_PASSWORD:-olivepizza}"
-          ALIAS="${KEY_ALIAS:-olivepizza}"
+          PASS="${KEYSTORE_PASSWORD}"
+          ALIAS="${KEY_ALIAS}"
           VALID_KEYSTORE=false
 
           # 1. Try decoding KEYSTORE_BASE64 secret if available
@@ -136,14 +148,14 @@ jobs:
           keytool -list -keystore "$KEYSTORE_PATH" -storepass "$PASS" -alias "$ALIAS" \
             && echo "✅ Keystore ready and verified — alias '$ALIAS' found."
 
-      # 11. Build Signed Release APK
+      # 12. Build Signed Release APK
       - name: Build Release APK
         run: ./gradlew assembleRelease --no-daemon
         working-directory: android
         env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || 'olivepizza' }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS || secrets.ANDROID_KEY_ALIAS || 'olivepizza' }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.ANDROID_KEY_PASSWORD || secrets.KEYSTORE_PASSWORD || 'olivepizza' }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.KEYSTORE_PASSWORD }}
 
       # 12. Verify the APK is properly signed
       - name: Verify APK Signature

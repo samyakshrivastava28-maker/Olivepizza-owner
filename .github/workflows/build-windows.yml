@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
       - run: npm ci
       - name: Build frontend
@@ -31,7 +31,7 @@ jobs:
           cd ..
           node -e "const fs = require('fs'); if (!fs.existsSync('dist')) fs.mkdirSync('dist', {recursive: true}); if (fs.existsSync('frontend/dist')) fs.cpSync('frontend/dist', 'dist', {recursive: true});"
         env:
-          VITE_API_BASE_URL: https://olivepizza-owner.onrender.com
+          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL || 'https://olivepizza-owner.onrender.com' }}
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
           VITE_FIREBASE_PROJECT_ID: olive-pizza-08
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
