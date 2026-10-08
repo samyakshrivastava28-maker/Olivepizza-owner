@@ -368,6 +368,12 @@ router.get('/cod/status/:orderId', verifyToken, async (req: AuthRequest, res: Re
 
 // ─── 4D. COD Webhook Simulation (Sandbox / Test Verification) ─────────────────
 router.post('/cod/simulate-webhook', verifyToken, async (req: AuthRequest, res: Response) => {
+  // SECURITY: Block completely in production environment - no exceptions
+  if (process.env.NODE_ENV === 'production') {
+    res.status(404).json({ success: false, error: 'Not found' });
+    return;
+  }
+
   try {
     const config = getPaymentConfig();
     const isSandboxOrDev = config.sandboxMode || process.env.NODE_ENV !== 'production';
