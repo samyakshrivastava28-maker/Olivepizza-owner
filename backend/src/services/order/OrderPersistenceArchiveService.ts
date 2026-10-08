@@ -92,10 +92,13 @@ export class OrderPersistenceArchiveService {
       else if (rawStatus === 'cancelled' || rawStatus === 'rejected') pgOrderStatus = 'CANCELLED';
 
       const paymentMethod = (orderData.paymentMethod || 'COD').toUpperCase();
-      // Requirement 1.B: NEVER infer PAID from missing payment status!
-      // Unknown/missing payment state remains PENDING.
-      // Only explicitly verified payment becomes PAID.
-      // COD becomes PAID only upon legitimate delivery collection.
+      // Requirement (PHASES 32-36): Payment status whitelist validation
+      const VALID_PAYMENT_STATUSES = ['paid', 'pending', 'failed', 'refunded', 'cod_pending', 'cod_collected', 'waived', 'free'];
+      const rawPaymentStatusLower = orderData.paymentStatus ? String(orderData.paymentStatus).toLowerCase() : null;
+      if (rawPaymentStatusLower && !VALID_PAYMENT_STATUSES.includes(rawPaymentStatusLower)) {
+        throw new Error(`[Archive] Refusing archive: invalid paymentStatus=${rawPaymentStatusLower} for order ${orderId}`);
+      }
+
       let paymentStatus = 'PENDING';
       const rawPaymentStatus = orderData.paymentStatus ? String(orderData.paymentStatus).toUpperCase() : null;
       if (rawPaymentStatus === 'PAID') {
@@ -119,10 +122,18 @@ export class OrderPersistenceArchiveService {
       const cgst = Number(orderData.cgst || Math.round(taxAmount / 2));
       const sgst = Number(orderData.sgst || (taxAmount - cgst));
       const deliveryFee = Number(orderData.deliveryFee || 0);
-      const totalAmount = Number(orderData.totalAmount || orderData.finalTotal || (subtotal - discountAmount + taxAmount + deliveryFee));
+      const packagingCharge = Number(orderData.packagingCharge || 0);
+      const totalAmount = Number(orderData.totalAmount || orderData.finalTotal || (subtotal - discountAmount + taxAmount + deliveryFee + packagingCharge));
 
-      const franchiseId = orderData.franchiseId || 'fra_primary';
-      const branchId = orderData.branchId || 'main_branch';
+      // Fail loudly if franchiseId or branchId is missing - never use silent defaults
+      const franchiseId = orderData.franchiseId;
+      if (!franchiseId) {
+        throw new Error(`[OrderPersistence] Refusing sync/archive: missing required franchiseId for order ${orderId}`);
+      }
+      const branchId = orderData.branchId;
+      if (!branchId) {
+        throw new Error(`[OrderPersistence] Refusing sync/archive: missing required branchId for order ${orderId}`);
+      }
       const cashierName = orderData.cashierName || (orderSource.startsWith('POS') ? 'Cashier' : 'Online App');
       const terminalId = orderData.terminalId || (orderSource.startsWith('POS') ? 'POS-TERM-01' : 'ONLINE-APP');
       const notes = orderData.notes || orderData.deliveryInstructions || '';
@@ -470,6 +481,13 @@ export class OrderPersistenceArchiveService {
           orderId,
           error: `Order ${orderId} is currently '${currentStatus}', not in a terminal state (DELIVERED/CANCELLED). Active orders must never be purged.`
         };
+      }
+
+      // Requirement (PHASES 32-36): Payment status whitelist validation before archiving
+      const VALID_PAYMENT_STATUSES = ['paid', 'pending', 'failed', 'refunded', 'cod_pending', 'cod_collected', 'waived', 'free'];
+      const rawPaymentStatusLower = orderData.paymentStatus ? String(orderData.paymentStatus).toLowerCase() : null;
+      if (rawPaymentStatusLower && !VALID_PAYMENT_STATUSES.includes(rawPaymentStatusLower)) {
+        throw new Error(`[Archive] Refusing archive: invalid paymentStatus=${rawPaymentStatusLower} for order ${orderId}`);
       }
 
       // Phase 1: Mark Firestore lifecycle as FINALIZING

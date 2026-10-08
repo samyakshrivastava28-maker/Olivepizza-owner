@@ -999,7 +999,8 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       discountAmount = Math.min(Math.max(0, Number(req.body.discountAmount) || 0), serverCalculatedTotal);
     }
 
-    const finalOrderTotal = Math.max(0, serverCalculatedTotal - discountAmount) + deliveryFee + taxes;
+    const packagingCharge = Math.max(0, Number(req.body.packagingCharge) || 0);
+    const finalOrderTotal = Math.max(0, serverCalculatedTotal - discountAmount) + deliveryFee + taxes + packagingCharge;
 
 
     // 2.5 Duplicate Order Prevention (Idempotency / Distributed Lock)
@@ -1136,6 +1137,7 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         subtotal: serverCalculatedTotal,
         deliveryFee,
         taxes,
+        packagingCharge,
         discountAmount,
         status: 'pending',
         notification_version: 1,

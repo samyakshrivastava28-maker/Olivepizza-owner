@@ -147,6 +147,34 @@ async function runIdempotencyAndPaymentSafetyTests() {
     assert.strictEqual(verifyPending.itemsConsistent, true, 'itemsConsistent must be true');
     console.log('  [PASS] Verification correctly checks status match, bill number, payment consistency, and line items.');
 
+    // -----------------------------------------------------------------
+    // TEST 4: Invalid Payment Status Rejection (PHASES 32-36)
+    // -----------------------------------------------------------------
+    console.log('\n--- TEST 4: Invalid Payment Status Rejection ---');
+    const invalidPaymentOrderData = {
+      ...orderData,
+      id: testOrderId + '_inv_pay',
+      paymentStatus: 'UNAUTHORIZED_STATUS_VALUE'
+    };
+    const invalidSync = await OrderPersistenceArchiveService.syncLiveOrderToPostgres(invalidPaymentOrderData.id, invalidPaymentOrderData);
+    assert.strictEqual(invalidSync.success, false, 'Sync must fail for unwhitelisted paymentStatus');
+    assert.ok(invalidSync.error && invalidSync.error.includes('invalid paymentStatus'), 'Error message must specify invalid paymentStatus');
+    console.log('  [PASS] Unwhitelisted paymentStatus correctly rejected before archive.');
+
+    // -----------------------------------------------------------------
+    // TEST 5: Missing Franchise/Branch Rejection (No Silent Defaults)
+    // -----------------------------------------------------------------
+    console.log('\n--- TEST 5: Missing Franchise/Branch Fails Loudly ---');
+    const missingBranchOrderData = {
+      ...orderData,
+      id: testOrderId + '_no_branch',
+      branchId: undefined
+    };
+    const missingBranchSync = await OrderPersistenceArchiveService.syncLiveOrderToPostgres(missingBranchOrderData.id, missingBranchOrderData);
+    assert.strictEqual(missingBranchSync.success, false, 'Sync must fail if branchId is missing');
+    assert.ok(missingBranchSync.error && missingBranchSync.error.includes('missing required branchId'), 'Error message must specify missing branchId');
+    console.log('  [PASS] Missing branchId fails loudly without silent fallbacks.');
+
     console.log('\n====================================================');
     console.log('ALL IDEMPOTENCY & PAYMENT SAFETY TESTS PASSED');
     console.log('====================================================\n');
