@@ -3,7 +3,7 @@ services:
     name: olivepizza-owner
     runtime: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm install --include=dev && cd backend && npm install --include=dev && cd ..
     startCommand: npm start
     healthCheckPath: /api/heartbeat
     envVars:

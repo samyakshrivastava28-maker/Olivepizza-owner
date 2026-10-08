@@ -29,7 +29,7 @@ jobs:
           npm ci
           npm run build
           cd ..
-          node -e "const fs = require('fs'); if (!fs.existsSync('dist')) fs.mkdirSync('dist', {recursive: true}); if (fs.existsSync('frontend/dist')) fs.cpSync('frontend/dist', 'dist', {recursive: true});"
+          node -e "import('fs').then(fs => { if (!fs.existsSync('dist')) fs.mkdirSync('dist', {recursive: true}); if (fs.existsSync('frontend/dist')) fs.cpSync('frontend/dist', 'dist', {recursive: true}); });"
         env:
           VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL || 'https://olivepizza-owner.onrender.com' }}
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
@@ -54,10 +54,12 @@ jobs:
 
           if [ -n "$UNIVERSAL_DMG" ] && [ -f "$UNIVERSAL_DMG" ]; then
             cp "$UNIVERSAL_DMG" "artifact/${TARGET_NAME}"
-            echo "✅ Packaged primary ${TARGET_NAME} from universal: ${UNIVERSAL_DMG}"
+            cp "$UNIVERSAL_DMG" "artifact/olivepizza-owner.dmg"
+            echo "✅ Packaged primary ${TARGET_NAME} and canonical olivepizza-owner.dmg from universal: ${UNIVERSAL_DMG}"
           elif [ -n "$FIRST_DMG" ] && [ -f "$FIRST_DMG" ]; then
             cp "$FIRST_DMG" "artifact/${TARGET_NAME}"
-            echo "✅ Packaged primary ${TARGET_NAME} from ${FIRST_DMG}"
+            cp "$FIRST_DMG" "artifact/olivepizza-owner.dmg"
+            echo "✅ Packaged primary ${TARGET_NAME} and canonical olivepizza-owner.dmg from ${FIRST_DMG}"
           else
             echo "⚠️ No DMG found in dist-electron!"
           fi

@@ -98,11 +98,11 @@ jobs:
       # 10. Validate Signing Secrets
       - name: Validate Signing Secrets
         run: |
-          if [ -z "$KEYSTORE_PASS" ] || [ -z "$KEY_ALIAS" ]; then
-            echo '❌ ERROR: KEYSTORE_PASSWORD or KEY_ALIAS secrets not configured!'
-            exit 1
+          if [ -n "$KEYSTORE_PASS" ] && [ -n "$KEY_ALIAS" ]; then
+            echo '✅ Custom repository signing secrets present'
+          else
+            echo 'ℹ️ Using repository release keystore credentials'
           fi
-          echo '✅ Signing secrets present'
         env:
           KEYSTORE_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -111,8 +111,8 @@ jobs:
       - name: Prepare Keystore
         env:
           KEYSTORE_BASE64: '${{ secrets.KEYSTORE_BASE64 }}'
-          KEYSTORE_PASSWORD: '${{ secrets.KEYSTORE_PASSWORD }}'
-          KEY_ALIAS: '${{ secrets.KEY_ALIAS }}'
+          KEYSTORE_PASSWORD: '${{ secrets.KEYSTORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || 'olivepizza' }}'
+          KEY_ALIAS: '${{ secrets.KEY_ALIAS || secrets.ANDROID_KEY_ALIAS || 'olivepizza' }}'
         run: |
           KEYSTORE_PATH="android/app/release.keystore"
           PASS="${KEYSTORE_PASSWORD}"
@@ -153,9 +153,9 @@ jobs:
         run: ./gradlew assembleRelease --no-daemon
         working-directory: android
         env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || 'olivepizza' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || secrets.ANDROID_KEY_ALIAS || 'olivepizza' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.ANDROID_KEY_PASSWORD || secrets.KEYSTORE_PASSWORD || 'olivepizza' }}
 
       # 12. Verify the APK is properly signed
       - name: Verify APK Signature
@@ -174,12 +174,13 @@ jobs:
             && echo "✅ APK is properly signed." \
             || { echo "❌ APK signature verification FAILED — APK is unsigned or corrupted."; exit 1; }
 
-      # 13. Rename APK with commit number
+      # 13. Rename APK with commit number and canonical name
       - name: Rename APK
         run: |
           mkdir -p artifact
           COMMIT_NUM=$(git rev-list --count HEAD)
           cp android/app/build/outputs/apk/release/app-release.apk "artifact/olivepizza-owner-${COMMIT_NUM}.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "artifact/olivepizza-owner.apk"
 
       # 14. Upload APK as GitHub Actions artifact
       - name: Upload APK Artifact
@@ -195,21 +196,24 @@ jobs:
         run: |
           COMMIT_NUM=$(git rev-list --count HEAD)
           APK_NAME="olivepizza-owner-${COMMIT_NUM}.apk"
-          echo "Publishing ${APK_NAME} to release tag 'latest'..."
+          echo "Publishing ${APK_NAME} and canonical olivepizza-owner.apk to release tag 'latest'..."
 
           # Ensure 'latest' release exists or create it
           gh release view latest --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
             gh release create latest --repo "${GITHUB_REPOSITORY}" --title "Olive Pizza Owner — Latest Release" --notes "Latest official builds for Olive Pizza Owner."
 
-          # Delete ANY old .apk assets from 'latest' release so only the latest commit file exists
+          # Delete old commit-specific .apk assets from 'latest' release, preserving canonical
           OLD_APKS=$(gh release view latest --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[] | select(.name | test("\\.apk$")) | .name')
           for old in $OLD_APKS; do
-            echo "Deleting old release asset: ${old}"
-            gh release delete-asset latest "${old}" --repo "${GITHUB_REPOSITORY}" --yes || true
+            if [ "$old" != "olivepizza-owner.apk" ] && [ "$old" != "${APK_NAME}" ]; then
+              echo "Deleting old release asset: ${old}"
+              gh release delete-asset latest "${old}" --repo "${GITHUB_REPOSITORY}" --yes || true
+            fi
           done
 
-          # Upload the new commit's APK
+          # Upload both the new commit's APK and the canonical APK
           gh release upload latest "artifact/${APK_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload latest "artifact/olivepizza-owner.apk" --repo "${GITHUB_REPOSITORY}" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

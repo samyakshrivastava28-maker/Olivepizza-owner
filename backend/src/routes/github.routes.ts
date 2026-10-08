@@ -322,7 +322,9 @@ async function redirectReleaseAsset(res: any, appParam: any, extension: string) 
     return res.redirect(302, asset.browser_download_url);
   }
 
-  return res.redirect(`https://github.com/${targetRepo}/releases`);
+  // Fallback to canonical release binary URL if GitHub API is rate-limited
+  const canonicalName = `olivepizza-${appKey}${ext}`;
+  return res.redirect(302, `https://github.com/${targetRepo}/releases/download/latest/${canonicalName}`);
 }
 
 // Direct platform download redirects

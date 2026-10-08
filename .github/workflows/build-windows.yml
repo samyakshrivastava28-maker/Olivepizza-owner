@@ -29,7 +29,7 @@ jobs:
           npm ci
           npm run build
           cd ..
-          node -e "const fs = require('fs'); if (!fs.existsSync('dist')) fs.mkdirSync('dist', {recursive: true}); if (fs.existsSync('frontend/dist')) fs.cpSync('frontend/dist', 'dist', {recursive: true});"
+          node -e "import('fs').then(fs => { if (!fs.existsSync('dist')) fs.mkdirSync('dist', {recursive: true}); if (fs.existsSync('frontend/dist')) fs.cpSync('frontend/dist', 'dist', {recursive: true}); });"
         env:
           VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL || 'https://olivepizza-owner.onrender.com' }}
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
@@ -47,7 +47,8 @@ jobs:
           $builtExe = Get-ChildItem dist-electron -Filter *.exe | Select-Object -First 1
           if ($builtExe) {
             Copy-Item $builtExe.FullName "artifact\$TARGET_NAME"
-            Write-Host "Packaged $TARGET_NAME"
+            Copy-Item $builtExe.FullName "artifact\olivepizza-owner.exe"
+            Write-Host "Packaged $TARGET_NAME and canonical olivepizza-owner.exe"
           }
       - uses: actions/upload-artifact@v4
         with:
@@ -84,9 +85,12 @@ jobs:
             }
           }
 
-          # Upload new commit asset
+          # Upload new commit asset and canonical asset
           if (Test-Path "artifact\$TARGET_NAME") {
             gh release upload latest "artifact\$TARGET_NAME" --repo $env:GITHUB_REPOSITORY --clobber
+          }
+          if (Test-Path "artifact\olivepizza-owner.exe") {
+            gh release upload latest "artifact\olivepizza-owner.exe" --repo $env:GITHUB_REPOSITORY --clobber
           }
 
       - name: Build status

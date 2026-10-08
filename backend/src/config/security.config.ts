@@ -16,12 +16,29 @@ const getEnvNumber = (key: string, defaultValue: number): number => {
   return isDev ? defaultValue * 10 : defaultValue;
 };
 
+export const getClientIp = (req: Request): string => {
+  const cfIp = req.headers['cf-connecting-ip'];
+  if (typeof cfIp === 'string' && cfIp.trim()) {
+    return cfIp.trim();
+  }
+  const xRealIp = req.headers['x-real-ip'];
+  if (typeof xRealIp === 'string' && xRealIp.trim()) {
+    return xRealIp.trim();
+  }
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.ip || req.socket.remoteAddress || 'unknown';
+};
+
 // Auth Limiter: Login, Signup, OTP Sending, Phone Verification, Truecaller
 export const authLimiter = rateLimit({
   windowMs: getEnvNumber('AUTH_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000), // 15 mins
   max: getEnvNumber('AUTH_RATE_LIMIT_MAX', 60), // Max 60 attempts per window
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => getClientIp(req),
   message: {
     success: false,
     error: 'Too many authentication attempts. Please try again after 15 minutes.',
@@ -35,6 +52,7 @@ export const otpLimiter = rateLimit({
   max: getEnvNumber('OTP_RATE_LIMIT_MAX', 5), // Max 5 OTP requests per 10 mins
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => getClientIp(req),
   message: {
     success: false,
     error: 'Too many OTP requests. Please wait 10 minutes before requesting again.',
@@ -48,6 +66,7 @@ export const publicLimiter = rateLimit({
   max: getEnvNumber('PUBLIC_RATE_LIMIT_MAX', 300), // 300 requests per 15 mins
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => getClientIp(req),
   message: {
     success: false,
     error: 'Too many requests to public API. Please slow down.',
@@ -61,6 +80,7 @@ export const userLimiter = rateLimit({
   max: getEnvNumber('USER_RATE_LIMIT_MAX', 200), // 200 requests per 15 mins
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => getClientIp(req),
   message: {
     success: false,
     error: 'Too many user actions. Please wait a moment before trying again.',
@@ -74,6 +94,7 @@ export const adminLimiter = rateLimit({
   max: getEnvNumber('ADMIN_RATE_LIMIT_MAX', 150), // 150 requests per 15 mins
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => getClientIp(req),
   message: {
     success: false,
     error: 'Too many admin operations. Please slow down.',
@@ -87,6 +108,7 @@ export const expensiveLimiter = rateLimit({
   max: getEnvNumber('EXPENSIVE_RATE_LIMIT_MAX', 20), // 20 requests per 15 mins
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req: Request) => getClientIp(req),
   message: {
     success: false,
     error: 'Heavy resource quota exceeded. Please wait a few minutes before trying again.',

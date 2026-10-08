@@ -24,6 +24,7 @@ import ttsRoutes from './routes/tts.routes.js';
 import locationRoutes from './routes/location.routes.js';
 import { versionCheck } from './middleware/versionCheck.js';
 import { verifyTurnstile } from './middleware/turnstile.middleware.js';
+import { cloudflareEdgeSecurity } from './middleware/cloudflareSecurity.middleware.js';
 import { 
   authLimiter, 
   otpLimiter, 
@@ -37,6 +38,9 @@ import { ApiSecurityMiddleware } from './security/index.js';
 
 const app = express();
 app.set('trust proxy', 1);
+
+// ─── CLOUDFLARE EDGE CONTEXT & MALICIOUS SCANNER SHIELD ─────────────────────
+app.use(cloudflareEdgeSecurity);
 
 // ─── CENTRALIZED PRODUCTION ERROR SANITIZER & LEAK DEFENSE ────────────────────
 app.use(errorSanitizerMiddleware);
