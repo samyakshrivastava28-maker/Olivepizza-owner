@@ -31,10 +31,11 @@ export function cloudflareEdgeSecurity(req: Request, res: Response, next: NextFu
   const cfConnectingIp = req.headers['cf-connecting-ip'] as string | undefined;
   const userAgent = req.headers['user-agent'] || '';
 
-  // 1. Identify Client IP with priority on CF-Connecting-IP
-  const clientIp = cfConnectingIp?.trim() || 
-    (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || 
+  // 1. Identify Client IP with anti-spoofing defense
+  const isCloudflare = Boolean(cfRay && cfConnectingIp);
+  const clientIp = (isCloudflare && cfConnectingIp?.trim()) || 
     req.ip || 
+    (req.headers['x-forwarded-for'] as string)?.split(',')[0].trim() || 
     req.socket.remoteAddress || 
     'unknown';
 
@@ -42,7 +43,7 @@ export function cloudflareEdgeSecurity(req: Request, res: Response, next: NextFu
     rayId: cfRay,
     country: cfCountry,
     clientIp,
-    isCloudflare: Boolean(cfRay || cfConnectingIp)
+    isCloudflare
   };
 
   // 2. Reject known automated security vulnerability scanners

@@ -7,7 +7,7 @@ import { MediaOptimizationService } from '../services/storage/MediaOptimizationS
 import { backgroundTaskWorker } from '../services/background/BackgroundTaskWorker.js';
 
 const router = Router();
-const verifyAdminOrOwner = [requireAuth, requireRole(['owner', 'admin', 'developer', 'delivery_partner', 'delivery'])];
+const verifyAdminOrOwner = [requireAuth, requireRole(['owner', 'admin'])];
 
 // Memory storage for fast buffering & stream piping to Cloudinary
 const uploadMiddleware = multer({

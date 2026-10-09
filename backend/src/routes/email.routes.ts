@@ -9,6 +9,7 @@ import {
   buildDeliveryPartnerAssignedEmail,
   buildOrderDeliveredEmail
 } from '../services/emailTemplates.service.js';
+import { sanitizeEmailHtml } from '../utils/htmlSanitizer.js';
 
 dotenv.config();
 
@@ -254,7 +255,8 @@ router.get('/debug', async (req, res) => {
 router.post('/preview', (req, res) => {
   try {
     const { htmlContent } = req.body;
-    res.json({ success: true, html: wrapper(htmlContent || '<p>No content provided</p>') });
+    const sanitizedHtml = sanitizeEmailHtml(htmlContent || '<p>No content provided</p>');
+    res.json({ success: true, html: wrapper(sanitizedHtml) });
   } catch (error: any) {
     console.error('[Email] Preview Error:', error.message);
     res.status(500).json({ success: false, error: 'Preview generation failed' });
@@ -265,13 +267,14 @@ router.post('/test', async (req, res) => {
   const startTime = Date.now();
   const { htmlContent, subject, recipient } = req.body;
   const testRecipient = recipient || 'olivepizzarjn@gmail.com';
+  const sanitizedHtml = sanitizeEmailHtml(htmlContent || '<p>Test Email Content</p>');
   
   try {
     const info = await transporter.sendMail({
       from: `"Olive Pizza" <${process.env.SMTP_USER}>`,
       to: testRecipient,
       subject: subject || 'Test Email from Owner Dashboard',
-      html: wrapper(htmlContent || '<p>Test Email Content</p>'),
+      html: wrapper(sanitizedHtml),
     });
     
     const duration = Date.now() - startTime;
@@ -377,11 +380,13 @@ router.post('/send-campaign', async (req, res) => {
     campaignName = req.body.campaignName || req.body.name;
     targetAudience = req.body.targetAudience;
     subject = req.body.subject;
-    const { htmlContent, isFestival } = req.body;
+    const rawHtmlContent = req.body.htmlContent;
+    const isFestival = req.body.isFestival;
     
-    if (!campaignName || !subject || !htmlContent) {
+    if (!campaignName || !subject || !rawHtmlContent) {
       return res.status(400).json({ success: false, error: 'Missing required campaign fields' });
     }
+    const htmlContent = sanitizeEmailHtml(rawHtmlContent);
     
     // First save the template
     const templateQuery = `
