@@ -25,6 +25,28 @@ export interface CreateUpiAttemptParams {
 
 export class CODCollectionService {
   /**
+   * Helper to fetch order data with resilient fallback to PostgreSQL
+   */
+  public static async getOrderData(orderId: string): Promise<any> {
+    try {
+      const snap = await adminDb.collection('orders').doc(orderId).get();
+      if (snap.exists) return snap.data()!;
+    } catch (fsErr: any) {
+      console.warn(`[CODCollectionService] Firestore order read notice for ${orderId}:`, fsErr.message);
+    }
+
+    try {
+      const { OrderPersistenceArchiveService } = await import('../order/OrderPersistenceArchiveService.js');
+      const hist = await OrderPersistenceArchiveService.getHistoricalOrder(orderId);
+      if (hist) return hist;
+    } catch (pgErr: any) {
+      console.warn(`[CODCollectionService] PostgreSQL fallback read notice for ${orderId}:`, pgErr.message);
+    }
+
+    return null;
+  }
+
+  /**
    * Authoritative Cash Collection
    * Verifies rider assignment, branch tenant, order status, and validates against server-calculated order total.
    */
@@ -39,13 +61,11 @@ export class CODCollectionService {
     const { orderId, actorUid, actorRole, actorBranchId, clientAmount, notes, ipAddress } = params;
 
     const orderRef = adminDb.collection('orders').doc(orderId);
-    const snap = await orderRef.get();
+    const order = await CODCollectionService.getOrderData(orderId);
 
-    if (!snap.exists) {
+    if (!order) {
       throw new Error(`Order '${orderId}' not found.`);
     }
-
-    const order = snap.data()!;
 
     // 1. Validate Order Progress State
     const allowedStates = ['picked_up', 'out_for_delivery', 'ready', 'partner_assigned'];
@@ -137,12 +157,24 @@ export class CODCollectionService {
         amountDue,
         JSON.stringify({ paymentId, notes }),
       ]);
+
+      await query(`
+        UPDATE canonical_orders
+        SET payment_status = 'PAID', updated_at = NOW()
+        WHERE id = $1
+      `, [orderId]);
+
+      await query(`
+        UPDATE canonical_bills
+        SET payment_status = 'PAID', updated_at = NOW()
+        WHERE order_id = $1
+      `, [orderId]);
     } catch (dbErr: any) {
       console.warn('[CODCollectionService] DB write warning (falling back gracefully to Firestore):', dbErr.message);
     }
 
     // 8. Atomic Update in Firestore Order
-    await orderRef.update({
+    await orderRef.set({
       paymentStatus: 'PAID',
       isPaid: true,
       paymentMethod: 'cod',
@@ -153,7 +185,7 @@ export class CODCollectionService {
       collectedAmount: amountDue,
       paymentNotes: notes || 'Cash collected physically by rider',
       updatedAt: nowIso,
-    });
+    }, { merge: true }).catch(() => {});
 
     // 9. Payment Audit Log
     await PaymentAuditLogger.log({
@@ -199,13 +231,11 @@ export class CODCollectionService {
     const { orderId, actorUid, actorRole, actorBranchId } = params;
 
     const orderRef = adminDb.collection('orders').doc(orderId);
-    const snap = await orderRef.get();
+    const order = await CODCollectionService.getOrderData(orderId);
 
-    if (!snap.exists) {
+    if (!order) {
       throw new Error(`Order '${orderId}' not found.`);
     }
-
-    const order = snap.data()!;
 
     // 1. Validate Order Progress State
     const allowedStates = ['picked_up', 'out_for_delivery', 'ready', 'partner_assigned'];
@@ -277,7 +307,7 @@ export class CODCollectionService {
     }
 
     // 9. Update Firestore Order with Active UPI Attempt
-    await orderRef.update({
+    await orderRef.set({
       codPaymentAttempt: {
         attemptId,
         amount: amountDue,
@@ -288,7 +318,7 @@ export class CODCollectionService {
         riderUid: actorUid,
       },
       updatedAt: nowIso,
-    });
+    }, { merge: true }).catch(() => {});
 
     await PaymentAuditLogger.log({
       paymentId: attemptId,
@@ -323,12 +353,11 @@ export class CODCollectionService {
     paidAt?: string;
     codPaymentAttempt?: any;
   }> {
-    const snap = await adminDb.collection('orders').doc(orderId).get();
-    if (!snap.exists) {
+    const order = await CODCollectionService.getOrderData(orderId);
+    if (!order) {
       throw new Error(`Order '${orderId}' not found.`);
     }
 
-    const order = snap.data()!;
     const paymentStatus = (order.paymentStatus || 'PENDING').toUpperCase();
     const isPaid = order.isPaid === true || paymentStatus === 'PAID' || paymentStatus === 'COLLECTED';
 
@@ -414,6 +443,18 @@ export class CODCollectionService {
           attemptId,
         }),
       ]);
+
+      await query(`
+        UPDATE canonical_orders
+        SET payment_status = 'PAID', updated_at = NOW()
+        WHERE id = $1
+      `, [orderId]);
+
+      await query(`
+        UPDATE canonical_bills
+        SET payment_status = 'PAID', updated_at = NOW()
+        WHERE order_id = $1
+      `, [orderId]);
     } catch (dbErr: any) {
       console.warn('[CODCollectionService] DB webhook capture warning:', dbErr.message);
     }

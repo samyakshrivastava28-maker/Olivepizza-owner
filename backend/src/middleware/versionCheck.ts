@@ -19,10 +19,17 @@ export const versionCheck = async (req: Request, res: Response, next: NextFuncti
   try {
     const now = Date.now();
     if (!cachedSettings || now - lastCheckTime > CACHE_TTL) {
-      const doc = await adminDb.collection('settings').doc('app_update').get();
-      if (doc.exists) {
-        cachedSettings = doc.data();
-        lastCheckTime = now;
+      lastCheckTime = now;
+      try {
+        const doc = await adminDb.collection('settings').doc('app_update').get();
+        if (doc.exists) {
+          cachedSettings = doc.data();
+        }
+      } catch (dbErr: any) {
+        // When Firestore quota is exceeded or offline, fallback safely without hanging subsequent requests
+        if (!cachedSettings) {
+          cachedSettings = { minimum_version: '1.0.0', maintenance_mode: false };
+        }
       }
     }
 

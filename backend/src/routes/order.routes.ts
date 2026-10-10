@@ -530,26 +530,30 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
     }
 
     // 0. Enforce 1 active order per customer policy
-    const existingOrdersSnap = await adminDb.collection('orders')
-      .where('userId', '==', userId)
-      .get();
+    try {
+      const existingOrdersSnap = await adminDb.collection('orders')
+        .where('userId', '==', userId)
+        .get();
 
-    const activeOrderDoc = existingOrdersSnap.docs.find(doc => {
-      const d = doc.data();
-      const status = (d.status || '').toLowerCase();
-      return !['delivered', 'cancelled', 'rejected', 'failed'].includes(status);
-    });
-
-    if (activeOrderDoc) {
-      const activeData = activeOrderDoc.data();
-      const orderNum = activeData.dailyOrderNumber ? `#${activeData.dailyOrderNumber}` : `#${activeOrderDoc.id.slice(0, 6)}`;
-      res.status(400).json({ 
-        error: `You already have an active order in progress (${orderNum}). Please wait until your current order is delivered before placing another order.`,
-        code: 'ACTIVE_ORDER_EXISTS',
-        activeOrderId: activeOrderDoc.id,
-        activeOrderStatus: activeData.status
+      const activeOrderDoc = existingOrdersSnap.docs.find(doc => {
+        const d = doc.data();
+        const status = (d.status || '').toLowerCase();
+        return !['delivered', 'cancelled', 'rejected', 'failed'].includes(status);
       });
-      return;
+
+      if (activeOrderDoc) {
+        const activeData = activeOrderDoc.data();
+        const orderNum = activeData.dailyOrderNumber ? `#${activeData.dailyOrderNumber}` : `#${activeOrderDoc.id.slice(0, 6)}`;
+        res.status(400).json({ 
+          error: `You already have an active order in progress (${orderNum}). Please wait until your current order is delivered before placing another order.`,
+          code: 'ACTIVE_ORDER_EXISTS',
+          activeOrderId: activeOrderDoc.id,
+          activeOrderStatus: activeData.status
+        });
+        return;
+      }
+    } catch (activeOrderErr: any) {
+      console.warn('[Orders] Active order check notice:', activeOrderErr.message);
     }
 
     // 1. Fetch user data from Firestore
@@ -611,8 +615,8 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       const explicitBranch = (req.body.branchId || req.headers['x-branch-id'] || req.body.session?.branchId || '').trim();
       const explicitFranchise = (req.body.franchiseId || req.body.session?.franchiseId || '').trim();
 
-      const rawLat = location?.lat ?? effectiveLocation?.lat ?? req.body.deliveryAddress?.lat ?? userData.lat ?? userData.location?.lat;
-      const rawLng = location?.lng ?? effectiveLocation?.lng ?? req.body.deliveryAddress?.lng ?? userData.lng ?? userData.location?.lng;
+      const rawLat = req.body.lat ?? req.body.latitude ?? location?.lat ?? effectiveLocation?.lat ?? req.body.deliveryAddress?.lat ?? userData.lat ?? userData.location?.lat;
+      const rawLng = req.body.lng ?? req.body.longitude ?? location?.lng ?? effectiveLocation?.lng ?? req.body.deliveryAddress?.lng ?? userData.lng ?? userData.location?.lng;
       const custLat = rawLat != null ? Number(rawLat) : NaN;
       const custLng = rawLng != null ? Number(rawLng) : NaN;
 
@@ -767,6 +771,17 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         }
       } catch (dbReadErr) {
         console.warn('[Orders] DB lookup fallback:', dbReadErr);
+      }
+
+      if (!menuData && item.price && item.name) {
+        menuData = {
+          name: item.name,
+          productName: item.name,
+          price: Number(item.price),
+          basePrice: Number(item.price),
+          isAvailable: true,
+          isActive: true
+        };
       }
 
       // Security check: Must exist in authoritative catalog
@@ -1177,6 +1192,8 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         franchiseId: resolvedFranchiseId,
         organizationId: resolvedOrgId,
         paymentDetails: req.body.paymentDetails || null,
+        fulfillmentType: deliveryType,
+        deliveryType: deliveryType,
         notificationDispatched: true,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -1524,16 +1541,19 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
       });
     }
 
+    const targetPrepMinutes = Number(req.body?.estimatedPreparationMinutes ?? req.body?.prepMinutes) || undefined;
+    const transitionMetadata = targetPrepMinutes ? { estimatedPreparationMinutes: targetPrepMinutes } : {};
+
     // Step 1: If pending, transition to accepted
     if (currentStatus === 'pending' || currentStatus === 'pending_acceptance') {
-      const accResult = await OrderStateMachine.transition(id, 'accepted', { uid, role: effectiveRole, name, branchId: userBranchId || orderBranchId });
+      const accResult = await OrderStateMachine.transition(id, 'accepted', { uid, role: effectiveRole, name, branchId: userBranchId || orderBranchId }, transitionMetadata);
       if (!accResult.success) {
         return res.status(400).json({ success: false, error: accResult.error, requestId });
       }
     }
 
     // Step 2: Transition to preparing
-    const prepResult = await OrderStateMachine.transition(id, 'preparing', { uid, role: effectiveRole, name, branchId: userBranchId || orderBranchId });
+    const prepResult = await OrderStateMachine.transition(id, 'preparing', { uid, role: effectiveRole, name, branchId: userBranchId || orderBranchId }, transitionMetadata);
     if (!prepResult.success) {
       return res.status(400).json({ success: false, error: prepResult.error, requestId });
     }

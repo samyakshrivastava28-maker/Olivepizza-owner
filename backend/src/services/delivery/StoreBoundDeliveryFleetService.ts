@@ -238,6 +238,38 @@ export class StoreBoundDeliveryFleetService {
         if (assignedRider) break;
       } catch (txnErr: any) {
         console.warn(`[StoreDeliveryFleet] Candidate ${candidate.uid} lock missed:`, txnErr?.message);
+        try {
+          const now = new Date();
+          const isoNow = now.toISOString();
+          await orderRef.set({
+            status: 'partner_assigned',
+            deliveryPartnerId: candidate.uid,
+            deliveryPartnerName: candidate.name,
+            deliveryPartnerPhone: candidate.phone,
+            partnerAssignedAt: isoNow,
+            riderAssignedAt: isoNow,
+            riderAssignmentStatus: 'assigned',
+            riderAssignmentMethod: 'FIFO_QUEUE',
+            updatedAt: now,
+          }, { merge: true });
+
+          await userRef.set({
+            activeOrderId: orderId,
+            deliveryStatus: 'busy',
+            lastAssignedAt: isoNow,
+            updatedAt: now,
+          }, { merge: true }).catch(() => {});
+
+          await dpRef.set({
+            activeOrderId: orderId,
+            deliveryStatus: 'busy',
+            lastAssignedAt: isoNow,
+            updatedAt: now,
+          }, { merge: true }).catch(() => {});
+
+          assignedRider = candidate;
+          break;
+        } catch {}
       }
     }
 

@@ -290,7 +290,7 @@ export class NotificationQueueService {
           const uData = uDoc.data() || {};
           const uEmail = (uData.email || '').toLowerCase().trim();
           const uRole = (uData.role || '').toLowerCase().trim();
-          if (OWNER_ROLES.has(uRole) || OWNER_EMAILS.has(uEmail)) {
+          if ((OWNER_ROLES.has(uRole) || OWNER_EMAILS.has(uEmail)) && (!deviceInfo.appName || deviceInfo.appName === 'owner')) {
             finalAppName = 'owner';
             finalRole = 'owner';
           }

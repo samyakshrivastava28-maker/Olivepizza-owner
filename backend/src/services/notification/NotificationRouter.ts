@@ -161,12 +161,6 @@ export class NotificationRouter {
 
     // Rule 9: Delivery partner assignment
     if (eventType === 'DELIVERY_ASSIGNED') {
-      if (isOwnerEmail || role === 'owner' || role === 'platform_owner' || app === 'OWNER') {
-        return { allowed: false, reason: 'Owner accounts cannot be assigned as delivery partners or receive delivery alarms.' };
-      }
-      if (role !== 'delivery' && role !== 'delivery_partner') {
-        return { allowed: false, reason: 'Only delivery partners can receive delivery assignment notifications.' };
-      }
       if (!order.deliveryPartnerId || recipient.uid !== order.deliveryPartnerId) {
         return {
           allowed: false,

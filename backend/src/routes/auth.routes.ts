@@ -151,7 +151,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     }
 
     if (targetApp !== 'CUSTOMER') {
-      await LoginRateLimiterService.recordSuccess(userIdentifier, clientIp, rawDeviceId);
+      await LoginRateLimiterService.recordSuccess(userIdentifier, clientIp, rawDeviceId, userAgent);
     }
     await AuthAuditService.logEvent({
       eventType: 'APP_AUTHORIZE_SUCCESS',

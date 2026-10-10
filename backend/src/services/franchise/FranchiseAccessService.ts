@@ -45,6 +45,10 @@ export interface AppAuthorizationResult {
     permissions: string[];
     allowedApps: string[];
     applicationAccess: Record<string, boolean>;
+    phone?: string;
+    phoneNumber?: string;
+    vehicleType?: string;
+    vehicleNumber?: string;
   };
 }
 
@@ -307,6 +311,51 @@ export class FranchiseAccessService {
       emailLower === 'webhub2811@gmail.com' ||
       emailLower === 'olivepizzamaker@gmail.com';
 
+    // Platform Owners have universal access to all apps (immediate, quota-resilient fast-path)
+    if (isMasterOwner) {
+      const resolvedBranch = requestedBranchId || 'main_branch';
+      const resolvedFranchise = 'fra_rajnandgaon';
+
+      return {
+        authorized: true,
+        requiresPin: false,
+        isProfileComplete: true,
+        user: {
+          uid,
+          email: emailLower,
+          name: emailLower === 'webhub2811@gmail.com' ? 'Samyak Shrivastava' : 'Platform Owner',
+          role: targetApp === 'OWNER'
+            ? 'owner'
+            : targetApp === 'RESTAURANT_MANAGER'
+            ? 'restaurant_manager'
+            : targetApp === 'POS'
+            ? 'pos_operator'
+            : targetApp === 'DELIVERY'
+            ? 'delivery_partner'
+            : targetApp === 'FRANCHISE_MANAGER'
+            ? 'franchise_manager'
+            : 'owner',
+          phone: '+919179944445',
+          phoneNumber: '+919179944445',
+          vehicleType: 'Scooty (CG 08 AR 9000)',
+          vehicleNumber: 'CG 08 AR 9000',
+          branchId: resolvedBranch,
+          branchName: 'Olive Pizza Enterprise',
+          branchIds: ['all'],
+          franchiseId: resolvedFranchise,
+          terminalId: terminalId || 'Counter 1',
+          permissions: ['*'],
+          allowedApps: ['OWNER', 'RESTAURANT_MANAGER', 'FRANCHISE_MANAGER', 'POS', 'DELIVERY', 'CUSTOMER'],
+          applicationAccess: {
+            app_restaurant_management: true,
+            app_franchise_management: true,
+            app_pos: true,
+            app_delivery: true
+          }
+        }
+      };
+    }
+
     // 2. Fetch user profile
     let userData: any = null;
     let userSnap = await adminDb.collection('users').doc(uid).get().catch(() => null);
@@ -319,9 +368,9 @@ export class FranchiseAccessService {
       }
     }
 
-    const isOwnerRole = isMasterOwner || userData?.role === 'owner' || userData?.role === 'platform_owner';
+    const isOwnerRole = userData?.role === 'owner' || userData?.role === 'platform_owner';
 
-    // Platform Owners have universal access to all apps (in administrative mode)
+    // Platform Owners from DB have universal access to all apps
     if (isOwnerRole) {
       const resolvedBranch = requestedBranchId || userData?.branchId || 'main_branch';
       const resolvedFranchise = userData?.franchiseId || 'fra_rajnandgaon';
@@ -333,8 +382,22 @@ export class FranchiseAccessService {
         user: {
           uid,
           email: emailLower || 'owner@olivepizza.in',
-          name: userData?.name || (isMasterOwner ? 'Platform Owner' : 'Olive Pizza Administrator'),
-          role: targetApp === 'OWNER' ? 'owner' : (targetApp === 'RESTAURANT_MANAGER' ? 'restaurant_manager' : (targetApp === 'POS' ? 'pos_operator' : 'owner')),
+          name: userData?.name || 'Olive Pizza Administrator',
+          role: targetApp === 'OWNER'
+            ? 'owner'
+            : targetApp === 'RESTAURANT_MANAGER'
+            ? 'restaurant_manager'
+            : targetApp === 'POS'
+            ? 'pos_operator'
+            : targetApp === 'DELIVERY'
+            ? 'delivery_partner'
+            : targetApp === 'FRANCHISE_MANAGER'
+            ? 'franchise_manager'
+            : 'owner',
+          phone: userData?.phone || userData?.phoneNumber || '',
+          phoneNumber: userData?.phone || userData?.phoneNumber || '',
+          vehicleType: userData?.vehicleType || 'Bike',
+          vehicleNumber: userData?.vehicleNumber || '',
           branchId: resolvedBranch,
           branchName: 'Olive Pizza Enterprise',
           branchIds: ['all'],

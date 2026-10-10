@@ -848,8 +848,8 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
 
     let effectiveRole: string;
 
-    if (isOwnerIdentity) {
-      // 🚨 HARD ISOLATION: Owner devices must ONLY ever register as 'owner'
+    if (isOwnerIdentity && safeAppName !== 'delivery' && safeAppName !== 'customer') {
+      // 🚨 HARD ISOLATION: Owner devices using Owner app register as 'owner'
       safeAppName = 'owner';
       effectiveRole = 'owner';
     } else {
@@ -858,10 +858,12 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
         safeAppName = 'customer';
       }
       if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer') && !req.body.role) {
-        safeAppName = 'customer';
+        if (safeAppName !== 'delivery' || !isOwnerIdentity) {
+          safeAppName = 'customer';
+        }
       }
 
-      effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || user.role || 'customer');
+      effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || (safeAppName === 'delivery' && isOwnerIdentity ? 'delivery_partner' : user.role) || 'customer');
       const RESTAURANT_STAFF_ROLES = new Set(['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef']);
       if ((safeAppName === 'restaurant' || RESTAURANT_STAFF_ROLES.has(effectiveRole)) && !RESTAURANT_STAFF_ROLES.has(user.role)) {
         safeAppName = 'customer';
@@ -970,31 +972,39 @@ router.post('/token/deregister', verifyToken, async (req: AuthRequest, res: Resp
     const { token } = req.body;
     const userId = req.user!.uid;
 
-    if (!token) {
-      res.status(400).json({ error: 'Token is required' });
-      return;
-    }
-
     const client = await pgPool.connect();
     try {
-      const result = await client.query(
-        `UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW()
-         WHERE token = $1 AND user_id = $2`,
-        [token, userId]
-      );
-      console.log(`[TokenDeregister] Deactivated ${result.rowCount} token(s) for user ${userId}`);
-
-      try {
-        const { FieldValue } = await import('firebase-admin/firestore');
-        const cryptoMod = await import('crypto');
-        const tokenHash = cryptoMod.createHash('sha256').update(token).digest('hex').slice(0, 16);
-        await db.collection('users').doc(userId).collection('devices').doc(tokenHash).delete().catch(() => {});
-        await db.collection('users').doc(userId).update({
-          fcmTokens: FieldValue.arrayRemove(token),
-        });
-      } catch (fsErr: any) {
-        console.warn('[TokenDeregister] Firestore arrayRemove failed (non-fatal):', fsErr.message);
+      let result;
+      if (token && token !== 'all') {
+        result = await client.query(
+          `UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW()
+           WHERE token = $1 AND user_id = $2`,
+          [token, userId]
+        );
+        try {
+          const { FieldValue } = await import('firebase-admin/firestore');
+          const cryptoMod = await import('crypto');
+          const tokenHash = cryptoMod.createHash('sha256').update(token).digest('hex').slice(0, 16);
+          await db.collection('users').doc(userId).collection('devices').doc(tokenHash).delete().catch(() => {});
+          await db.collection('users').doc(userId).update({
+            fcmTokens: FieldValue.arrayRemove(token),
+          }).catch(() => {});
+        } catch (fsErr: any) {
+          console.warn('[TokenDeregister] Firestore arrayRemove failed (non-fatal):', fsErr.message);
+        }
+      } else {
+        result = await client.query(
+          `UPDATE fcm_tokens SET is_active = FALSE, updated_at = NOW()
+           WHERE user_id = $1`,
+          [userId]
+        );
+        try {
+          await db.collection('users').doc(userId).update({
+            fcmTokens: [],
+          }).catch(() => {});
+        } catch {}
       }
+      console.log(`[TokenDeregister] Deactivated ${result.rowCount} token(s) for user ${userId}`);
     } finally {
       client.release();
     }

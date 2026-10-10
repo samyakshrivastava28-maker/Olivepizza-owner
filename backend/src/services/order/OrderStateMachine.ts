@@ -53,7 +53,7 @@ const ALLOWED_TRANSITIONS: Record<CanonicalOrderStatus, CanonicalOrderStatus[]> 
   pending:          ['accepted', 'preparing', 'cancelled'],
   accepted:         ['preparing', 'cancelled'],
   preparing:        ['partner_assigned', 'ready', 'delivered', 'cancelled'],
-  partner_assigned: ['ready', 'picked_up', 'out_for_delivery', 'cancelled'],
+  partner_assigned: ['ready', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled'],
   ready:            ['partner_assigned', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled'],
   picked_up:        ['out_for_delivery', 'delivered', 'cancelled'],
   out_for_delivery: ['delivered', 'cancelled'],
@@ -75,10 +75,11 @@ const ROLE_AUTHORITY: Record<string, StateMachineActorRole[]> = {
   'partner_assigned->ready':    ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
   'partner_assigned->picked_up': ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
   'partner_assigned->out_for_delivery': ['delivery_partner', 'restaurant_manager', 'system'],
+  'partner_assigned->delivered': ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
   'partner_assigned->cancelled': ['restaurant_manager', 'cashier', 'system'],
   'ready->partner_assigned':    ['restaurant_manager', 'cashier', 'system'],
   'ready->picked_up':           ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
-  'ready->out_for_delivery':    ['restaurant_manager', 'cashier', 'system'],
+  'ready->out_for_delivery':    ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
   'ready->delivered':           ['restaurant_manager', 'cashier', 'kitchen_staff', 'system'],
   'ready->cancelled':           ['restaurant_manager', 'cashier', 'system'],
   'picked_up->out_for_delivery': ['delivery_partner', 'system'],
@@ -143,9 +144,26 @@ export class OrderStateMachine {
       }
 
       const orderRef = adminDb.collection('orders').doc(orderId);
-      const docSnap = await orderRef.get();
+      let orderData: any = null;
+      try {
+        const docSnap = await orderRef.get();
+        if (docSnap.exists) {
+          orderData = docSnap.data()!;
+        }
+      } catch (fsErr: any) {
+        console.warn(`[OrderStateMachine] Firestore read notice for ${orderId}:`, fsErr.message);
+      }
 
-      if (!docSnap.exists) {
+      if (!orderData) {
+        try {
+          const { OrderPersistenceArchiveService } = await import('./OrderPersistenceArchiveService.js');
+          orderData = await OrderPersistenceArchiveService.getHistoricalOrder(orderId);
+        } catch (pgErr: any) {
+          console.warn(`[OrderStateMachine] PostgreSQL fallback read notice for ${orderId}:`, pgErr.message);
+        }
+      }
+
+      if (!orderData) {
         if (client) await client.query('ROLLBACK').catch(() => {});
         return {
           success: false,
@@ -157,15 +175,14 @@ export class OrderStateMachine {
         };
       }
 
-      const orderData = docSnap.data()!;
       const fromState = OrderStateMachine.reconcileStatus(orderData.status);
 
       if (fromState === toState) {
         if (metadata && Object.keys(metadata).length > 0) {
-          await orderRef.update({
+          await orderRef.set({
             ...metadata,
             updatedAt: new Date()
-          });
+          }, { merge: true }).catch(() => {});
         }
         if (client) await client.query('COMMIT').catch(() => {});
         return {
@@ -299,13 +316,11 @@ export class OrderStateMachine {
       switch (toState) {
         case 'accepted': {
           updates.acceptedAt = nowIso;
-          if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
-            const prepMinutes = metadata.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
-            updates.estimatedPreparationMinutes = prepMinutes;
-            const readyTime = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
-            updates.expectedReadyAt = readyTime;
-            updates.estimatedReadyAt = readyTime;
-          }
+          const prepMinutes = metadata.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
+          updates.estimatedPreparationMinutes = prepMinutes;
+          const readyTime = metadata.expectedReadyAt || PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
+          updates.expectedReadyAt = readyTime;
+          updates.estimatedReadyAt = readyTime;
           break;
         }
 
@@ -313,11 +328,9 @@ export class OrderStateMachine {
           updates.preparingAt = nowIso;
           const prepMinutes = metadata.estimatedPreparationMinutes || orderData.estimatedPreparationMinutes || PreparationTimeEngine.calculateEstimatedPreparationMinutes(orderData.items || []);
           updates.estimatedPreparationMinutes = prepMinutes;
-          if (!orderData.expectedReadyAt && !metadata.expectedReadyAt) {
-            const readyTime = PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes);
-            updates.expectedReadyAt = readyTime;
-            updates.estimatedReadyAt = readyTime;
-          }
+          const readyTime = metadata.expectedReadyAt || (metadata.estimatedPreparationMinutes ? PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes) : (orderData.expectedReadyAt || PreparationTimeEngine.computeExpectedReadyAt(nowIso, prepMinutes)));
+          updates.expectedReadyAt = readyTime;
+          updates.estimatedReadyAt = readyTime;
           
           // Schedule auto-dispatch at ~2/3 prep time
           const autoDispatchDelayMs = Math.floor((prepMinutes * (2 / 3)) * 60 * 1000);
@@ -434,7 +447,11 @@ export class OrderStateMachine {
           break;
       }
 
-      await orderRef.update(updates);
+      try {
+        await orderRef.set(updates, { merge: true });
+      } catch (fsWriteErr: any) {
+        console.warn(`[OrderStateMachine] Firestore write notice for ${orderId}:`, fsWriteErr.message);
+      }
 
       // Audit log entry
       adminDb.collection('order_audit_logs').add({

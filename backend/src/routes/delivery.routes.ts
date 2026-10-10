@@ -670,18 +670,41 @@ router.get('/rider/me', requireRole(['delivery', 'delivery_partner', 'owner', 'a
 router.post('/rider/status', requireRole(['delivery', 'delivery_partner', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const uid = req.user!.uid;
-    const { isOnline } = req.body;
+    const { isOnline, lat, lng, latitude, longitude, accuracy, speed, heading } = req.body;
+    const isOnlineBool = Boolean(isOnline);
 
-    const updatePayload = {
-      isOnline: Boolean(isOnline),
+    const updatePayload: any = {
+      isOnline: isOnlineBool,
+      status: isOnlineBool ? 'available' : 'offline',
       onlineStatusUpdatedAt: new Date().toISOString(),
       updatedAt: FieldValue.serverTimestamp()
     };
 
+    const finalLat = lat ?? latitude;
+    const finalLng = lng ?? longitude;
+    if (finalLat != null && finalLng != null) {
+      updatePayload.latitude = Number(finalLat);
+      updatePayload.longitude = Number(finalLng);
+      updatePayload.lat = Number(finalLat);
+      updatePayload.lng = Number(finalLng);
+    }
+
     await adminDb.collection('users').doc(uid).set(updatePayload, { merge: true });
     await adminDb.collection('delivery_partners').doc(uid).set(updatePayload, { merge: true }).catch(() => {});
 
-    res.json({ success: true, isOnline: Boolean(isOnline) });
+    if (finalLat != null && finalLng != null) {
+      await SupabaseGpsService.upsertLatestLocation({
+        deliveryPartnerId: uid,
+        latitude: Number(finalLat),
+        longitude: Number(finalLng),
+        accuracy: accuracy != null ? Number(accuracy) : null,
+        speed: speed != null ? Number(speed) : null,
+        heading: heading != null ? Number(heading) : null,
+        onlineStatus: isOnlineBool
+      }).catch(() => {});
+    }
+
+    res.json({ success: true, isOnline: isOnlineBool });
   } catch (err: any) {
     console.error('[Delivery Routes] /rider/status error:', err);
     res.status(500).json({ success: false, error: 'Failed to update online status' });

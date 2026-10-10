@@ -166,6 +166,17 @@ export class CustomerOrderingContextService {
       // Non-fatal
     }
 
+    if (branches.length === 0) {
+      branches.push({
+        id: 'main_branch',
+        franchiseId: 'fra_rajnandgaon',
+        name: 'Olive Pizza (Rajnandgaon HQ)',
+        lat: 21.0974,
+        lng: 81.0347,
+        deliveryRadiusKm: 25
+      });
+    }
+
     this.cachedBranches = branches;
     this.branchCacheExpiry = now + this.BRANCH_CACHE_TTL_MS;
     return branches;

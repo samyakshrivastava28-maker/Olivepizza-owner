@@ -105,6 +105,8 @@ export interface RestaurantManagerOrderProjection {
     cancelledAt?: string;
   };
   notes?: string;
+  expectedReadyAt?: string;
+  estimatedPreparationMinutes?: number;
   updatedAt: string;
 }
 
@@ -412,6 +414,8 @@ export class OrderProjectionService {
         cancelledAt: order.cancelledAt ? this.toIsoString(order.cancelledAt) : undefined,
       },
       notes: order.deliveryInstructions || order.notes || undefined,
+      expectedReadyAt: order.expectedReadyAt || order.estimatedReadyAt ? this.toIsoString(order.expectedReadyAt || order.estimatedReadyAt) : undefined,
+      estimatedPreparationMinutes: order.estimatedPreparationMinutes ? Number(order.estimatedPreparationMinutes) : undefined,
       updatedAt: this.toIsoString(order.updatedAt, nowIso),
     };
   }

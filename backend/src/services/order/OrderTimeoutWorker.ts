@@ -1,9 +1,10 @@
-﻿import { adminDb } from '../../config/firebase.js';
+import { adminDb } from '../../config/firebase.js';
 import { OrderStateMachine } from './OrderStateMachine.js';
 
 export class OrderTimeoutWorker {
   private static interval: NodeJS.Timeout | null = null;
   private static isProcessing = false;
+  private static quotaBackoffUntil = 0;
   public static readonly DEFAULT_TIMEOUT_MINUTES = 10;
 
   /**
@@ -17,10 +18,16 @@ export class OrderTimeoutWorker {
     this.processTimedOutOrders().catch(err => 
       console.warn('[OrderTimeoutWorker] Startup run error:', err.message)
     );
+    this.processAutoRiderAssignments().catch(err =>
+      console.warn('[OrderTimeoutWorker] Auto rider assignment startup run error:', err.message)
+    );
 
     this.interval = setInterval(() => {
       this.processTimedOutOrders().catch(err => 
         console.warn('[OrderTimeoutWorker] Scheduled run error:', err.message)
+      );
+      this.processAutoRiderAssignments().catch(err =>
+        console.warn('[OrderTimeoutWorker] Scheduled auto rider assignment error:', err.message)
       );
     }, 30 * 1000);
   }
@@ -37,7 +44,7 @@ export class OrderTimeoutWorker {
    * Authoritatively queries Firestore for pending orders that have exceeded their acceptance deadline.
    */
   public static async processTimedOutOrders(): Promise<{ processedCount: number; cancelledOrderIds: string[] }> {
-    if (this.isProcessing) {
+    if (this.isProcessing || Date.now() < this.quotaBackoffUntil) {
       return { processedCount: 0, cancelledOrderIds: [] };
     }
 
@@ -108,11 +115,103 @@ export class OrderTimeoutWorker {
         }
       }
     } catch (err: any) {
-      console.error('[OrderTimeoutWorker] Error processing timed out orders:', err);
+      if (err?.message?.includes('RESOURCE_EXHAUSTED')) {
+        this.quotaBackoffUntil = Date.now() + 2 * 60 * 1000;
+      }
+      console.warn('[OrderTimeoutWorker] Timed-out orders notice:', err?.message);
     } finally {
       this.isProcessing = false;
     }
 
     return { processedCount: cancelledOrderIds.length, cancelledOrderIds };
+  }
+
+  /**
+   * Scans active delivery orders in kitchen prep / accepted states and automatically assigns
+   * an eligible online rider when 5 minutes or less remain before order is prepared.
+   */
+  public static async processAutoRiderAssignments(): Promise<{ assignedCount: number }> {
+    if (Date.now() < this.quotaBackoffUntil) {
+      return { assignedCount: 0 };
+    }
+    let assignedCount = 0;
+    try {
+      const activeDeliverySnap = await adminDb.collection('orders')
+        .where('status', 'in', ['accepted', 'preparing', 'ready'])
+        .get();
+
+      if (activeDeliverySnap.empty) {
+        return { assignedCount: 0 };
+      }
+
+      const { RiderDispatchEngine } = await import('../delivery/RiderDispatchEngine.js');
+      const nowMs = Date.now();
+
+      for (const orderDoc of activeDeliverySnap.docs) {
+        const orderData = orderDoc.data();
+        const orderId = orderDoc.id;
+
+        // Skip non-delivery orders (e.g. pickup, dine-in)
+        const fulfillment = (orderData.fulfillmentType || orderData.deliveryType || 'delivery').toLowerCase();
+        if (fulfillment !== 'delivery') {
+          continue;
+        }
+
+        // Skip if a delivery partner is already assigned
+        if (orderData.deliveryPartnerId || orderData.riderId) {
+          continue;
+        }
+
+        const status = orderData.status;
+        const expectedReadyAt = orderData.expectedReadyAt || orderData.estimatedReadyAt;
+
+        let shouldAssign = false;
+
+        if (status === 'ready') {
+          // Food is already cooked and ready for dispatch -> assign immediately!
+          shouldAssign = true;
+        } else if (expectedReadyAt) {
+          const readyMs = new Date(expectedReadyAt).getTime();
+          const msRemaining = readyMs - nowMs;
+          const minutesRemaining = msRemaining / (60 * 1000);
+
+          // Trigger automatic rider assignment when 5 minutes or less left before order is ready
+          if (minutesRemaining <= 5) {
+            shouldAssign = true;
+          }
+        } else {
+          // Fallback if no expectedReadyAt recorded: if preparing for > 7 mins, trigger assignment
+          const prepAt = orderData.preparingAt || orderData.acceptedAt || orderData.createdAt;
+          if (prepAt) {
+            const prepMs = new Date(prepAt).getTime();
+            if (nowMs - prepMs >= 7 * 60 * 1000) {
+              shouldAssign = true;
+            }
+          }
+        }
+
+        if (shouldAssign) {
+          console.log(`[OrderTimeoutWorker] 🛵 Order ${orderId} reached 5-minute pre-ready window (status: ${status}). Triggering automatic rider dispatch...`);
+          try {
+            const dispatchResult = await RiderDispatchEngine.autoDispatchRider(orderId);
+            if (dispatchResult.success && dispatchResult.rider) {
+              assignedCount++;
+              console.log(`[OrderTimeoutWorker] ✅ Successfully auto-assigned rider '${dispatchResult.rider.name}' (${dispatchResult.rider.uid}) to order ${orderId}.`);
+            } else {
+              console.log(`[OrderTimeoutWorker] ℹ️ Auto-dispatch for order ${orderId}: ${dispatchResult.reason || 'Waiting for online rider'}`);
+            }
+          } catch (dispatchErr: any) {
+            console.warn(`[OrderTimeoutWorker] Auto-dispatch error for order ${orderId}:`, dispatchErr?.message);
+          }
+        }
+      }
+    } catch (err: any) {
+      if (err?.message?.includes('RESOURCE_EXHAUSTED')) {
+        this.quotaBackoffUntil = Date.now() + 2 * 60 * 1000;
+      }
+      console.warn('[OrderTimeoutWorker] Error in processAutoRiderAssignments:', err?.message);
+    }
+
+    return { assignedCount };
   }
 }

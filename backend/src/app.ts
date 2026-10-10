@@ -254,6 +254,7 @@ app.use((req, res, next) => {
     req.path.startsWith('/tracking') || 
     req.path.startsWith('/pos') ||
     req.path.startsWith('/payment') ||
+    req.path.startsWith('/payments') ||
     req.path.startsWith('/auth')
   ) {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
@@ -416,6 +417,8 @@ import { PaymentReconciliationService } from './services/payment/PaymentReconcil
 
 app.use('/payment', paymentRoutes);
 app.use('/api/payment', paymentRoutes);
+app.use('/payments', paymentRoutes);
+app.use('/api/payments', paymentRoutes);
 
 import ownerAIRoutes from './routes/ownerAI.routes.js';
 import websiteAnalyticsRoutes from './routes/websiteAnalytics.routes.js';
