@@ -329,6 +329,11 @@ app.use('/api/ai/management', aiIntegrationRoutes);
 app.use('/admin', adminRoutes);
 app.use('/api/admin', adminRoutes);
 
+import dashboardRoutes from './routes/dashboard.routes.js';
+
+app.use('/dashboard', dashboardRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+
 import aiImageRoutes from './routes/aiImage.routes.js';
 
 app.use('/ai', aiRoutes);

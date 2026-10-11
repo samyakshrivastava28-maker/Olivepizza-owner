@@ -995,6 +995,22 @@ router.post('/status', async (req: AuthRequest, res: Response): Promise<void> =>
     await adminDb.collection('users').doc(uid).set(updates, { merge: true });
     await adminDb.collection('delivery_partners').doc(uid).set(updates, { merge: true });
 
+    // Dual-write into PostgreSQL delivery_partners
+    try {
+      const { query } = await import('../config/postgres.js');
+      await query(`
+        UPDATE delivery_partners
+        SET 
+          is_online = $1,
+          current_lat = COALESCE($2, current_lat),
+          current_lng = COALESCE($3, current_lng),
+          updated_at = NOW()
+        WHERE uid = $4;
+      `, [targetOnline, updates.lat ?? null, updates.lng ?? null, uid]);
+    } catch (pgErr: any) {
+      console.warn('[RiderDelivery] PostgreSQL delivery_partners online sync notice:', pgErr.message);
+    }
+
     res.json({
       success: true,
       message: `Rider status updated to ${isOnline ? 'Online' : 'Offline'}`,

@@ -52,7 +52,7 @@ export const useVersionStore = create<VersionState>((set, get) => ({
       latestVersion: info.latestVersion || null,
       releaseNotes: info.releaseNotes || null,
       releaseDate: info.releaseDate || null,
-      downloadUrl: info.downloadUrl || 'https://github.com/samyakshrivastava28-maker/Olive-Pizza/releases/latest',
+      downloadUrl: info.downloadUrl || '/api/github/download-apk?app=owner',
       isDismissed: effectivelyDismissed,
     });
   },
@@ -180,7 +180,7 @@ export async function checkVersion(force = false) {
           mandatoryUpdate: isMandatory,
           releaseNotes: data.release_notes || data.releaseNotes || 'Enjoy a faster experience, improved ordering, and new features.',
           releaseDate: data.release_date || data.releaseDate || new Date().toISOString(),
-          downloadUrl: data.download_url || data.downloadUrl || 'https://github.com/samyakshrivastava28-maker/Olive-Pizza/releases/latest',
+          downloadUrl: data.download_url || data.downloadUrl || '/api/github/download-apk?app=owner',
         });
       }
     }
@@ -191,14 +191,14 @@ export async function checkVersion(force = false) {
 
 export async function performUpdate() {
   const { downloadUrl } = useVersionStore.getState();
-  const DOWNLOAD_URL = downloadUrl || 'https://github.com/samyakshrivastava28-maker/Olive-Pizza/releases/latest';
+  const DOWNLOAD_URL = downloadUrl || '/api/github/download-apk?app=owner';
 
   try {
     useVersionStore.getState().setUpdating(true, 'Clearing caches & preparing update...');
 
     if (Capacitor.isNativePlatform()) {
       window.open(DOWNLOAD_URL, '_system');
-      window.open('/api/github/download-apk', '_system');
+      window.open('/api/github/download-apk?app=owner', '_system');
     } else {
       // 2. Unregister service workers and clear caches for PWA
       if ('serviceWorker' in navigator) {

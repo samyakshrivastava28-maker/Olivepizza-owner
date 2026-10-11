@@ -299,6 +299,26 @@ export class CanonicalOrderService {
         paymentId, orderId, params.customerPhone || 'customer', paymentMethod, totalAmount, 'INR',
         paymentStatus === 'PAID' ? 'PAYMENT_CAPTURED' : 'PENDING', paymentMethod
       ]);
+
+      // 2.5 Update customer total_orders and total_spent in app_users
+      if (params.customerPhone && params.customerPhone !== 'N/A') {
+        await client.query(`
+          INSERT INTO app_users (
+            firebase_uid, phone, name, role, status, is_active, total_orders, total_spent, updated_at
+          ) VALUES (
+            $1, $2, $3, 'customer', 'APPROVED', true, 1, $4, NOW()
+          ) ON CONFLICT (phone) DO UPDATE SET
+            total_orders = app_users.total_orders + 1,
+            total_spent = app_users.total_spent + EXCLUDED.total_spent,
+            name = CASE WHEN app_users.name = 'Olive Customer' AND EXCLUDED.name != 'Walk-in Customer' THEN EXCLUDED.name ELSE app_users.name END,
+            updated_at = NOW();
+        `, [
+          `cust_${params.customerPhone.replace(/[^0-9]/g, '')}`,
+          params.customerPhone,
+          params.customerName || 'Walk-in Customer',
+          totalAmount
+        ]).catch(() => {});
+      }
     });
 
     // 2.4 Authoritative Firestore Billing Record Persistence

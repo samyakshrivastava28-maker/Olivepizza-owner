@@ -23,19 +23,14 @@ android {
             def keyAlias = System.getenv("KEY_ALIAS")
             def keyPassword = System.getenv("KEY_PASSWORD") ?: keystorePassword
 
-            if (!keystoreFile.exists()) {
-                throw new GradleException("Release build failed: android/app/release.keystore does not exist.")
+            if (keystoreFile.exists() && keystorePassword && keyAlias) {
+                storeFile keystoreFile
+                storePassword keystorePassword
+                keyAlias keyAlias
+                keyPassword keyPassword
+                v1SigningEnabled true
+                v2SigningEnabled true
             }
-            if (!keystorePassword || !keyAlias) {
-                throw new GradleException("Release build failed: KEYSTORE_PASSWORD and KEY_ALIAS environment variables must be provided.")
-            }
-
-            storeFile keystoreFile
-            storePassword keystorePassword
-            keyAlias keyAlias
-            keyPassword keyPassword
-            v1SigningEnabled true
-            v2SigningEnabled true
         }
     }
     buildTypes {

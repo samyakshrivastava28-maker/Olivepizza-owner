@@ -48,6 +48,21 @@ router.post('/sync', async (req: AuthRequest, res: Response): Promise<void> => {
       }
     }
 
+    // Dual-write customer into PostgreSQL app_users
+    try {
+      const { query } = await import('../config/postgres.js');
+      await query(`
+        INSERT INTO app_users (firebase_uid, email, name, role, status, is_active, allowed_apps, updated_at)
+        VALUES ($1, $2, $3, 'customer', 'APPROVED', true, '["CUSTOMER"]'::jsonb, NOW())
+        ON CONFLICT (firebase_uid) DO UPDATE SET
+          email = COALESCE(EXCLUDED.email, app_users.email),
+          name = CASE WHEN EXCLUDED.name != '' THEN EXCLUDED.name ELSE app_users.name END,
+          updated_at = NOW();
+      `, [userId, email, name || '']);
+    } catch (pgErr: any) {
+      console.warn('[UserRoutes] PostgreSQL app_users sync notice:', pgErr.message);
+    }
+
     res.json(userData);
   } catch (error) {
     console.error("User sync error", error);
@@ -87,6 +102,20 @@ router.put('/phone', async (req: AuthRequest, res: Response): Promise<void> => {
     } else {
       userData = { ...doc.data(), phone, phone_setup_completed: true, updatedAt: new Date().toISOString() };
       await userRef.update({ phone, phone_setup_completed: true, updatedAt: userData.updatedAt });
+    }
+
+    // Dual-write into PostgreSQL app_users
+    try {
+      const { query } = await import('../config/postgres.js');
+      await query(`
+        INSERT INTO app_users (firebase_uid, email, phone, name, role, status, is_active, allowed_apps, updated_at)
+        VALUES ($1, $2, $3, 'Customer', 'customer', 'APPROVED', true, '["CUSTOMER"]'::jsonb, NOW())
+        ON CONFLICT (firebase_uid) DO UPDATE SET
+          phone = EXCLUDED.phone,
+          updated_at = NOW();
+      `, [userId, email, phone]);
+    } catch (pgErr: any) {
+      console.warn('[UserRoutes] PostgreSQL app_users phone sync notice:', pgErr.message);
     }
 
     res.json(userData);

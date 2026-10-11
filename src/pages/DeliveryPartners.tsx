@@ -25,9 +25,13 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 
+import { fetchApi } from '../lib/api';
+import { Database, RefreshCw } from 'lucide-react';
+
 export default function DeliveryPartners() {
   const [partners, setPartners] = useState<DeliveryPartner[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'roster' | 'radar'>('roster');
   const [selectedRider, setSelectedRider] = useState<DeliveryPartner | null>(null);
@@ -45,20 +49,35 @@ export default function DeliveryPartners() {
     isOnline: true,
   });
 
-  useEffect(() => {
-    const q = query(collection(db, 'delivery_partners'));
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        setPartners(snap.docs.map((d) => ({ id: d.id, ...d.data() })) as DeliveryPartner[]);
-        setLoading(false);
-      },
-      (err) => {
-        setError(err.message);
-        setLoading(false);
+  const fetchPartners = async (isManual = false) => {
+    if (isManual) setRefreshing(true);
+    else setLoading(true);
+
+    try {
+      const res = await fetchApi('/api/dashboard/delivery-partners');
+      if (!res.ok) {
+        throw new Error(`Failed to load delivery fleet: HTTP ${res.status}`);
       }
-    );
-    return () => unsub();
+      const data = await res.json();
+      if (Array.isArray(data.partners)) {
+        setPartners(data.partners);
+      }
+      setError(null);
+    } catch (err: any) {
+      console.error('[DeliveryPartners] Fetch error:', err);
+      setError(err.message || 'Failed to load delivery partners');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPartners();
+    const interval = setInterval(() => {
+      fetchPartners(false);
+    }, 15000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleOpenAdd = () => {
@@ -82,11 +101,17 @@ export default function DeliveryPartners() {
 
   const handleToggleOnline = async (p: DeliveryPartner) => {
     try {
-      await updateDoc(doc(db, 'delivery_partners', p.id), {
-        isOnline: !p.isOnline,
-        lastActiveAt: new Date(),
+      const nextOnline = !p.isOnline;
+      const res = await fetchApi(`/api/dashboard/delivery-partners/${p.id}/toggle-online`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isOnline: nextOnline }),
       });
-      toast.success(`${p.name} is now marked ${!p.isOnline ? 'Online' : 'Offline'}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setPartners((prev) =>
+        prev.map((item) => (item.id === p.id ? { ...item, isOnline: nextOnline } : item))
+      );
+      toast.success(`${p.name} is now marked ${nextOnline ? 'Online' : 'Offline'}`);
     } catch (e: any) {
       toast.error('Could not update status: ' + e.message);
     }
@@ -95,8 +120,12 @@ export default function DeliveryPartners() {
   const handleDelete = async (p: DeliveryPartner) => {
     if (!window.confirm(`Are you sure you want to remove ${p.name} from the delivery fleet?`)) return;
     try {
-      await deleteDoc(doc(db, 'delivery_partners', p.id));
-      toast.success('Rider deleted from registry.');
+      const res = await fetchApi(`/api/dashboard/delivery-partners/${p.id}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setPartners((prev) => prev.filter((item) => item.id !== p.id));
+      toast.success('Rider deleted from PostgreSQL registry.');
     } catch (e: any) {
       toast.error('Delete failed: ' + e.message);
     }
@@ -112,27 +141,24 @@ export default function DeliveryPartners() {
     setSaving(true);
     try {
       const payload = {
+        id: editingPartner?.id,
         name: formData.name.trim(),
         phone: formData.phone.trim(),
         email: formData.email?.trim() || '',
         vehicleType: formData.vehicleType || 'Motorcycle',
         vehicleNumber: formData.vehicleNumber?.toUpperCase().trim() || '',
         isOnline: formData.isOnline !== false,
-        updatedAt: new Date(),
       };
 
-      if (editingPartner) {
-        await updateDoc(doc(db, 'delivery_partners', editingPartner.id), payload);
-        toast.success('Rider profile updated.');
-      } else {
-        await addDoc(collection(db, 'delivery_partners'), {
-          ...payload,
-          completedDeliveries: 0,
-          rating: 5.0,
-          createdAt: new Date(),
-        });
-        toast.success('New delivery partner registered.');
-      }
+      const res = await fetchApi('/api/dashboard/delivery-partners', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchPartners(true);
+      toast.success(editingPartner ? 'Rider profile updated.' : 'New delivery partner registered.');
       setIsModalOpen(false);
     } catch (e: any) {
       toast.error('Save failed: ' + e.message);
