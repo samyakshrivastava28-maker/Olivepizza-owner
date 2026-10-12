@@ -82,6 +82,15 @@ app.get('/health', (_req, res) => {
   });
 });
 
+app.get(['/api/heartbeat', '/heartbeat', '/ping'], (_req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'Olive Pizza Owner Backend Service',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.get('/keep-alive', (_req, res) => {
   res.json({ status: 'alive', timestamp: new Date().toISOString() });
 });
