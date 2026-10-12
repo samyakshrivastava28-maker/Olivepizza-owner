@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags:
       - 'v*'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       build_type:
@@ -187,8 +189,12 @@ jobs:
 
       # Publish to GitHub Release (Only Signed Production Builds as Official Release)
       - name: Publish to GitHub Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         run: |
+          if [ "${SIGNED_BUILD:-false}" != "true" ]; then
+            echo "::warning::Skipping the official release update because no signed, installable IPA was produced. Existing release assets are unchanged."
+            exit 0
+          fi
           COMMIT_NUM=$(git rev-list --count HEAD)
           IPA_NAME="olivepizza-owner-${COMMIT_NUM}.ipa"
 
