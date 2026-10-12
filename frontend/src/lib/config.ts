@@ -113,11 +113,26 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
 
     return res;
   } catch (err) {
-    try {
+    // Localhost fallback is strictly for a local Vite/Electron development session.
+    // In installed Android/iOS/Windows/macOS builds, localhost refers to the user's
+    // device—not the Render backend—and can leave order/status actions hanging.
+    const canUseLocalDevelopmentBackend =
+      import.meta.env.DEV && !Capacitor.isNativePlatform();
+
+    if (canUseLocalDevelopmentBackend) {
       const directDevUrl = `http://localhost:5000${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
-      return await fetch(directDevUrl, config);
-    } catch {
-      throw err;
+      const devController = new AbortController();
+      const devTimeoutId = setTimeout(() => devController.abort(), 8000);
+      try {
+        return await fetch(directDevUrl, { ...config, signal: devController.signal });
+      } catch {
+        // Preserve the original request error, rather than hiding it behind a
+        // second, unrelated connection error.
+      } finally {
+        clearTimeout(devTimeoutId);
+      }
     }
+
+    throw err;
   }
 };
