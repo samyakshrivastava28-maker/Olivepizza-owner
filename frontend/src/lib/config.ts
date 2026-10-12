@@ -78,7 +78,10 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
     }
     const currentUser = auth.currentUser;
     if (currentUser && !headers.has('Authorization')) {
-      const token = await currentUser.getIdToken(true);
+      // Use the cached valid token; Firebase refreshes it when it expires.
+      // Forcing a refresh on every request adds latency and can turn transient
+      // Identity Toolkit failures into unauthenticated status/order requests.
+      const token = await currentUser.getIdToken();
       if (token) {
         headers.set('Authorization', `Bearer ${token}`);
       }
