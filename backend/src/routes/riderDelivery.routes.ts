@@ -256,10 +256,7 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
     const uid = req.user?.uid!;
     const name = (req.user as any)?.name || req.user?.email || 'Delivery Partner';
     const userRole = (req.user?.role || '').toLowerCase();
-    const userEmail = req.user?.email?.toLowerCase() || '';
-
-    const isMasterAccount = userEmail === 'olivepizzarjn@gmail.com' || userEmail === 'webhub2811@gmail.com';
-    const isDeliveryRole = userRole === 'delivery_partner' || userRole === 'delivery' || userRole === 'rider' || isMasterAccount;
+    const isDeliveryRole = userRole === 'delivery_partner' || userRole === 'delivery' || userRole === 'rider';
 
     if (!isDeliveryRole) {
       res.status(403).json({
@@ -309,11 +306,7 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
     }
 
     // Ownership check: delivery partner can only execute actions on their own assigned order
-    if (
-      orderData.deliveryPartnerId &&
-      orderData.deliveryPartnerId !== uid &&
-      !isMasterAccount
-    ) {
+    if (orderData.deliveryPartnerId && orderData.deliveryPartnerId !== uid) {
       res.status(403).json({ success: false, error: 'Forbidden: This order is assigned to a different delivery partner.' });
       return;
     }
@@ -340,7 +333,7 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
     }
 
     // For operational actions, rider MUST be online and have a valid GPS fix
-    if ((req.user?.role === 'delivery_partner' || req.user?.role === 'delivery') && !isMasterAccount) {
+    if (userRole === 'delivery_partner' || userRole === 'delivery' || userRole === 'rider') {
       let partnerData: any = {};
       try {
         const partnerDoc = await adminDb.collection('delivery_partners').doc(uid).get();
@@ -776,7 +769,7 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
             ? Number(process.env.DELIVERY_COMPLETION_RADIUS_METERS)
             : defaultRadius;
 
-          if (distanceMeters > requiredMeters && !isMasterAccount) {
+          if (distanceMeters > requiredMeters) {
             res.status(400).json({
               success: false,
               error: `You are too far from the customer delivery address (${Math.round(distanceMeters)}m away). Must be within ${requiredMeters} meters to complete.`,
@@ -804,7 +797,12 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
 
         const delResult = await OrderStateMachine.transition(orderId, 'delivered', { uid, role: 'delivery_partner', name }, updates);
         if (!delResult.success) {
-          await orderRef.set(updates, { merge: true });
+          res.status(400).json({
+            success: false,
+            code: 'DELIVERY_TRANSITION_REJECTED',
+            error: delResult.error || 'Delivery completion was rejected by the order state machine.'
+          });
+          return;
         }
 
         try {
