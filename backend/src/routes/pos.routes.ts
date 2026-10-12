@@ -17,6 +17,7 @@ import { billingRepository } from '../repositories/billing.repository.js';
 import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngine.js';
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
+import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
 import { query } from '../lib/db.js';
 import crypto from 'crypto';
 import net from 'net';
@@ -681,6 +682,27 @@ router.post('/online-orders/:id/accept', verifyToken, requirePOSRole, async (req
   try {
     const { id } = req.params;
     const user = req.user!;
+    const branchId = user.branchId;
+
+    // Validate that order belongs to cashier's assigned branch
+    let orderDoc = await adminDb.collection('orders').doc(id).get().catch(() => null);
+    let orderData = orderDoc?.exists ? orderDoc.data() : null;
+    if (!orderData) {
+      try {
+        orderData = await OrderPersistenceArchiveService.getHistoricalOrder(id);
+      } catch {}
+    }
+
+    if (!orderData) {
+      res.status(404).json({ success: false, error: 'Order not found' });
+      return;
+    }
+
+    const orderBranch = orderData.branchId || orderData.branch_id;
+    if (orderBranch && branchId && orderBranch !== branchId && branchId !== 'all') {
+      res.status(403).json({ success: false, error: 'Forbidden: You cannot accept orders assigned to a different branch.' });
+      return;
+    }
 
     const transitionRes = await OrderStateMachine.transition(id, 'accepted', {
       uid: user.uid,
@@ -708,6 +730,27 @@ router.post('/online-orders/:id/reject', verifyToken, requirePOSRole, async (req
     const { id } = req.params;
     const { reason = 'Store busy / items unavailable' } = req.body;
     const user = req.user!;
+    const branchId = user.branchId;
+
+    // Validate that order belongs to cashier's assigned branch
+    let orderDoc = await adminDb.collection('orders').doc(id).get().catch(() => null);
+    let orderData = orderDoc?.exists ? orderDoc.data() : null;
+    if (!orderData) {
+      try {
+        orderData = await OrderPersistenceArchiveService.getHistoricalOrder(id);
+      } catch {}
+    }
+
+    if (!orderData) {
+      res.status(404).json({ success: false, error: 'Order not found' });
+      return;
+    }
+
+    const orderBranch = orderData.branchId || orderData.branch_id;
+    if (orderBranch && branchId && orderBranch !== branchId && branchId !== 'all') {
+      res.status(403).json({ success: false, error: 'Forbidden: You cannot reject orders assigned to a different branch.' });
+      return;
+    }
 
     await CanonicalOrderService.cancelOrRefundOrder({
       orderId: id,

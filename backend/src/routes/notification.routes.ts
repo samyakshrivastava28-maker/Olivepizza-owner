@@ -645,7 +645,7 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
         });
         responseData = { message: 'Delivery declined — order returned to ready pool' };
 
-      } else if (action === 'picked_up' || action === 'out_for_delivery') {
+      } else if (action === 'picked_up' || action === 'out_for_delivery' || action === 'pickup_delivery') {
         const allowedFrom = ['partner_assigned', 'ready', 'preparing', 'accepted'];
         if (!allowedFrom.includes(currentStatus)) {
           await releaseOrderLock(orderId);
@@ -670,7 +670,7 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
         });
 
         responseData = { message: 'Picked up — out for delivery' };
-      } else if (action === 'delivered') {
+      } else if (action === 'delivered' || action === 'complete_delivery') {
         const allowedFrom = ['out_for_delivery', 'picked_up', 'partner_assigned', 'ready'];
         if (!allowedFrom.includes(currentStatus)) {
           await releaseOrderLock(orderId);

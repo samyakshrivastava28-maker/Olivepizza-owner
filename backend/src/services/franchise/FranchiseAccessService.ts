@@ -311,8 +311,8 @@ export class FranchiseAccessService {
       emailLower === 'webhub2811@gmail.com' ||
       emailLower === 'olivepizzamaker@gmail.com';
 
-    // Platform Owners have universal access to all apps (immediate, quota-resilient fast-path)
-    if (isMasterOwner) {
+    // Platform Owners have full authorization for OWNER dashboard
+    if (isMasterOwner && targetApp === 'OWNER') {
       const resolvedBranch = requestedBranchId || 'main_branch';
       const resolvedFranchise = 'fra_rajnandgaon';
 
@@ -324,34 +324,17 @@ export class FranchiseAccessService {
           uid,
           email: emailLower,
           name: emailLower === 'webhub2811@gmail.com' ? 'Samyak Shrivastava' : 'Platform Owner',
-          role: targetApp === 'OWNER'
-            ? 'owner'
-            : targetApp === 'RESTAURANT_MANAGER'
-            ? 'restaurant_manager'
-            : targetApp === 'POS'
-            ? 'pos_operator'
-            : targetApp === 'DELIVERY'
-            ? 'delivery_partner'
-            : targetApp === 'FRANCHISE_MANAGER'
-            ? 'franchise_manager'
-            : 'owner',
+          role: 'owner',
           phone: '+919179944445',
           phoneNumber: '+919179944445',
-          vehicleType: 'Scooty (CG 08 AR 9000)',
-          vehicleNumber: 'CG 08 AR 9000',
           branchId: resolvedBranch,
           branchName: 'Olive Pizza Enterprise',
           branchIds: ['all'],
           franchiseId: resolvedFranchise,
           terminalId: terminalId || 'Counter 1',
           permissions: ['*'],
-          allowedApps: ['OWNER', 'RESTAURANT_MANAGER', 'FRANCHISE_MANAGER', 'POS', 'DELIVERY', 'CUSTOMER'],
-          applicationAccess: {
-            app_restaurant_management: true,
-            app_franchise_management: true,
-            app_pos: true,
-            app_delivery: true
-          }
+          allowedApps: ['OWNER'],
+          applicationAccess: {}
         }
       };
     }
@@ -370,8 +353,8 @@ export class FranchiseAccessService {
 
     const isOwnerRole = userData?.role === 'owner' || userData?.role === 'platform_owner';
 
-    // Platform Owners from DB have universal access to all apps
-    if (isOwnerRole) {
+    // Platform Owners from DB have access to OWNER app
+    if (isOwnerRole && targetApp === 'OWNER') {
       const resolvedBranch = requestedBranchId || userData?.branchId || 'main_branch';
       const resolvedFranchise = userData?.franchiseId || 'fra_rajnandgaon';
 
@@ -383,34 +366,17 @@ export class FranchiseAccessService {
           uid,
           email: emailLower || 'owner@olivepizza.in',
           name: userData?.name || 'Olive Pizza Administrator',
-          role: targetApp === 'OWNER'
-            ? 'owner'
-            : targetApp === 'RESTAURANT_MANAGER'
-            ? 'restaurant_manager'
-            : targetApp === 'POS'
-            ? 'pos_operator'
-            : targetApp === 'DELIVERY'
-            ? 'delivery_partner'
-            : targetApp === 'FRANCHISE_MANAGER'
-            ? 'franchise_manager'
-            : 'owner',
+          role: 'owner',
           phone: userData?.phone || userData?.phoneNumber || '',
           phoneNumber: userData?.phone || userData?.phoneNumber || '',
-          vehicleType: userData?.vehicleType || 'Bike',
-          vehicleNumber: userData?.vehicleNumber || '',
           branchId: resolvedBranch,
           branchName: 'Olive Pizza Enterprise',
           branchIds: ['all'],
           franchiseId: resolvedFranchise,
           terminalId: terminalId || 'Counter 1',
           permissions: ['*'],
-          allowedApps: ['OWNER', 'RESTAURANT_MANAGER', 'FRANCHISE_MANAGER', 'POS', 'DELIVERY', 'CUSTOMER'],
-          applicationAccess: {
-            app_restaurant_management: true,
-            app_franchise_management: true,
-            app_pos: true,
-            app_delivery: true
-          }
+          allowedApps: ['OWNER'],
+          applicationAccess: {}
         }
       };
     }
@@ -638,7 +604,7 @@ export class FranchiseAccessService {
       // Check users doc role & status
       const userRole = (userData?.role || '').toLowerCase();
       const userStatus = (userData?.status || '').toUpperCase();
-      if ((userRole === 'pos_operator' || userRole === 'cashier' || userRole === 'pos' || userRole === 'manager' || userRole === 'restaurant_manager' || userRole === 'admin' || userRole === 'franchise_owner' || userRole === 'owner') && 
+      if ((userRole === 'pos_operator' || userRole === 'cashier' || userRole === 'pos' || userRole === 'manager' || userRole === 'restaurant_manager' || userRole === 'franchise_owner') && 
           (userStatus === 'APPROVED' || userStatus === 'ACTIVE' || userData?.isActive === true || !userData?.status)) {
         isApproved = true;
       }
