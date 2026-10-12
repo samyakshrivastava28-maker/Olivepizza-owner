@@ -313,7 +313,7 @@ export class FranchiseAccessService {
 
     // Owner identities must not be converted into operational staff identities.
     // Restaurant and franchise management require a separate, explicitly authorized account.
-    const isManagerRestrictedApp = targetApp === 'RESTAURANT_MANAGER' || targetApp === 'FRANCHISE_MANAGER';
+    const isManagerRestrictedApp = ['RESTAURANT_MANAGER', 'FRANCHISE_MANAGER'].includes(String(targetApp || '').trim().toUpperCase());
     if (isManagerRestrictedApp && isMasterOwner) {
       return {
         authorized: false,
