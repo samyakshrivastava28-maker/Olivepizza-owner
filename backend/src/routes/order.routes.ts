@@ -1403,18 +1403,18 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
     const role = (req.user!.role || 'staff').toLowerCase();
     const emailLower = (req.user?.email || '').toLowerCase();
     const name = (req.user as any)?.name || (req.user as any)?.displayName || req.user?.email || 'Staff';
-    const appTarget = ((req.headers['x-app-target'] || req.headers['x-app-source'] || '') as string).toUpperCase();
-    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
-    const isDeliveryApp = appTarget === 'DELIVERY';
+    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com' || emailLower === 'olivepizzamaker@gmail.com';
+    if (['owner', 'platform_owner', 'admin', 'developer'].includes(role) || isMasterAccount) {
+      res.status(403).json({
+        success: false,
+        code: 'OWNER_OPERATION_READ_ONLY',
+        error: 'Owner and platform-administrator accounts cannot change operational order status. Use an authorized restaurant manager or assigned delivery partner account.'
+      });
+      return;
+    }
 
     let effectiveRole = role;
-    if (role === 'owner' || role === 'admin' || isMasterAccount) {
-      if (isDeliveryApp) {
-        effectiveRole = 'delivery_partner';
-      } else {
-        effectiveRole = 'restaurant_manager';
-      }
-    } else if (role === 'manager' || role === 'kitchen_manager' || role === 'chef') {
+    if (role === 'manager' || role === 'kitchen_manager' || role === 'chef') {
       effectiveRole = 'restaurant_manager';
     } else if (role === 'rider' || role === 'delivery') {
       effectiveRole = 'delivery_partner';
@@ -1442,7 +1442,7 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
     const orderBranchId = orderData.branchId || '';
     const userBranchId = req.user?.branchId;
 
-    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && role !== 'owner' && role !== 'admin') {
+    if (effectiveRole !== 'delivery_partner' && (!userBranchId || (userBranchId !== orderBranchId && userBranchId !== 'all'))) {
       res.status(403).json({
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`
       });
@@ -1478,25 +1478,20 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
     const uid = req.user?.uid;
     const userBranchId = req.user?.branchId;
     const name = (req.user as any)?.name || req.user?.email || 'Manager';
-    const appTarget = ((req.headers['x-app-target'] || req.headers['x-app-source'] || '') as string).toUpperCase();
-
-    // Owner Portal Read-Only Enforcement
-    if (appTarget === 'OWNER') {
+    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com' || emailLower === 'olivepizzamaker@gmail.com';
+    if (['owner', 'platform_owner', 'admin', 'developer'].includes(userRole) || isMasterAccount) {
       return res.status(403).json({
         success: false,
-        error: 'Forbidden: Owner portal has read-only operational authority. Kitchen transitions must be executed by restaurant managers.',
+        code: 'OWNER_OPERATION_READ_ONLY',
+        error: 'Owner and platform-administrator accounts cannot perform restaurant order actions.',
         requestId
       });
     }
 
-    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
     let effectiveRole = userRole;
-    if (userRole === 'owner' || userRole === 'admin' || isMasterAccount) {
-      effectiveRole = 'restaurant_manager';
-    } else if (userRole === 'manager' || userRole === 'kitchen_manager' || userRole === 'chef') {
+    if (userRole === 'manager' || userRole === 'kitchen_manager' || userRole === 'chef') {
       effectiveRole = 'restaurant_manager';
     }
-
     const isAuthorizedStaff = ['restaurant_manager', 'kitchen_staff', 'cashier'].includes(effectiveRole);
     if (!isAuthorizedStaff || !uid) {
       return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
@@ -1511,7 +1506,7 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
     const orderData = orderDoc.data()!;
     const orderBranchId = orderData.branchId || '';
 
-    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
+    if (!userBranchId || (userBranchId !== orderBranchId && userBranchId !== 'all')) {
       return res.status(403).json({
         success: false,
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
@@ -1597,25 +1592,20 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
     const uid = req.user?.uid;
     const userBranchId = req.user?.branchId;
     const name = (req.user as any)?.name || req.user?.email || 'Manager';
-    const appTarget = ((req.headers['x-app-target'] || req.headers['x-app-source'] || '') as string).toUpperCase();
-
-    // Owner Portal Read-Only Enforcement
-    if (appTarget === 'OWNER') {
+    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com' || emailLower === 'olivepizzamaker@gmail.com';
+    if (['owner', 'platform_owner', 'admin', 'developer'].includes(userRole) || isMasterAccount) {
       return res.status(403).json({
         success: false,
-        error: 'Forbidden: Owner portal has read-only operational authority. Kitchen order rejection must be executed by restaurant managers.',
+        code: 'OWNER_OPERATION_READ_ONLY',
+        error: 'Owner and platform-administrator accounts cannot perform restaurant order actions.',
         requestId
       });
     }
 
-    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
     let effectiveRole = userRole;
-    if (userRole === 'owner' || userRole === 'admin' || isMasterAccount) {
-      effectiveRole = 'restaurant_manager';
-    } else if (userRole === 'manager' || userRole === 'kitchen_manager' || userRole === 'chef') {
+    if (userRole === 'manager' || userRole === 'kitchen_manager' || userRole === 'chef') {
       effectiveRole = 'restaurant_manager';
     }
-
     const isAuthorizedStaff = ['restaurant_manager', 'cashier'].includes(effectiveRole);
     if (!isAuthorizedStaff || !uid) {
       return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
@@ -1629,7 +1619,7 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
     const orderData = orderDoc.data()!;
     const orderBranchId = orderData.branchId || '';
 
-    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
+    if (!userBranchId || (userBranchId !== orderBranchId && userBranchId !== 'all')) {
       return res.status(403).json({
         success: false,
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,

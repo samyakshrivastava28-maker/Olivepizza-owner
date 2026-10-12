@@ -311,6 +311,17 @@ export class FranchiseAccessService {
       emailLower === 'webhub2811@gmail.com' ||
       emailLower === 'olivepizzamaker@gmail.com';
 
+    // Owner identities must not be converted into operational staff identities.
+    // Restaurant and franchise management require a separate, explicitly authorized account.
+    const isManagerRestrictedApp = ['RESTAURANT_MANAGER', 'FRANCHISE_MANAGER'].includes(String(targetApp || '').trim().toUpperCase());
+    if (isManagerRestrictedApp && isMasterOwner) {
+      return {
+        authorized: false,
+        code: 'OWNER_APP_ONLY',
+        reason: 'Owner accounts must use the Owner app. A separate account must be explicitly authorized for this application.'
+      };
+    }
+
     // Platform Owners have universal access to all apps (immediate, quota-resilient fast-path)
     if (isMasterOwner) {
       const resolvedBranch = requestedBranchId || 'main_branch';
@@ -368,7 +379,16 @@ export class FranchiseAccessService {
       }
     }
 
-    const isOwnerRole = userData?.role === 'owner' || userData?.role === 'platform_owner';
+    const normalizedUserRole = String(userData?.role || '').toLowerCase();
+    const isOwnerRole = normalizedUserRole === 'owner' || normalizedUserRole === 'platform_owner';
+
+    if (isManagerRestrictedApp && isOwnerRole) {
+      return {
+        authorized: false,
+        code: 'OWNER_APP_ONLY',
+        reason: 'Owner accounts must use the Owner app. A separate account must be explicitly authorized for this application.'
+      };
+    }
 
     // Platform Owners from DB have universal access to all apps
     if (isOwnerRole) {

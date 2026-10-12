@@ -682,9 +682,13 @@ router.post('/online-orders/:id/accept', verifyToken, requirePOSRole, async (req
     const { id } = req.params;
     const user = req.user!;
 
+    // POS access is validated above (active account, assigned franchise/branch,
+    // and POS enabled). Normalize the POS operator identity to the state machine's
+    // cashier capability and pass the validated branch for its isolation check.
     const transitionRes = await OrderStateMachine.transition(id, 'accepted', {
       uid: user.uid,
-      role: user.role || 'cashier',
+      role: 'cashier',
+      branchId: user.branchId,
       name: (user as any).name || 'POS Operator'
     });
 
