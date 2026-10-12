@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags:
       - 'v*'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -99,29 +101,25 @@ jobs:
           sed -i "s/versionCode 1/versionCode ${VERSION_CODE}/g" android/app/build.gradle
           sed -i "s/versionName \"1.0\"/versionName \"1.0.${COMMIT_NUM}\"/g" android/app/build.gradle
 
-      # 10. Validate Signing Secrets
-      - name: Validate Signing Secrets
-        run: |
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "❌ CRITICAL SECURITY ERROR: KEYSTORE_BASE64 secret is not configured in repository secrets!"
-            exit 1
-          fi
-          if [ -z "$KEYSTORE_PASSWORD" ]; then
-            echo "❌ CRITICAL SECURITY ERROR: KEYSTORE_PASSWORD secret is not configured in repository secrets!"
-            exit 1
-          fi
-          if [ -z "$KEY_ALIAS" ]; then
-            echo "❌ CRITICAL SECURITY ERROR: KEY_ALIAS secret is not configured in repository secrets!"
-            exit 1
-          fi
-          echo "✅ All required Android release signing secrets are present."
+      # 10. Detect release signing availability
+      - name: Detect Android Release Signing
+        id: signing
+        shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          if [[ -n "$KEYSTORE_BASE64" && -n "$KEYSTORE_PASSWORD" && -n "$KEY_ALIAS" ]]; then
+            echo "release_signing=true" >> "$GITHUB_OUTPUT"
+            echo "Android release signing secrets are available."
+          else
+            echo "release_signing=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Release signing secrets are unavailable; building a DEBUG APK for testing only."
+          fi
 
-      # 11. Prepare Signing Keystore
       - name: Prepare Keystore
+        if: steps.signing.outputs.release_signing == 'true'
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -145,6 +143,7 @@ jobs:
 
       # 12. Build Signed Release APK
       - name: Build Release APK
+        if: steps.signing.outputs.release_signing == 'true'
         run: ./gradlew assembleRelease --no-daemon
         working-directory: android
         env:
@@ -153,41 +152,53 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || secrets.KEYSTORE_PASSWORD }}
 
       # 12. Verify the APK is properly signed
-      - name: Verify APK Signature
-        run: |
-          APK="android/app/build/outputs/apk/release/app-release.apk"
-          if [ ! -f "$APK" ]; then
-            echo "❌ app-release.apk not found. Checking directory:"
-            ls android/app/build/outputs/apk/release/ || true
-            exit 1
-          fi
-          SIZE=$(du -sh "$APK" | cut -f1)
-          echo "✅ APK found ($SIZE)"
-          SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          BUILD_TOOLS=$(ls "$SDK_DIR/build-tools" | sort -V | tail -1)
-          "$SDK_DIR/build-tools/$BUILD_TOOLS/apksigner" verify --verbose "$APK" \
-            && echo "✅ APK is properly signed." \
-            || { echo "❌ APK signature verification FAILED — APK is unsigned or corrupted."; exit 1; }
+      - name: Build Debug APK (test-only fallback)
+        if: steps.signing.outputs.release_signing != 'true'
+        run: ./gradlew assembleDebug --no-daemon
+        working-directory: android
 
-      # 13. Rename APK with commit number and canonical name
+      - name: Verify APK
+        env:
+          RELEASE_SIGNING: ${{ steps.signing.outputs.release_signing }}
+        run: |
+          if [ "$RELEASE_SIGNING" = "true" ]; then
+            APK="android/app/build/outputs/apk/release/app-release.apk"
+            test -f "$APK" || { echo "::error::Signed release APK was not produced."; exit 1; }
+            SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+            BUILD_TOOLS=$(ls "$SDK_DIR/build-tools" | sort -V | tail -1)
+            "$SDK_DIR/build-tools/$BUILD_TOOLS/apksigner" verify --verbose "$APK" \
+              || { echo "::error::Release APK signature verification failed."; exit 1; }
+            echo "Signed release APK verified."
+          else
+            APK="android/app/build/outputs/apk/debug/app-debug.apk"
+            test -s "$APK" || { echo "::error::Debug test APK was not produced."; exit 1; }
+            echo "Debug/test APK produced successfully (not eligible for production release)."
+          fi
+
       - name: Rename APK
+        env:
+          RELEASE_SIGNING: ${{ steps.signing.outputs.release_signing }}
         run: |
           mkdir -p artifact
           COMMIT_NUM=$(git rev-list --count HEAD)
-          cp android/app/build/outputs/apk/release/app-release.apk "artifact/olivepizza-owner-${COMMIT_NUM}.apk"
-          cp android/app/build/outputs/apk/release/app-release.apk "artifact/olivepizza-owner.apk"
+          if [ "$RELEASE_SIGNING" = "true" ]; then
+            cp android/app/build/outputs/apk/release/app-release.apk "artifact/olivepizza-owner-${COMMIT_NUM}.apk"
+            cp android/app/build/outputs/apk/release/app-release.apk "artifact/olivepizza-owner.apk"
+          else
+            cp android/app/build/outputs/apk/debug/app-debug.apk "artifact/olivepizza-owner-debug-${COMMIT_NUM}.apk"
+            cp android/app/build/outputs/apk/debug/app-debug.apk "artifact/olivepizza-owner-debug.apk"
+          fi
 
-      # 14. Upload APK as GitHub Actions artifact
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OlivePizzaOwner-Android-APK
+          name: OlivePizzaOwner-Android-APK-${{ steps.signing.outputs.release_signing == 'true' && 'Release' || 'Debug-Test' }}
           path: artifact/*.apk
           retention-days: 90
 
       # 15. Publish to GitHub Release (Only Latest Commit Files)
       - name: Publish to GitHub Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: steps.signing.outputs.release_signing == 'true' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         run: |
           COMMIT_NUM=$(git rev-list --count HEAD)
           APK_NAME="olivepizza-owner-${COMMIT_NUM}.apk"
@@ -214,18 +225,24 @@ jobs:
 
       # 16. Build Summary
       - name: Build Summary
+        env:
+          RELEASE_SIGNING: ${{ steps.signing.outputs.release_signing }}
         run: |
           COMMIT_NUM=$(git rev-list --count HEAD)
-          echo "## 👑 Olive Pizza Owner Android Build Succeeded" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status:** ✅ ANDROID_APK_READY" >> $GITHUB_STEP_SUMMARY
-          echo "- **Artifact:** OlivePizzaOwner-Android-APK (available under Actions > Artifacts)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Package ID:** \`in.olivepizza.owner\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **APK File:** \`olivepizza-owner-${COMMIT_NUM}.apk\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Signing Keystore:** Stable Release Keystore (SHA1: 4C:6B:4A:1E:7D:43:96:6D:74:82:17:5F:08:D8:87:E5:3B:C4:B5:7E)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Backend Endpoint:** https://olivepizza-owner.onrender.com" >> $GITHUB_STEP_SUMMARY
+          echo "## Olive Pizza Owner Android Build" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$RELEASE_SIGNING" = "true" ]; then
+            echo "- **Result:** SIGNED_RELEASE_APK_READY" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Artifact:** `olivepizza-owner-${COMMIT_NUM}.apk`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Package ID:** `in.olivepizza.owner`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Signing:** Verified with configured release keystore" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Result:** ANDROID_DEBUG_TEST_APK_READY" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Artifact:** `olivepizza-owner-debug-${COMMIT_NUM}.apk`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Package ID:** `in.olivepizza.owner`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- **Signing:** Debug key only; not a production release and cannot update a release-signed installation" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "- **Backend Endpoint:** https://olivepizza-owner.onrender.com" >> "$GITHUB_STEP_SUMMARY"
 
-      # 17. Cleanup Keystore (Fail-Closed Sandbox Hygiene)
       - name: Cleanup Keystore
         if: always()
         run: |
