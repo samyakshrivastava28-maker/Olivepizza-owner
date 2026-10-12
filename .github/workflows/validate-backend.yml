@@ -1,0 +1,49 @@
+name: Validate Backend
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/validate-backend.yml"
+  push:
+    branches:
+      - "fix/operational-auth-status-android-ci-20261012"
+    paths:
+      - "backend/**"
+      - ".github/workflows/validate-backend.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: TypeScript build and backend tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Compile backend
+        run: npm run build
+
+      - name: Run backend test suite
+        run: npm test
