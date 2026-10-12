@@ -101,10 +101,19 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
   };
 
   try {
+    // Installed apps can hit a sleeping Render instance or a multi-store
+    // status transition. Give production/native requests more time; keep local
+    // development snappy. Always clear the timer even when fetch rejects.
+    const requestTimeoutMs =
+      import.meta.env.DEV && !Capacitor.isNativePlatform() ? 8000 : 30000;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(primaryUrl, { ...config, signal: controller.signal });
-    clearTimeout(timeoutId);
+    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+    let res: Response;
+    try {
+      res = await fetch(primaryUrl, { ...config, signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
     if (res.ok) return res;
 
     // If primary URL failed (404/401/etc) or is relative, try fallback to backend host
