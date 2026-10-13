@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { adminDb, adminAuth } from '../config/firebase.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
+import { redisService } from '../services/redis/RedisService.js';
 
 const router = Router();
 
@@ -85,64 +86,72 @@ function checkStatusRateLimit(branchId: string): boolean {
 router.get('/status', async (req: Request, res: Response) => {
   try {
     const branchId = (req.query.branchId as string) || 'main_branch';
-    const docRef = adminDb.collection('restaurant_settings').doc(branchId);
-    const snap = await docRef.get();
+    const statusData = await redisService.fetchWithStampedeProtection(
+      `cache:restaurant_status:${branchId}`,
+      async () => {
+        const docRef = adminDb.collection('restaurant_settings').doc(branchId);
+        const snap = await docRef.get();
 
-    if (!snap.exists) {
-      // Default initial operational state
-      const defaultState = {
-        branchId,
-        franchiseId: 'olive_pizza_hq',
-        restaurantName: 'Olive Pizza — Rajnandgaon',
-        isOpen: true,
-        acceptingOrders: true,
-        closeReason: '',
-        currentPrepTime: 25,
-        services: {
-          delivery: true,
-          takeaway: true,
-          dineIn: true
-        },
-        deliverySettings: {
-          radiusKm: 12,
-          minOrderAmount: 199,
-          baseDeliveryFee: 40,
-          freeDeliveryThreshold: 499,
-          estimatedDeliveryMins: 30
-        },
-        paymentSettings: {
-          cashOnDelivery: true,
-          upi: true,
-          cards: true,
-          onlineGateway: true
-        },
-        taxAndCharges: {
-          gstPercentage: 5,
-          packagingCharge: 20,
-          serviceChargePercentage: 0
-        },
-        operatingHours: {
-          monday: { open: '10:00', close: '23:00', isOpen: true },
-          tuesday: { open: '10:00', close: '23:00', isOpen: true },
-          wednesday: { open: '10:00', close: '23:00', isOpen: true },
-          thursday: { open: '10:00', close: '23:00', isOpen: true },
-          friday: { open: '10:00', close: '23:30', isOpen: true },
-          saturday: { open: '10:00', close: '23:30', isOpen: true },
-          sunday: { open: '10:00', close: '23:30', isOpen: true }
-        },
-        specialHours: [],
-        updatedAt: new Date().toISOString(),
-        updatedBy: 'system'
-      };
+        if (!snap.exists) {
+          // Default initial operational state
+          const defaultState = {
+            branchId,
+            franchiseId: 'olive_pizza_hq',
+            restaurantName: 'Olive Pizza — Rajnandgaon',
+            isOpen: true,
+            acceptingOrders: true,
+            closeReason: '',
+            currentPrepTime: 25,
+            services: {
+              delivery: true,
+              takeaway: true,
+              dineIn: true
+            },
+            deliverySettings: {
+              radiusKm: 12,
+              minOrderAmount: 199,
+              baseDeliveryFee: 40,
+              freeDeliveryThreshold: 499,
+              estimatedDeliveryMins: 30
+            },
+            paymentSettings: {
+              cashOnDelivery: true,
+              upi: true,
+              cards: true,
+              onlineGateway: true
+            },
+            taxAndCharges: {
+              gstPercentage: 5,
+              packagingCharge: 20,
+              serviceChargePercentage: 0
+            },
+            operatingHours: {
+              monday: { open: '10:00', close: '23:00', isOpen: true },
+              tuesday: { open: '10:00', close: '23:00', isOpen: true },
+              wednesday: { open: '10:00', close: '23:00', isOpen: true },
+              thursday: { open: '10:00', close: '23:00', isOpen: true },
+              friday: { open: '10:00', close: '23:30', isOpen: true },
+              saturday: { open: '10:00', close: '23:30', isOpen: true },
+              sunday: { open: '10:00', close: '23:30', isOpen: true }
+            },
+            specialHours: [],
+            updatedAt: new Date().toISOString(),
+            updatedBy: 'system'
+          };
 
-      await docRef.set(defaultState);
-      const effective = computeEffectiveStatus(defaultState);
-      return res.json({ success: true, data: { ...defaultState, effective } });
-    }
+          await docRef.set(defaultState);
+          const effective = computeEffectiveStatus(defaultState);
+          return { ...defaultState, effective };
+        }
 
-    const data = snap.data() || {};
-    const effective = computeEffectiveStatus(data);
-    res.json({ success: true, data: { ...data, effective } });
+        const data = snap.data() || {};
+        const effective = computeEffectiveStatus(data);
+        return { ...data, effective };
+      },
+      { ttlSeconds: 60, jitterSeconds: 15 }
+    );
+
+    res.json({ success: true, data: statusData });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }

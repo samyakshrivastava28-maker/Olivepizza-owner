@@ -1,11 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
 import { DataExpiryJob } from '../jobs/DataExpiryJob.js';
+import { redisService } from '../services/redis/RedisService.js';
 
 const router = Router();
 
 let cachedCoupons: any[] | null = null;
-let cacheExpiryTime = 0;
 
 /**
  * GET /api/coupons
@@ -13,48 +13,50 @@ let cacheExpiryTime = 0;
  */
 router.get('/', async (_req: Request, res: Response) => {
   try {
-    const now = new Date();
-    if (cachedCoupons && Date.now() < cacheExpiryTime) {
-      return res.json({ success: true, coupons: cachedCoupons, cached: true });
-    }
+    const activeCoupons = await redisService.fetchWithStampedeProtection<any[]>(
+      'cache:coupons:active',
+      async () => {
+        const now = new Date();
+        const snap = await adminDb.collection('coupons').where('isActive', '==', true).get();
+        const list: any[] = [];
 
-    const snap = await adminDb.collection('coupons').where('isActive', '==', true).get();
-    const activeCoupons: any[] = [];
+        snap.forEach((doc) => {
+          const data = doc.data();
+          const expiryDate = DataExpiryJob.extractExpiryDate(data);
+          if (expiryDate && expiryDate < now) {
+            // Asynchronously archive expired coupon
+            doc.ref.update({ isActive: false, isArchived: true, autoExpiredAt: now.toISOString() }).catch(() => {});
+            return;
+          }
 
-    snap.forEach((doc) => {
-      const data = doc.data();
-      const expiryDate = DataExpiryJob.extractExpiryDate(data);
-      if (expiryDate && expiryDate < now) {
-        // Asynchronously archive expired coupon
-        doc.ref.update({ isActive: false, isArchived: true, autoExpiredAt: now.toISOString() }).catch(() => {});
-        return;
-      }
+          // Check start date
+          if (data.startDate) {
+            const start = new Date(data.startDate);
+            if (!isNaN(start.getTime()) && now < start) return;
+          }
 
-      // Check start date
-      if (data.startDate) {
-        const start = new Date(data.startDate);
-        if (!isNaN(start.getTime()) && now < start) return;
-      }
+          list.push({
+            id: doc.id,
+            code: data.code,
+            type: data.type || 'percentage',
+            discountType: data.discountType || data.type || 'percentage',
+            discountValue: data.discountValue || 0,
+            minOrderValue: data.minOrderValue || data.minOrderAmount || 0,
+            maxDiscount: data.maxDiscount || data.maxDiscountAmount || 0,
+            startDate: data.startDate || null,
+            endDate: data.endDate || data.expiryDate || null,
+            expiryDate: data.expiryDate || data.endDate || null,
+            description: data.description || '',
+            tiers: data.tiers || [],
+            isFirstOrderOnly: data.isFirstOrderOnly || false,
+          });
+        });
 
-      activeCoupons.push({
-        id: doc.id,
-        code: data.code,
-        type: data.type || 'percentage',
-        discountType: data.discountType || data.type || 'percentage',
-        discountValue: data.discountValue || 0,
-        minOrderValue: data.minOrderValue || data.minOrderAmount || 0,
-        maxDiscount: data.maxDiscount || data.maxDiscountAmount || 0,
-        startDate: data.startDate || null,
-        endDate: data.endDate || data.expiryDate || null,
-        expiryDate: data.expiryDate || data.endDate || null,
-        description: data.description || '',
-        tiers: data.tiers || [],
-        isFirstOrderOnly: data.isFirstOrderOnly || false,
-      });
-    });
-
-    cachedCoupons = activeCoupons;
-    cacheExpiryTime = Date.now() + 5000; // 5 seconds TTL
+        cachedCoupons = list;
+        return list;
+      },
+      { ttlSeconds: 120, jitterSeconds: 20 }
+    );
 
     res.json({ success: true, coupons: activeCoupons });
   } catch (error: any) {

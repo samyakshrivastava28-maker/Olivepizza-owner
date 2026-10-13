@@ -3,6 +3,7 @@ import { adminDb } from '../config/firebase.js';
 import { verifyToken, AuthRequest, requireRole } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { webSocketServer } from '../services/websocket/WebSocketServer.js';
+import { redisService } from '../services/redis/RedisService.js';
 
 const router = Router();
 
@@ -12,70 +13,77 @@ const router = Router();
 
 router.get('/master-catalog', async (req: Request, res: Response): Promise<void> => {
   try {
-    const pSnap = await adminDb.collection('products').get();
-    let products = pSnap.docs.map(doc => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        name: data.productName || data.name || 'Master Product',
-        description: data.description || '',
-        category: data.category || 'Pizzas',
-        basePrice: Number(data.basePrice || data.price || 299),
-        imageUrl: data.imageUrl || data.image || '',
-        isVegetarian: data.isVegetarian ?? true,
-        isGlobalActive: data.isActive ?? data.isAvailable ?? true,
-        allSizes: data.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
-        allCrusts: data.crusts || ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst', 'Wheat Crust'],
-        allAddons: data.addons || [
-          { id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 },
-          { id: 'add_jalapeno', name: 'Pickled Jalapenos', price: 40 },
-          { id: 'add_olives', name: 'Black Olives', price: 45 },
-          { id: 'add_mushrooms', name: 'Fresh Mushrooms', price: 45 }
-        ],
-        defaultChannels: data.channelAvailability || {
-          online: true,
-          dineIn: true,
-          takeaway: true,
-          posDelivery: true
-        },
-        createdAt: data.createdAt || new Date().toISOString()
-      };
-    });
+    const products = await redisService.fetchWithStampedeProtection<any[]>(
+      'cache:master_catalog',
+      async () => {
+        const pSnap = await adminDb.collection('products').get();
+        let prods = pSnap.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            name: data.productName || data.name || 'Master Product',
+            description: data.description || '',
+            category: data.category || 'Pizzas',
+            basePrice: Number(data.basePrice || data.price || 299),
+            imageUrl: data.imageUrl || data.image || '',
+            isVegetarian: data.isVegetarian ?? true,
+            isGlobalActive: data.isActive ?? data.isAvailable ?? true,
+            allSizes: data.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
+            allCrusts: data.crusts || ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst', 'Wheat Crust'],
+            allAddons: data.addons || [
+              { id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 },
+              { id: 'add_jalapeno', name: 'Pickled Jalapenos', price: 40 },
+              { id: 'add_olives', name: 'Black Olives', price: 45 },
+              { id: 'add_mushrooms', name: 'Fresh Mushrooms', price: 45 }
+            ],
+            defaultChannels: data.channelAvailability || {
+              online: true,
+              dineIn: true,
+              takeaway: true,
+              posDelivery: true
+            },
+            createdAt: data.createdAt || new Date().toISOString()
+          };
+        });
 
-    if (products.length === 0) {
-      products = [
-        {
-          id: 'prod_margherita',
-          name: 'Classic Margherita',
-          description: 'San Marzano tomatoes, fresh mozzarella, and sweet basil.',
-          category: 'Pizzas',
-          basePrice: 199,
-          imageUrl: 'https://images.unsplash.com/photo-1574071318508-1cdbab80d002?w=400',
-          isVegetarian: true,
-          isGlobalActive: true,
-          allSizes: ['Regular (7")', 'Medium (10")', 'Large (12")'],
-          allCrusts: ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst'],
-          allAddons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }],
-          defaultChannels: { online: true, dineIn: true, takeaway: true, posDelivery: true },
-          createdAt: new Date().toISOString()
-        },
-        {
-          id: 'prod_farmhouse',
-          name: 'Farmhouse Special Pizza',
-          description: 'Crunchy capsicum, sweet corn, mushrooms, and onions.',
-          category: 'Pizzas',
-          basePrice: 349,
-          imageUrl: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=400',
-          isVegetarian: true,
-          isGlobalActive: true,
-          allSizes: ['Regular (7")', 'Medium (10")', 'Large (12")'],
-          allCrusts: ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst'],
-          allAddons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }],
-          defaultChannels: { online: true, dineIn: true, takeaway: true, posDelivery: true },
-          createdAt: new Date().toISOString()
+        if (prods.length === 0) {
+          prods = [
+            {
+              id: 'prod_margherita',
+              name: 'Classic Margherita',
+              description: 'San Marzano tomatoes, fresh mozzarella, and sweet basil.',
+              category: 'Pizzas',
+              basePrice: 199,
+              imageUrl: 'https://images.unsplash.com/photo-1574071318508-1cdbab80d002?w=400',
+              isVegetarian: true,
+              isGlobalActive: true,
+              allSizes: ['Regular (7")', 'Medium (10")', 'Large (12")'],
+              allCrusts: ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst'],
+              allAddons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }],
+              defaultChannels: { online: true, dineIn: true, takeaway: true, posDelivery: true },
+              createdAt: new Date().toISOString()
+            },
+            {
+              id: 'prod_farmhouse',
+              name: 'Farmhouse Special Pizza',
+              description: 'Crunchy capsicum, sweet corn, mushrooms, and onions.',
+              category: 'Pizzas',
+              basePrice: 349,
+              imageUrl: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=400',
+              isVegetarian: true,
+              isGlobalActive: true,
+              allSizes: ['Regular (7")', 'Medium (10")', 'Large (12")'],
+              allCrusts: ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst'],
+              allAddons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }],
+              defaultChannels: { online: true, dineIn: true, takeaway: true, posDelivery: true },
+              createdAt: new Date().toISOString()
+            }
+          ];
         }
-      ];
-    }
+        return prods;
+      },
+      { ttlSeconds: 300, jitterSeconds: 30 }
+    );
 
     res.json({
       success: true,
@@ -146,6 +154,9 @@ router.post('/master-products', verifyToken, requireRole(['owner', 'admin', 'dev
       }
     });
 
+    // Purge cached catalogs so customer & staff apps receive fresh data instantly
+    await redisService.invalidateMenu();
+
     res.json({ success: true, message: 'Master product saved successfully', product: productPayload });
   } catch (error: any) {
     console.error('[MenuRoutes] Error creating master product:', error);
@@ -187,6 +198,9 @@ router.delete(['/master-products/:id', '/products/:id', '/:id'], verifyToken, re
       type: 'product.deleted',
       data: { productId: id, action: 'delete', timestamp: new Date().toISOString() }
     });
+
+    // Purge cached catalogs
+    await redisService.invalidateMenu();
 
     res.json({
       success: true,
@@ -231,6 +245,9 @@ router.post(['/master-products/:id/delete', '/products/:id/delete', '/:id/delete
       data: { productId, action: 'delete', timestamp: new Date().toISOString() }
     });
 
+    // Purge cached catalogs
+    await redisService.invalidateMenu();
+
     res.json({
       success: true,
       message: `Product ${productId} deleted successfully`,
@@ -250,50 +267,59 @@ router.get('/branch/:branchId', async (req: Request, res: Response): Promise<voi
   try {
     const { branchId } = req.params;
     const channel = (req.query.channel as string || 'ONLINE').toUpperCase();
-    const pSnap = await adminDb.collection('products').get();
-    let masterProducts = pSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
-    if (masterProducts.length === 0) {
-      masterProducts = [
-        { id: 'prod_margherita', name: 'Classic Margherita', category: 'Pizzas', basePrice: 199, variants: ['Regular (7")', 'Medium (10")', 'Large (12")'], crusts: ['Classic Hand Tossed', 'Thin Crust'], addons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }], channelAvailability: { online: true, dineIn: true, takeaway: true, posDelivery: true } },
-        { id: 'prod_farmhouse', name: 'Farmhouse Special Pizza', category: 'Pizzas', basePrice: 349, variants: ['Regular (7")', 'Medium (10")', 'Large (12")'], crusts: ['Classic Hand Tossed', 'Thin Crust'], addons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }], channelAvailability: { online: true, dineIn: true, takeaway: true, posDelivery: true } }
-      ];
-    }
-    const oSnap = await adminDb.collection('branch_menu_overrides').where('branchId', '==', branchId).get().catch(() => ({ docs: [] } as any));
-    const overridesMap = new Map<string, any>();
-    oSnap.docs.forEach((d: any) => overridesMap.set(d.data().productId, d.data()));
-    const branchProducts = masterProducts.map(mp => {
-      const override = overridesMap.get(mp.id);
-      const isEnabled = override ? override.isEnabledForBranch : (mp.isActive ?? true);
-      const stockStatus = override?.stockStatus || (mp.isAvailable !== false ? 'IN_STOCK' : 'OUT_OF_STOCK');
-      const channels = override?.channelAvailability || mp.channelAvailability || { online: true, dineIn: true, takeaway: true, posDelivery: true };
-      const allowedSizes = override?.allowedSizes || mp.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'];
-      const allowedCrusts = override?.allowedCrusts || mp.crusts || ['Classic Hand Tossed', 'Thin Crust'];
-      const allowedAddons = override?.allowedAddons || mp.addons || [];
-      let channelMatch = true;
-      if (channel === 'ONLINE' && !channels.online) channelMatch = false;
-      if (channel === 'POS' && !channels.dineIn && !channels.takeaway && !channels.posDelivery) channelMatch = false;
-      if (channel === 'DINE_IN' && !channels.dineIn) channelMatch = false;
-      if (channel === 'TAKEAWAY' && !channels.takeaway) channelMatch = false;
-      if (channel === 'POS_DELIVERY' && !channels.posDelivery) channelMatch = false;
-      if (!isEnabled || !channelMatch) return null;
-      return {
-        id: mp.id,
-        name: mp.productName || mp.name,
-        description: mp.description || '',
-        category: mp.category || 'Pizzas',
-        basePrice: override?.customPrice || mp.basePrice || mp.price || 299,
-        price: override?.customPrice || mp.basePrice || mp.price || 299,
-        imageUrl: mp.imageUrl || mp.image || 'https://res.cloudinary.com/dxmlvkff1/image/upload/v1786517437/olive-pizza/ai-product-images/dv4uty06rq4tznlpqz2i.jpg',
-        isVegetarian: mp.isVegetarian ?? true,
-        stockStatus,
-        isAvailable: stockStatus === 'IN_STOCK',
-        allowedSizes,
-        allowedCrusts,
-        allowedAddons,
-        channelAvailability: channels,
-        isPhysicalOnly: !channels.online
-      };
-    }).filter(Boolean);
+    const cacheKey = `cache:menu:branch:${branchId}:${channel}`;
+
+    const branchProducts = await redisService.fetchWithStampedeProtection<any[]>(
+      cacheKey,
+      async () => {
+        const pSnap = await adminDb.collection('products').get();
+        let masterProducts = pSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+        if (masterProducts.length === 0) {
+          masterProducts = [
+            { id: 'prod_margherita', name: 'Classic Margherita', category: 'Pizzas', basePrice: 199, variants: ['Regular (7")', 'Medium (10")', 'Large (12")'], crusts: ['Classic Hand Tossed', 'Thin Crust'], addons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }], channelAvailability: { online: true, dineIn: true, takeaway: true, posDelivery: true } },
+            { id: 'prod_farmhouse', name: 'Farmhouse Special Pizza', category: 'Pizzas', basePrice: 349, variants: ['Regular (7")', 'Medium (10")', 'Large (12")'], crusts: ['Classic Hand Tossed', 'Thin Crust'], addons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }], channelAvailability: { online: true, dineIn: true, takeaway: true, posDelivery: true } }
+          ];
+        }
+        const oSnap = await adminDb.collection('branch_menu_overrides').where('branchId', '==', branchId).get().catch(() => ({ docs: [] } as any));
+        const overridesMap = new Map<string, any>();
+        oSnap.docs.forEach((d: any) => overridesMap.set(d.data().productId, d.data()));
+        return masterProducts.map(mp => {
+          const override = overridesMap.get(mp.id);
+          const isEnabled = override ? override.isEnabledForBranch : (mp.isActive ?? true);
+          const stockStatus = override?.stockStatus || (mp.isAvailable !== false ? 'IN_STOCK' : 'OUT_OF_STOCK');
+          const channels = override?.channelAvailability || mp.channelAvailability || { online: true, dineIn: true, takeaway: true, posDelivery: true };
+          const allowedSizes = override?.allowedSizes || mp.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'];
+          const allowedCrusts = override?.allowedCrusts || mp.crusts || ['Classic Hand Tossed', 'Thin Crust'];
+          const allowedAddons = override?.allowedAddons || mp.addons || [];
+          let channelMatch = true;
+          if (channel === 'ONLINE' && !channels.online) channelMatch = false;
+          if (channel === 'POS' && !channels.dineIn && !channels.takeaway && !channels.posDelivery) channelMatch = false;
+          if (channel === 'DINE_IN' && !channels.dineIn) channelMatch = false;
+          if (channel === 'TAKEAWAY' && !channels.takeaway) channelMatch = false;
+          if (channel === 'POS_DELIVERY' && !channels.posDelivery) channelMatch = false;
+          if (!isEnabled || !channelMatch) return null;
+          return {
+            id: mp.id,
+            name: mp.productName || mp.name,
+            description: mp.description || '',
+            category: mp.category || 'Pizzas',
+            basePrice: override?.customPrice || mp.basePrice || mp.price || 299,
+            price: override?.customPrice || mp.basePrice || mp.price || 299,
+            imageUrl: mp.imageUrl || mp.image || 'https://res.cloudinary.com/dxmlvkff1/image/upload/v1786517437/olive-pizza/ai-product-images/dv4uty06rq4tznlpqz2i.jpg',
+            isVegetarian: mp.isVegetarian ?? true,
+            stockStatus,
+            isAvailable: stockStatus === 'IN_STOCK',
+            allowedSizes,
+            allowedCrusts,
+            allowedAddons,
+            channelAvailability: channels,
+            isPhysicalOnly: !channels.online
+          };
+        }).filter(Boolean);
+      },
+      { ttlSeconds: 300, jitterSeconds: 30 }
+    );
+
     res.json({ success: true, branchId, channel, count: branchProducts.length, products: branchProducts });
   } catch (error: any) {
     console.error('[MenuRoutes] Error fetching branch menu:', error);
@@ -367,6 +393,9 @@ router.post('/branch/:branchId/toggle', verifyToken, requireRole(['restaurant_ma
       data: { branchId, productId, isEnabledForBranch: isEnabled, timestamp: nowIso }
     });
 
+    // Invalidate cached branch menu
+    await redisService.invalidateMenu(branchId);
+
     res.json({ success: true, message: 'Product ' + productId + ' ' + (isEnabled ? 'enabled' : 'disabled') + ' for branch ' + branchId, branchId, productId, isEnabledForBranch: isEnabled });
   } catch (error: any) {
     console.error('[MenuRoutes] Error toggling branch product:', error);
@@ -402,6 +431,9 @@ router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restau
       data: { branchId, productId, override: overrideData, timestamp: nowIso }
     });
 
+    // Invalidate cached branch menu
+    await redisService.invalidateMenu(branchId);
+
     res.json({ success: true, message: 'Customizations updated for product ' + productId + ' in branch ' + branchId, override: overrideData });
   } catch (error: any) {
     console.error('[MenuRoutes] Error saving branch customizations:', error);
@@ -435,6 +467,9 @@ router.post('/branch/:branchId/stock-status', verifyToken, requireRole(['cashier
       type: 'stock.updated',
       data: { branchId, productId, stockStatus: normalizedStock, inStock: normalizedStock === 'IN_STOCK', timestamp: nowIso }
     });
+
+    // Invalidate cached branch menu
+    await redisService.invalidateMenu(branchId);
 
     res.json({ success: true, message: 'Stock status updated for ' + productId, branchId, productId, stockStatus: normalizedStock });
   } catch (error: any) {
@@ -476,6 +511,10 @@ router.post('/branch/:branchId/local-product', verifyToken, requireRole(['restau
       channelAvailability: { online: false, dineIn: true, takeaway: true, posDelivery: false },
       stockStatus: 'IN_STOCK'
     });
+
+    // Invalidate cached branch menu
+    await redisService.invalidateMenu(branchId);
+
     res.status(201).json({ success: true, message: 'Local physical-only product created for branch ' + branchId, product: productData });
   } catch (error: any) {
     console.error('[MenuRoutes] Error creating local product:', error);
@@ -485,25 +524,31 @@ router.post('/branch/:branchId/local-product', verifyToken, requireRole(['restau
 
 router.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
-    const pSnap = await adminDb.collection('products').get();
-    const items = pSnap.docs.map(doc => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        name: data.productName || data.name || 'Artisan Woodfired Pizza',
-        productName: data.productName || data.name || 'Artisan Woodfired Pizza',
-        description: data.description || 'Handcrafted 100% Pure Vegetarian delicacy from Olive Pizza stone ovens.',
-        basePrice: Number(data.basePrice || data.price || 299),
-        price: Number(data.basePrice || data.price || 299),
-        category: data.category || 'pizza',
-        image: data.imageUrl || data.image || 'https://res.cloudinary.com/dxmlvkff1/image/upload/v1786517437/olive-pizza/ai-product-images/dv4uty06rq4tznlpqz2i.jpg',
-        isVegetarian: data.isVegetarian ?? true,
-        isAvailable: data.isActive ?? data.isAvailable ?? true,
-        variants: data.variants || [],
-        crusts: data.crusts || [],
-        addons: data.addons || []
-      };
-    });
+    const items = await redisService.fetchWithStampedeProtection<any[]>(
+      'cache:menu:all',
+      async () => {
+        const pSnap = await adminDb.collection('products').get();
+        return pSnap.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            name: data.productName || data.name || 'Artisan Woodfired Pizza',
+            productName: data.productName || data.name || 'Artisan Woodfired Pizza',
+            description: data.description || 'Handcrafted 100% Pure Vegetarian delicacy from Olive Pizza stone ovens.',
+            basePrice: Number(data.basePrice || data.price || 299),
+            price: Number(data.basePrice || data.price || 299),
+            category: data.category || 'pizza',
+            image: data.imageUrl || data.image || 'https://res.cloudinary.com/dxmlvkff1/image/upload/v1786517437/olive-pizza/ai-product-images/dv4uty06rq4tznlpqz2i.jpg',
+            isVegetarian: data.isVegetarian ?? true,
+            isAvailable: data.isActive ?? data.isAvailable ?? true,
+            variants: data.variants || [],
+            crusts: data.crusts || [],
+            addons: data.addons || []
+          };
+        });
+      },
+      { ttlSeconds: 300, jitterSeconds: 30 }
+    );
     res.json({ success: true, count: items.length, items });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

@@ -8,6 +8,7 @@ import { POSService } from '../services/pos/POSService.js';
 import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 import { computeEffectiveStatus } from './restaurant.routes.js';
 import { DataExpiryJob } from '../jobs/DataExpiryJob.js';
+import { redisService } from '../services/redis/RedisService.js';
 
 const router = Router();
 
@@ -95,15 +96,21 @@ router.get(['/home/bootstrap', '/v1/home/bootstrap'], optionalAuth, async (req: 
   const userUid = req.user?.uid;
 
   try {
-    // 5 parallel promises bounded with Promise.all
-    const [
-      featuredProductsRaw,
-      categoriesRaw,
-      offersRaw,
-      storeSettingsRaw,
-      userStateRaw
-    ] = await Promise.all([
-      // 1. Featured products (limit 8)
+    const baseData = await redisService.fetchWithStampedeProtection<{
+      featuredProductsRaw: any[];
+      categoriesRaw: any[];
+      offersRaw: any[];
+      storeSettingsRaw: any;
+    }>(
+      `bootstrap:home:base:${branchId}`,
+      async () => {
+        const [
+          featuredProductsRaw,
+          categoriesRaw,
+          offersRaw,
+          storeSettingsRaw
+        ] = await Promise.all([
+          // 1. Featured products (limit 8)
       (async () => {
         try {
           const snap = await adminDb.collection('products')
@@ -262,91 +269,98 @@ router.get(['/home/bootstrap', '/v1/home/bootstrap'], optionalAuth, async (req: 
             }
           };
         }
-      })(),
-
-      // 5. Authenticated user context (current active order & unread count)
-      (async () => {
-        if (!userUid) {
-          return { activeOrderSummary: null, unreadNotifications: 0 };
-        }
-
-        try {
-          const [orderRes, unreadCount] = await Promise.all([
-            // Active customer order
-            (async () => {
-              try {
-                const activeStatuses = ['pending', 'accepted', 'preparing', 'partner_assigned', 'ready', 'picked_up', 'out_for_delivery'];
-                const snap = await adminDb.collection('orders')
-                  .where('customerId', '==', userUid)
-                  .where('status', 'in', activeStatuses)
-                  .orderBy('createdAt', 'desc')
-                  .limit(1)
-                  .get()
-                  .catch(async () => {
-                    return await adminDb.collection('orders')
-                      .where('userId', '==', userUid)
-                      .where('status', 'in', activeStatuses)
-                      .orderBy('createdAt', 'desc')
-                      .limit(1)
-                      .get()
-                      .catch(() => ({ empty: true, docs: [] } as any));
-                  });
-
-                if (snap.empty) return null;
-                const oDoc = snap.docs[0];
-                const oData = oDoc.data();
-                return {
-                  id: oDoc.id,
-                  orderNumber: oData.orderNumber || oDoc.id.slice(-6).toUpperCase(),
-                  status: oData.status,
-                  totalAmount: Number(oData.totalAmount || oData.finalTotal || 0),
-                  itemsCount: Array.isArray(oData.items) ? oData.items.length : 0,
-                  createdAt: oData.createdAt,
-                  estimatedDeliveryTime: oData.estimatedDeliveryTime || '25-35 mins'
-                };
-              } catch {
-                return null;
-              }
-            })(),
-
-            // Unread notifications count
-            (async () => {
-              try {
-                if (pgPool) {
-                  const client = await pgPool.connect();
-                  try {
-                    const qRes = await client.query(
-                      `SELECT COUNT(*) FROM notification_inbox WHERE user_id = $1 AND is_read = false`,
-                      [userUid]
-                    );
-                    return parseInt(qRes.rows[0]?.count || '0', 10);
-                  } finally {
-                    client.release();
-                  }
-                }
-              } catch {}
-              return 0;
-            })()
-          ]);
-
-          return {
-            activeOrderSummary: orderRes,
-            unreadNotifications: unreadCount
-          };
-        } catch {
-          return { activeOrderSummary: null, unreadNotifications: 0 };
-        }
       })()
     ]);
 
+        return {
+          featuredProductsRaw,
+          categoriesRaw,
+          offersRaw,
+          storeSettingsRaw
+        };
+      },
+      { ttlSeconds: 180, jitterSeconds: 30 }
+    );
+
+    // Authenticated user context (current active order & unread count)
+    let userState = { activeOrderSummary: null as any, unreadNotifications: 0 };
+    if (userUid) {
+      try {
+        const [orderRes, unreadCount] = await Promise.all([
+          // Active customer order
+          (async () => {
+            try {
+              const activeStatuses = ['pending', 'accepted', 'preparing', 'partner_assigned', 'ready', 'picked_up', 'out_for_delivery'];
+              const snap = await adminDb.collection('orders')
+                .where('customerId', '==', userUid)
+                .where('status', 'in', activeStatuses)
+                .orderBy('createdAt', 'desc')
+                .limit(1)
+                .get()
+                .catch(async () => {
+                  return await adminDb.collection('orders')
+                    .where('userId', '==', userUid)
+                    .where('status', 'in', activeStatuses)
+                    .orderBy('createdAt', 'desc')
+                    .limit(1)
+                    .get()
+                    .catch(() => ({ empty: true, docs: [] } as any));
+                });
+
+              if (snap.empty) return null;
+              const oDoc = snap.docs[0];
+              const oData = oDoc.data();
+              return {
+                id: oDoc.id,
+                orderNumber: oData.orderNumber || oDoc.id.slice(-6).toUpperCase(),
+                status: oData.status,
+                totalAmount: Number(oData.totalAmount || oData.finalTotal || 0),
+                itemsCount: Array.isArray(oData.items) ? oData.items.length : 0,
+                createdAt: oData.createdAt,
+                estimatedDeliveryTime: oData.estimatedDeliveryTime || '25-35 mins'
+              };
+            } catch {
+              return null;
+            }
+          })(),
+
+          // Unread notifications count
+          (async () => {
+            try {
+              if (pgPool) {
+                const client = await pgPool.connect();
+                try {
+                  const qRes = await client.query(
+                    `SELECT COUNT(*) FROM notification_inbox WHERE user_id = $1 AND is_read = false`,
+                    [userUid]
+                  );
+                  return parseInt(qRes.rows[0]?.count || '0', 10);
+                } finally {
+                  client.release();
+                }
+              }
+            } catch {}
+            return 0;
+          })()
+        ]);
+
+        userState = {
+          activeOrderSummary: orderRes,
+          unreadNotifications: unreadCount
+        };
+      } catch {
+        userState = { activeOrderSummary: null, unreadNotifications: 0 };
+      }
+    }
+
     res.json({
       success: true,
-      categories: categoriesRaw,
-      featuredProducts: featuredProductsRaw,
-      offers: offersRaw,
-      storeStatus: storeSettingsRaw,
-      activeOrderSummary: userStateRaw.activeOrderSummary,
-      unreadNotifications: userStateRaw.unreadNotifications
+      categories: baseData.categoriesRaw,
+      featuredProducts: baseData.featuredProductsRaw,
+      offers: baseData.offersRaw,
+      storeStatus: baseData.storeSettingsRaw,
+      activeOrderSummary: userState.activeOrderSummary,
+      unreadNotifications: userState.unreadNotifications
     });
   } catch (error: any) {
     console.error('[Bootstrap] Home bootstrap error:', error);
@@ -372,13 +386,21 @@ router.get(['/menu/bootstrap', '/v1/menu/bootstrap'], async (req: AuthRequest, r
   const branchId = (req.query.branchId as string) || DEFAULT_BRANCH_ID;
 
   try {
-    const [
-      categoriesRaw,
-      productsRaw,
-      offersRaw,
-      availabilityMap
-    ] = await Promise.all([
-      // 1. Categories
+    const data = await redisService.fetchWithStampedeProtection<{
+      categories: any[];
+      products: any[];
+      offers: any[];
+      availability: Record<string, any>;
+    }>(
+      `bootstrap:menu:${branchId}`,
+      async () => {
+        const [
+          categoriesRaw,
+          productsRaw,
+          offersRaw,
+          availabilityMap
+        ] = await Promise.all([
+          // 1. Categories
       (async () => {
         try {
           const snap = await adminDb.collection('categories').get();
@@ -521,12 +543,19 @@ router.get(['/menu/bootstrap', '/v1/menu/bootstrap'], async (req: AuthRequest, r
       })()
     ]);
 
+        return {
+          categories: categoriesRaw,
+          products: productsRaw,
+          offers: offersRaw,
+          availability: availabilityMap
+        };
+      },
+      { ttlSeconds: 300, jitterSeconds: 30 }
+    );
+
     res.json({
       success: true,
-      categories: categoriesRaw,
-      products: productsRaw,
-      offers: offersRaw,
-      availability: availabilityMap
+      ...data
     });
   } catch (error: any) {
     console.error('[Bootstrap] Menu bootstrap error:', error);
@@ -734,83 +763,98 @@ router.get(['/cart/bootstrap', '/v1/cart/bootstrap'], async (req: AuthRequest, r
   const branchId = (req.query.branchId as string) || DEFAULT_BRANCH_ID;
 
   try {
-    const [couponsRaw, settingsRaw, remoteConfigRaw] = await Promise.all([
-      // 1. Active coupons whitelist & rules
-      (async () => {
-        try {
-          const snap = await adminDb.collection('coupons').where('isActive', '==', true).get();
-          const activeCoupons: any[] = [];
-          const now = new Date();
+    const data = await redisService.fetchWithStampedeProtection<{
+      coupons: any[];
+      deliveryFeeConfig: any;
+      packagingCharge: number;
+      taxRates: any;
+    }>(
+      `bootstrap:cart:${branchId}`,
+      async () => {
+        const [couponsRaw, settingsRaw, remoteConfigRaw] = await Promise.all([
+          // 1. Active coupons whitelist & rules
+          (async () => {
+            try {
+              const snap = await adminDb.collection('coupons').where('isActive', '==', true).get();
+              const activeCoupons: any[] = [];
+              const now = new Date();
 
-          snap.forEach(doc => {
-            const data = doc.data();
-            const expiryDate = DataExpiryJob.extractExpiryDate(data);
-            if (expiryDate && expiryDate < now) return;
+              snap.forEach(doc => {
+                const data = doc.data();
+                const expiryDate = DataExpiryJob.extractExpiryDate(data);
+                if (expiryDate && expiryDate < now) return;
 
-            activeCoupons.push({
-              id: doc.id,
-              code: data.code,
-              type: data.type || 'percentage',
-              discountType: data.discountType || data.type || 'percentage',
-              discountValue: data.discountValue || 0,
-              minOrderValue: data.minOrderValue || data.minOrderAmount || 0,
-              maxDiscount: data.maxDiscount || data.maxDiscountAmount || 0,
-              description: data.description || '',
-              isFirstOrderOnly: data.isFirstOrderOnly || false,
-              tiers: data.tiers || []
-            });
-          });
+                activeCoupons.push({
+                  id: doc.id,
+                  code: data.code,
+                  type: data.type || 'percentage',
+                  discountType: data.discountType || data.type || 'percentage',
+                  discountValue: data.discountValue || 0,
+                  minOrderValue: data.minOrderValue || data.minOrderAmount || 0,
+                  maxDiscount: data.maxDiscount || data.maxDiscountAmount || 0,
+                  description: data.description || '',
+                  isFirstOrderOnly: data.isFirstOrderOnly || false,
+                  tiers: data.tiers || []
+                });
+              });
 
-          return activeCoupons;
-        } catch {
-          return [];
-        }
-      })(),
+              return activeCoupons;
+            } catch {
+              return [];
+            }
+          })(),
 
-      // 2. Branch restaurant settings (delivery fees, tax & charges)
-      (async () => {
-        try {
-          const snap = await adminDb.collection('restaurant_settings').doc(branchId).get();
-          if (snap.exists) return snap.data()!;
-        } catch {}
-        return null;
-      })(),
+          // 2. Branch restaurant settings (delivery fees, tax & charges)
+          (async () => {
+            try {
+              const snap = await adminDb.collection('restaurant_settings').doc(branchId).get();
+              if (snap.exists) return snap.data()!;
+            } catch {}
+            return null;
+          })(),
 
-      // 3. Global Remote Config fallback for delivery fees
-      (async () => {
-        try {
-          const snap = await adminDb.collection('remote_configs').doc('customer').get();
-          if (snap.exists) return snap.data()!;
-        } catch {}
-        return null;
-      })()
-    ]);
+          // 3. Global Remote Config fallback for delivery fees
+          (async () => {
+            try {
+              const snap = await adminDb.collection('remote_configs').doc('customer').get();
+              if (snap.exists) return snap.data()!;
+            } catch {}
+            return null;
+          })()
+        ]);
 
-    const deliveryConfig = settingsRaw?.deliverySettings || remoteConfigRaw?.delivery || {
-      baseDeliveryFee: 40,
-      freeDeliveryThreshold: 499,
-      maxDeliveryRadiusKm: 12,
-      estimatedDeliveryMins: 30,
-      tiers: [
-        { maxDistanceKm: 3, fee: 20 },
-        { maxDistanceKm: 7, fee: 40 },
-        { maxDistanceKm: 12, fee: 60 }
-      ]
-    };
+        const deliveryConfig = settingsRaw?.deliverySettings || remoteConfigRaw?.delivery || {
+          baseDeliveryFee: 40,
+          freeDeliveryThreshold: 499,
+          maxDeliveryRadiusKm: 12,
+          estimatedDeliveryMins: 30,
+          tiers: [
+            { maxDistanceKm: 3, fee: 20 },
+            { maxDistanceKm: 7, fee: 40 },
+            { maxDistanceKm: 12, fee: 60 }
+          ]
+        };
 
-    const taxRates = settingsRaw?.taxAndCharges || {
-      gstPercentage: 5,
-      serviceChargePercentage: 0
-    };
+        const taxRates = settingsRaw?.taxAndCharges || {
+          gstPercentage: 5,
+          serviceChargePercentage: 0
+        };
 
-    const packagingCharge = Number(settingsRaw?.taxAndCharges?.packagingCharge ?? 20);
+        const packagingCharge = Number(settingsRaw?.taxAndCharges?.packagingCharge ?? 20);
+
+        return {
+          coupons: couponsRaw,
+          deliveryFeeConfig: deliveryConfig,
+          packagingCharge,
+          taxRates
+        };
+      },
+      { ttlSeconds: 180, jitterSeconds: 20 }
+    );
 
     res.json({
       success: true,
-      coupons: couponsRaw,
-      deliveryFeeConfig: deliveryConfig,
-      packagingCharge,
-      taxRates
+      ...data
     });
   } catch (error: any) {
     console.error('[Bootstrap] Cart bootstrap error:', error);

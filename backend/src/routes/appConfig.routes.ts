@@ -1,5 +1,6 @@
-﻿import { Router, Request, Response } from 'express';
+import { Router, Request, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
+import { redisService } from '../services/redis/RedisService.js';
 
 const router = Router();
 
@@ -88,28 +89,33 @@ router.get('/:app', async (req: Request, res: Response) => {
     const appKey = (req.params.app || '').toLowerCase();
     const fallback = DEFAULT_APP_CONFIGS[appKey] || DEFAULT_APP_CONFIGS.customer;
 
-    try {
-      const docSnap = await adminDb.collection('remote_configs').doc(appKey).get();
-      if (docSnap.exists) {
-        return res.json({
-          success: true,
-          data: {
-            ...fallback,
-            ...docSnap.data(),
-            fetchedAt: new Date().toISOString()
+    const data = await redisService.fetchWithStampedeProtection(
+      `cache:app_config:${appKey}`,
+      async () => {
+        try {
+          const docSnap = await adminDb.collection('remote_configs').doc(appKey).get();
+          if (docSnap.exists) {
+            return {
+              ...fallback,
+              ...docSnap.data(),
+              fetchedAt: new Date().toISOString()
+            };
           }
-        });
-      }
-    } catch (e) {
-      // Non-fatal, return fallback
-    }
+        } catch (e) {
+          // Non-fatal, return fallback
+        }
+
+        return {
+          ...fallback,
+          fetchedAt: new Date().toISOString()
+        };
+      },
+      { ttlSeconds: 600, jitterSeconds: 60 }
+    );
 
     return res.json({
       success: true,
-      data: {
-        ...fallback,
-        fetchedAt: new Date().toISOString()
-      }
+      data
     });
   } catch (error: any) {
     return res.status(500).json({

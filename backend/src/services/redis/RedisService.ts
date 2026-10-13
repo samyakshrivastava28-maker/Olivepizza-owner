@@ -313,24 +313,40 @@ class RedisService {
     );
   }
 
+  /**
+   * Delete all keys matching a pattern via non-blocking SCAN
+   */
+  public async delByPattern(pattern: string): Promise<void> {
+    if (!this.isConnected || !this.client) return;
+    try {
+      const namespacedPattern = this.normalizeKey(pattern);
+      let cursor = '0';
+      const keys: string[] = [];
+      do {
+        const [nextCursor, matchedKeys] = await this.client.scan(cursor, 'MATCH', namespacedPattern, 'COUNT', 100);
+        cursor = nextCursor;
+        keys.push(...matchedKeys);
+      } while (cursor !== '0');
+      if (keys.length > 0) {
+        await this.client.del(...keys);
+      }
+    } catch (e: any) {
+      console.warn(`[RedisService] delByPattern error for "${pattern}":`, e?.message);
+    }
+  }
+
   public async invalidateMenu(branchId?: string): Promise<void> {
+    await this.del('cache:master_catalog');
     if (branchId) {
       await this.del(`cache:menu:${branchId}`);
+      await this.delByPattern(`cache:menu:branch:${branchId}:*`);
+      await this.delByPattern(`bootstrap:menu:${branchId}:*`);
     } else {
-      // Invalidate all branch menus via non-blocking scan
-      if (this.isConnected && this.client) {
-        try {
-          let cursor = '0';
-          const keys: string[] = [];
-          do {
-            const [nextCursor, matchedKeys] = await this.client.scan(cursor, 'MATCH', 'cache:menu:*', 'COUNT', 50);
-            cursor = nextCursor;
-            keys.push(...matchedKeys);
-          } while (cursor !== '0');
-          if (keys.length > 0) await this.client.del(...keys);
-        } catch {}
-      }
+      await this.delByPattern('cache:menu:*');
+      await this.delByPattern('bootstrap:menu:*');
     }
+    await this.delByPattern('bootstrap:home:*');
+    await this.delByPattern('bootstrap:pos:*');
   }
 
   /**
