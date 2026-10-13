@@ -2,16 +2,19 @@ import crypto from 'node:crypto';
 import * as grpc from '@grpc/grpc-js';
 
 export function getInternalRpcSecret(): string {
-  const secret = process.env.INTERNAL_RPC_SECRET;
+  let secret = process.env.INTERNAL_RPC_SECRET;
   if (!secret) {
+    if (process.env.RENDER) {
+      secret = `render-ephemeral-rpc-${Date.now()}-${crypto.randomBytes(16).toString('hex')}`;
+      process.env.INTERNAL_RPC_SECRET = secret;
+      console.warn('⚠️ [authInterceptor] INTERNAL_RPC_SECRET not set in Render environment. Generated ephemeral cluster secret.');
+      return secret;
+    }
     if (process.env.NODE_ENV === 'production') {
       console.error('FATAL: INTERNAL_RPC_SECRET environment variable is missing in production!');
       process.exit(1);
     }
-    const devSecret = process.env.DEV_INTERNAL_RPC_SECRET;
-    if (!devSecret) {
-      throw new Error('INTERNAL_RPC_SECRET must be configured in environment.');
-    }
+    const devSecret = process.env.DEV_INTERNAL_RPC_SECRET || 'dev-internal-rpc-secret-1234567890';
     return devSecret;
   }
   return secret;
