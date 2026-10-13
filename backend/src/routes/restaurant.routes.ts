@@ -258,29 +258,6 @@ router.put('/status', async (req: AuthRequest, res: Response) => {
       appEventBus.emit('restaurant:status_changed', { branchId, updates });
     } catch {}
 
-    // Authoritative PostgreSQL Dual-Write
-    try {
-      const { query } = await import('../config/postgres.js');
-      await query(`
-        UPDATE restaurant_branches
-        SET 
-          is_open = COALESCE($1, is_open),
-          accepting_orders = COALESCE($2, accepting_orders),
-          close_reason = COALESCE($3, close_reason),
-          current_prep_time = COALESCE($4, current_prep_time),
-          updated_at = NOW()
-        WHERE branch_id = $5;
-      `, [
-        isOpen !== undefined ? Boolean(isOpen) : null,
-        acceptingOrders !== undefined ? Boolean(acceptingOrders) : null,
-        closeReason !== undefined ? String(closeReason) : null,
-        currentPrepTime !== undefined ? Number(currentPrepTime) : null,
-        branchId
-      ]);
-    } catch (pgErr: any) {
-      console.warn('[RestaurantRoutes] PostgreSQL sync notice:', pgErr.message);
-    }
-
     res.json({ success: true, message: 'Operational status updated successfully' });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

@@ -535,10 +535,10 @@ export class OrderPersistenceArchiveService {
         archivedAt: new Date().toISOString()
       }).catch(() => {});
 
-      // Phase 5: Structured audit log before safe deletion
+      // Phase 5: Structured audit log for successful bill finalization
       await adminDb.collection('order_audit_logs').add({
         orderId,
-        action: 'ORDER_FIRESTORE_DELETE_SUCCESS',
+        action: 'ORDER_STATUTORY_BILL_FINALIZED',
         reason: 'ORDER_TERMINAL_POSTGRES_ARCHIVED',
         permanentBillNo: verification.permanentBillNo,
         dailyOrderNumber: orderData.dailyOrderNumber || null,
@@ -551,15 +551,19 @@ export class OrderPersistenceArchiveService {
         console.warn('[OrderPersistence] Audit log write warning:', auditErr);
       });
 
-      // Phase 6: Perform controlled deletion of the live Firestore order document
-      await orderRef.delete();
+      // Phase 6: Retain order in Firestore as operational source of truth with COMPLETED lifecycle
+      await orderRef.update({
+        lifecycle: 'COMPLETED',
+        permanentBillNo: verification.permanentBillNo,
+        archivedAt: new Date().toISOString()
+      }).catch(() => {});
 
-      console.log(`[OrderArchive] ✅ Order ${orderId} verified in PostgreSQL and safely purged from live Firestore orders collection.`);
+      console.log(`[OrderArchive] ✅ Order ${orderId} statutory bill verified in PostgreSQL and preserved in Firestore as COMPLETED.`);
 
       return {
         success: true,
         orderId,
-        deletedFromFirestore: true,
+        deletedFromFirestore: false,
         permanentBillNo: verification.permanentBillNo
       };
     } catch (err: any) {

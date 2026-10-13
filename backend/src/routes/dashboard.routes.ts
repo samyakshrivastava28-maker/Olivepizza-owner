@@ -270,17 +270,7 @@ router.post('/delivery-partners', async (req: AuthRequest, res: Response) => {
       isOnline !== undefined ? Boolean(isOnline) : true
     ]);
 
-    // Dual-write into app_users for unified auth registry
-    await query(`
-      INSERT INTO app_users (firebase_uid, email, phone, name, role, status, is_active, allowed_apps, updated_at)
-      VALUES ($1, $2, $3, $4, 'delivery_partner', 'APPROVED', true, '["DELIVERY"]'::jsonb, NOW())
-      ON CONFLICT (firebase_uid) DO UPDATE SET
-        name = EXCLUDED.name,
-        phone = EXCLUDED.phone,
-        updated_at = NOW();
-    `, [partnerId, cleanEmail || null, phone || null, name || 'Delivery Partner']).catch((e) => console.warn('[PG User Sync Warning]:', e.message));
-
-    // Optional firestore sync
+    // Authoritative operational sync to Firestore delivery_partners
     try {
       const { adminDb } = await import('../config/firebase.js');
       await adminDb.collection('delivery_partners').doc(partnerId).set({

@@ -517,7 +517,7 @@ export class OrderStateMachine {
         await client.query('COMMIT').catch(() => {});
       }
 
-      // Terminal Order Finalization: Synchronize to PostgreSQL and purge live Firestore document after grace period
+      // Terminal Order Finalization: Record statutory bill in PostgreSQL and mark completed in Firestore (no destructive purge)
       if (toState === 'delivered' || toState === 'cancelled') {
         setTimeout(async () => {
           try {
