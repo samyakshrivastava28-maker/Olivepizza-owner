@@ -56,7 +56,17 @@ class RedisService {
           ...commonOptions
         });
       } else if (redisUrl) {
-        this.client = new Redis(redisUrl, commonOptions);
+        let clientOptions: any = { ...commonOptions };
+        if (redisUrl.startsWith('rediss://')) {
+          try {
+            const parsed = new URL(redisUrl);
+            clientOptions.tls = {
+              servername: parsed.hostname,
+              ...(clientOptions.tls || {})
+            };
+          } catch {}
+        }
+        this.client = new Redis(redisUrl, clientOptions);
       } else if (process.env.NODE_ENV !== 'production') {
         const url = 'redis://localhost:6379';
         this.client = new Redis(url, commonOptions);
