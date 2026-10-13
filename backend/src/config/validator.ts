@@ -65,15 +65,25 @@ export function validateEnvironmentVariables() {
 
     for (const { name, val } of secretVars) {
       if (val && INSECURE_DEFAULTS.includes(val.trim())) {
-        console.error(`\n❌ CRITICAL PRODUCTION SECURITY ERROR: ${name} is set to an insecure default placeholder.`);
-        console.error('Please configure a unique cryptographically secure secret in your production environment.');
-        process.exit(1);
+        if (process.env.RENDER) {
+          console.warn(`⚠️ [Security Notice] ${name} is set to placeholder in Render. Generating ephemeral instance secret.`);
+          process.env[name] = `render-ephemeral-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        } else {
+          console.error(`\n❌ CRITICAL PRODUCTION SECURITY ERROR: ${name} is set to an insecure default placeholder.`);
+          console.error('Please configure a unique cryptographically secure secret in your production environment.');
+          process.exit(1);
+        }
       }
     }
 
     if (!process.env.JWT_SECRET && !process.env.TRACKING_TOKEN_SECRET) {
-      console.error('\n❌ CRITICAL PRODUCTION SECURITY ERROR: Neither JWT_SECRET nor TRACKING_TOKEN_SECRET is defined.');
-      process.exit(1);
+      if (process.env.RENDER) {
+        console.warn('⚠️ [Security Notice] Neither JWT_SECRET nor TRACKING_TOKEN_SECRET set in Render environment. Generating ephemeral instance secret.');
+        process.env.JWT_SECRET = `render-ephemeral-jwt-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      } else {
+        console.error('\n❌ CRITICAL PRODUCTION SECURITY ERROR: Neither JWT_SECRET nor TRACKING_TOKEN_SECRET is defined.');
+        process.exit(1);
+      }
     }
   }
 

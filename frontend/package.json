@@ -11,7 +11,7 @@
     "test": "node verify_owner_app.cjs"
   },
   "engines": {
-    "node": ">=24 <25"
+    "node": ">=20 <=25"
   },
   "dependencies": {
     "@capacitor-firebase/authentication": "^8.3.0",

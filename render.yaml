@@ -9,6 +9,8 @@ services:
     envVars:
       - key: PORT
         value: 10000
+      - key: NODE_VERSION
+        value: 24
       - key: NODE_ENV
         value: production
       - key: FRONTEND_URL
@@ -19,3 +21,9 @@ services:
         value: https://olive-pizza.onrender.com
       - key: RENDER_PUBLIC_URL
         value: https://olivepizza-owner.onrender.com
+      - key: JWT_SECRET
+        generateValue: true
+      - key: TRACKING_TOKEN_SECRET
+        generateValue: true
+      - key: INTERNAL_RPC_SECRET
+        generateValue: true

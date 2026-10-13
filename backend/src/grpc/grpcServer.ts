@@ -29,8 +29,13 @@ export function createGrpcServer(): grpc.Server {
 
 export async function startGrpcServer(customPort?: number): Promise<{ server: grpc.Server; port: number; address: string }> {
   if (process.env.NODE_ENV === 'production' && !process.env.INTERNAL_RPC_SECRET) {
-    console.error('FATAL: INTERNAL_RPC_SECRET must be configured in production for gRPC cluster security.');
-    process.exit(1);
+    if (process.env.RENDER) {
+      console.warn('⚠️ [gRPC Server Notice] INTERNAL_RPC_SECRET not set in Render environment. Generating ephemeral internal cluster secret.');
+      process.env.INTERNAL_RPC_SECRET = `ephemeral-rpc-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    } else {
+      console.error('FATAL: INTERNAL_RPC_SECRET must be configured in production for gRPC cluster security.');
+      process.exit(1);
+    }
   }
 
   if (grpcServerInstance && boundAddress) {

@@ -18,7 +18,7 @@
     "build:mac": "npm run build:frontend && electron-builder --mac --config electron-builder.json"
   },
   "engines": {
-    "node": ">=24 <25"
+    "node": ">=20 <=25"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1104.0",
