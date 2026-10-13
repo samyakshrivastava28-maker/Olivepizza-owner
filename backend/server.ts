@@ -76,13 +76,17 @@ app.get('/ready', async (req, res) => {
   });
 });
 
-app.get(['/api/heartbeat', '/heartbeat'], (req, res) => {
+app.get(['/', '/api/heartbeat', '/heartbeat'], (req, res) => {
   res.json({
     status: 'ok',
     service: 'Olive Pizza Canonical Owner Backend Service',
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString()
   });
+});
+
+app.head('/', (req, res) => {
+  res.status(200).end();
 });
 
 // Initialize Storage Analyzer Cron Jobs
