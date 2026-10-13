@@ -184,12 +184,8 @@ jobs:
           COMMIT_NUM=$(git rev-list --count HEAD)
           if [ "$RELEASE_SIGNING" = "true" ]; then
             cp android/app/build/outputs/apk/release/app-release.apk "artifact/olivepizza-owner-${COMMIT_NUM}.apk"
-            cp android/app/build/outputs/apk/release/app-release.apk "artifact/olivepizza-owner.apk"
           else
-            cp android/app/build/outputs/apk/debug/app-debug.apk "artifact/olivepizza-owner-debug-${COMMIT_NUM}.apk"
-            cp android/app/build/outputs/apk/debug/app-debug.apk "artifact/olivepizza-owner-debug.apk"
-            # Canonical copy so standard download routes resolve
-            cp android/app/build/outputs/apk/debug/app-debug.apk "artifact/olivepizza-owner.apk"
+            cp android/app/build/outputs/apk/debug/app-debug.apk "artifact/olivepizza-owner-${COMMIT_NUM}.apk"
           fi
 
       # 15. Upload APK Artifact
@@ -205,35 +201,26 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_SIGNING: ${{ steps.signing.outputs.release_signing }}
         run: |
           COMMIT_NUM=$(git rev-list --count HEAD)
-          if [ "$RELEASE_SIGNING" = "true" ]; then
-            APK_NAME="olivepizza-owner-${COMMIT_NUM}.apk"
-          else
-            APK_NAME="olivepizza-owner-debug-${COMMIT_NUM}.apk"
-          fi
-          echo "Publishing ${APK_NAME} and canonical olivepizza-owner.apk to release tag 'latest'..."
+          APK_NAME="olivepizza-owner-${COMMIT_NUM}.apk"
+          echo "Publishing single latest APK ${APK_NAME} to release tag 'latest'..."
 
           # Ensure 'latest' release exists or create it
           gh release view latest --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
             gh release create latest --repo "${GITHUB_REPOSITORY}" --title "Olive Pizza Owner — Latest Release" --notes "Latest official builds for Olive Pizza Owner."
 
-          # Delete old commit-specific .apk assets from 'latest' release, preserving canonical
+          # Delete all existing .apk assets from 'latest' release so ONLY the single latest commit APK exists
           OLD_APKS=$(gh release view latest --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[] | select(.name | test("\\.apk$")) | .name')
           for old in $OLD_APKS; do
-            if [ "$old" != "olivepizza-owner.apk" ] && [ "$old" != "olivepizza-owner-debug.apk" ] && [ "$old" != "${APK_NAME}" ]; then
+            if [ "$old" != "${APK_NAME}" ]; then
               echo "Deleting old release asset: ${old}"
               gh release delete-asset latest "${old}" --repo "${GITHUB_REPOSITORY}" --yes || true
             fi
           done
 
-          # Upload commit-specific APK, debug APK if applicable, and canonical APK
+          # Upload strictly the single latest commit APK
           gh release upload latest "artifact/${APK_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber
-          if [ "$RELEASE_SIGNING" != "true" ] && [ -f "artifact/olivepizza-owner-debug.apk" ]; then
-            gh release upload latest "artifact/olivepizza-owner-debug.apk" --repo "${GITHUB_REPOSITORY}" --clobber
-          fi
-          gh release upload latest "artifact/olivepizza-owner.apk" --repo "${GITHUB_REPOSITORY}" --clobber
 
       # 17. Build Summary
       - name: Build Summary

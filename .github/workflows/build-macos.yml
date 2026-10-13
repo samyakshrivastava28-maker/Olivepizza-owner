@@ -58,29 +58,13 @@ jobs:
 
           if [ -n "$UNIVERSAL_DMG" ] && [ -f "$UNIVERSAL_DMG" ]; then
             cp "$UNIVERSAL_DMG" "artifact/${TARGET_NAME}"
-            cp "$UNIVERSAL_DMG" "artifact/olivepizza-owner.dmg"
-            echo "✅ Packaged primary ${TARGET_NAME} and canonical olivepizza-owner.dmg from universal: ${UNIVERSAL_DMG}"
+            echo "✅ Packaged primary ${TARGET_NAME} from universal: ${UNIVERSAL_DMG}"
           elif [ -n "$FIRST_DMG" ] && [ -f "$FIRST_DMG" ]; then
             cp "$FIRST_DMG" "artifact/${TARGET_NAME}"
-            cp "$FIRST_DMG" "artifact/olivepizza-owner.dmg"
-            echo "✅ Packaged primary ${TARGET_NAME} and canonical olivepizza-owner.dmg from ${FIRST_DMG}"
+            echo "✅ Packaged primary ${TARGET_NAME} from ${FIRST_DMG}"
           else
             echo "⚠️ No DMG found in dist-electron!"
           fi
-
-          # 2. Also copy specific architectures for direct explicit compatibility
-          for dmg_file in dist-electron/*.dmg; do
-            if [ -f "$dmg_file" ]; then
-              base=$(basename "$dmg_file")
-              if [[ "$base" == *"arm64"* ]]; then
-                cp "$dmg_file" "artifact/olivepizza-owner-${COMMIT_NUM}-arm64.dmg"
-                echo "Packaged ARM64: artifact/olivepizza-owner-${COMMIT_NUM}-arm64.dmg"
-              elif [[ "$base" == *"x64"* ]] || [[ "$base" == *"x86_64"* ]]; then
-                cp "$dmg_file" "artifact/olivepizza-owner-${COMMIT_NUM}-x64.dmg"
-                echo "Packaged x64: artifact/olivepizza-owner-${COMMIT_NUM}-x64.dmg"
-              fi
-            fi
-          done
 
           ls -lh artifact/
       - uses: actions/upload-artifact@v4
@@ -95,26 +79,26 @@ jobs:
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: |
           COMMIT_NUM=$(git rev-list --count HEAD)
-          echo "Publishing macOS release assets for commit ${COMMIT_NUM} to release tag 'latest'..."
+          DMG_NAME="olivepizza-owner-${COMMIT_NUM}.dmg"
+          echo "Publishing single latest DMG ${DMG_NAME} to release tag 'latest'..."
 
           # Ensure 'latest' release exists or create it
           gh release view latest --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 || \
             gh release create latest --repo "${GITHUB_REPOSITORY}" --title "Olive Pizza Owner — Latest Release" --notes "Latest official builds for Olive Pizza Owner."
 
-          # Delete ANY old .dmg assets from 'latest' release so only the latest commit file exists
+          # Delete all existing .dmg assets from 'latest' release so ONLY the single latest commit DMG exists
           OLD_DMGS=$(gh release view latest --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[] | select(.name | test("\\.dmg$")) | .name')
           for old in $OLD_DMGS; do
-            echo "Deleting old release asset: ${old}"
-            gh release delete-asset latest "${old}" --repo "${GITHUB_REPOSITORY}" --yes || true
-          done
-
-          # Upload all generated DMG files
-          for dmg in artifact/*.dmg; do
-            if [ -f "$dmg" ]; then
-              echo "Uploading $dmg to release 'latest'..."
-              gh release upload latest "$dmg" --repo "${GITHUB_REPOSITORY}" --clobber
+            if [ "$old" != "${DMG_NAME}" ]; then
+              echo "Deleting old release asset: ${old}"
+              gh release delete-asset latest "${old}" --repo "${GITHUB_REPOSITORY}" --yes || true
             fi
           done
+
+          # Upload strictly the single latest commit DMG
+          if [ -f "artifact/${DMG_NAME}" ]; then
+            gh release upload latest "artifact/${DMG_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
