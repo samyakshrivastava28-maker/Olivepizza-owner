@@ -1,0 +1,49 @@
+name: Homepage regression checks
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/src/components/home/**'
+      - 'frontend/src/pages/HomePageManager.tsx'
+      - 'frontend/src/types/PageSchema.ts'
+      - 'frontend/package.json'
+      - 'frontend/package-lock.json'
+      - 'frontend/tsconfig.json'
+      - 'frontend/vite.config.ts'
+      - '.github/workflows/homepage-regression-checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homepage-checks-owner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web-check:
+    name: Type-check and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Type-check
+        run: npm run lint
+
+      - name: Production build
+        run: npm run build

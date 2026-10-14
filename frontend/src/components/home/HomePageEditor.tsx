@@ -180,8 +180,52 @@ const ANIMATION_OPTIONS: { value: AnimationType; label: string }[] = [
   { value: 'Stagger', label: 'Staggered Children Reveal' },
 ];
 
+const REQUIRED_CATEGORY_TYPES = ['CRAVINGS', 'CRAVING_CATEGORIES'] as const;
+
+const isRequiredCategorySection = (section?: Pick<SimplifiedSectionSchema, 'type'> | null) =>
+  !!section && REQUIRED_CATEGORY_TYPES.includes(String(section.type).toUpperCase() as typeof REQUIRED_CATEGORY_TYPES[number]);
+
+const ensureRequiredCategorySection = (input: PageSchema): PageSchema => {
+  const rawSections = (input as any).sections;
+  if (!Array.isArray(rawSections)) return input; // Legacy static packages are handled by the renderer.
+  const firstCategoryIndex = rawSections.findIndex((section: SimplifiedSectionSchema) =>
+    isRequiredCategorySection(section)
+  );
+  const category: SimplifiedSectionSchema = firstCategoryIndex >= 0
+    ? { ...rawSections[firstCategoryIndex], isHidden: false }
+    : {
+        id: 'olive-pizza-required-categories',
+        type: 'CRAVINGS',
+        isHidden: false,
+        config: {
+          headline: "WHAT'S YOUR CRAVING TODAY?",
+          subtitle: 'Explore our menu by category.',
+        },
+      };
+  const sections = rawSections.filter((section: SimplifiedSectionSchema) => {
+    const type = String(section.type || '').toUpperCase();
+    return type !== 'CATEGORIES' && !REQUIRED_CATEGORY_TYPES.includes(type as typeof REQUIRED_CATEGORY_TYPES[number]);
+  });
+  const originalIndex = firstCategoryIndex >= 0 ? firstCategoryIndex : (() => {
+    const heroIndex = sections.findIndex((section: SimplifiedSectionSchema) =>
+      ['HERO', 'VIDEO_HERO'].includes(String(section.type || '').toUpperCase())
+    );
+    return heroIndex >= 0 ? heroIndex + 1 : 0;
+  })();
+  const insertIndex = firstCategoryIndex >= 0
+    ? rawSections.slice(0, originalIndex).filter((section: SimplifiedSectionSchema) => {
+        const type = String(section.type || '').toUpperCase();
+        return type !== 'CATEGORIES' && !REQUIRED_CATEGORY_TYPES.includes(type as typeof REQUIRED_CATEGORY_TYPES[number]);
+      }).length
+    : originalIndex;
+  sections.splice(Math.min(insertIndex, sections.length), 0, category);
+  return { ...input, sections } as PageSchema;
+};
+
 export default function HomePageEditor({ initialSchema, onSave, onClose, isOfficialTemplate = false }: HomePageEditorProps) {
-  const [schema, setSchema] = useState<PageSchema>(() => JSON.parse(JSON.stringify(initialSchema)));
+  const [schema, setSchema] = useState<PageSchema>(() =>
+    ensureRequiredCategorySection(JSON.parse(JSON.stringify(initialSchema)))
+  );
   const sectionsList: SimplifiedSectionSchema[] = (schema as any).sections || [];
   const [selectedSectionId, setSelectedSectionId] = useState<string>(
     sectionsList.length > 0 ? sectionsList[0].id : ''
@@ -323,7 +367,10 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
       const next = JSON.parse(JSON.stringify(prev));
       const idx = (next.sections || []).findIndex((s: SimplifiedSectionSchema) => s.id === sectionId);
       if (idx !== -1) {
-        next.sections[idx] = { ...next.sections[idx], ...updates };
+        const target = next.sections[idx] as SimplifiedSectionSchema;
+        // The required category rail is always visible, including through generic property-panel actions.
+        const safeUpdates = isRequiredCategorySection(target) ? { ...updates, isHidden: false } : updates;
+        next.sections[idx] = { ...target, ...safeUpdates };
       }
       return next;
     });
@@ -346,6 +393,15 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
 
   // Add new section
   const handleAddSection = (type: SectionType) => {
+    if (REQUIRED_CATEGORY_TYPES.includes(type as typeof REQUIRED_CATEGORY_TYPES[number])) {
+      const existing = sectionsList.find(isRequiredCategorySection);
+      if (existing) {
+        setSelectedSectionId(existing.id);
+        setActiveTab('sections');
+        toast('The circular category section is built into every homepage and cannot be duplicated.');
+        return;
+      }
+    }
     const secMeta = AVAILABLE_SECTION_TYPES.find((s) => s.type === type);
     const newSection: SimplifiedSectionSchema = {
       id: `${type.toLowerCase()}_${Date.now().toString(36)}`,
@@ -400,6 +456,11 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
 
   // Remove Section
   const handleRemoveSection = (sectionId: string) => {
+    const target = sectionsList.find((section) => section.id === sectionId);
+    if (isRequiredCategorySection(target)) {
+      toast.error('The circular category section is required on every Olive Pizza homepage.');
+      return;
+    }
     if (sectionsList.length <= 1) {
       toast.error('The homepage must contain at least one section.');
       return;
@@ -702,11 +763,12 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                         <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
                           {/* Visibility Eye */}
                           <button
+                            disabled={isRequiredCategorySection(sec)}
                             onClick={() => updateSectionMeta(sec.id, { isHidden: !sec.isHidden })}
-                            className={`p-1.5 rounded-lg transition-colors ${
+                            className={`p-1.5 rounded-lg transition-colors disabled:opacity-70 disabled:cursor-not-allowed ${
                               sec.isHidden ? 'text-slate-600 hover:text-slate-400' : 'text-emerald-400 hover:text-emerald-300'
                             }`}
-                            title={sec.isHidden ? 'Hidden on customer home' : 'Visible on customer home'}
+                            title={isRequiredCategorySection(sec) ? 'Required category section — always visible' : (sec.isHidden ? 'Hidden on customer home' : 'Visible on customer home')}
                           >
                             {sec.isHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                           </button>
@@ -936,8 +998,10 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
                             </button>
                             <button
                               type="button"
+                              disabled={isRequiredCategorySection(sec)}
                               onClick={() => handleRemoveSection(sec.id)}
-                              className="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500 border border-rose-500/30 text-rose-400 hover:text-white rounded-lg text-xs font-bold transition-all"
+                              title={isRequiredCategorySection(sec) ? 'Required category section cannot be removed' : 'Remove section'}
+                              className="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500 border border-rose-500/30 text-rose-400 hover:text-white rounded-lg text-xs font-bold transition-all disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-rose-500/10"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>

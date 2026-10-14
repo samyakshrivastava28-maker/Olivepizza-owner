@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { motion, AnimatePresence, useInView } from 'framer-motion';
 import { useNavigate } from 'react-router';
 import { Sparkles, Utensils, Flame } from 'lucide-react';
 import { useDataStore } from '../../lib/dataStore';
@@ -30,6 +30,8 @@ function CravingCategoryCard({
   index: number;
 }) {
   const navigate = useNavigate();
+  const cardRef = useRef<HTMLDivElement>(null);
+  const isCardVisible = useInView(cardRef, { once: false, amount: 0.15 });
   const [currentImgIndex, setCurrentImgIndex] = useState(0);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
 
@@ -54,7 +56,9 @@ function CravingCategoryCard({
 
   // 4-Second Rotation Timer Strategy
   useEffect(() => {
-    if (productList.length <= 1) return;
+    // Only animate categories near the viewport; hidden cards do not spend CPU or
+    // change images in the background. Rotation stays at the same four-second pace.
+    if (productList.length <= 1 || !isCardVisible) return;
     const timer = setInterval(() => {
       if (!document.hidden) {
         setCurrentImgIndex((prev) => (prev + 1) % productList.length);
@@ -62,17 +66,17 @@ function CravingCategoryCard({
     }, 4000);
 
     return () => clearInterval(timer);
-  }, [productList.length]);
+  }, [productList.length, isCardVisible]);
 
   // Preload next image in memory for flicker-free 60fps rotation
   useEffect(() => {
-    if (productList.length <= 1) return;
+    if (productList.length <= 1 || !isCardVisible) return;
     const nextIdx = (currentImgIndex + 1) % productList.length;
     if (productList[nextIdx]?.image) {
       const img = new Image();
       img.src = productList[nextIdx].image;
     }
-  }, [currentImgIndex, productList]);
+  }, [currentImgIndex, productList, isCardVisible]);
 
   const activeProduct = productList[currentImgIndex % productList.length] || {
     name: category.name,
@@ -88,6 +92,7 @@ function CravingCategoryCard({
 
   return (
     <motion.div
+      ref={cardRef}
       initial={{ opacity: 0, y: 24, scale: 0.92 }}
       whileInView={{ opacity: 1, y: 0, scale: 1 }}
       viewport={{ once: true, margin: '-30px' }}
@@ -105,16 +110,16 @@ function CravingCategoryCard({
       {/* ── Floating 3D Container ── */}
       <motion.div
         animate={
-          prefersReducedMotion
-            ? {}
+          prefersReducedMotion || !isCardVisible
+            ? { y: 0, rotate: 0 }
             : {
-                y: [0, -6, 0],
-                rotate: index % 2 === 0 ? [-0.8, 0.8, -0.8] : [0.8, -0.8, 0.8],
+                y: [0, -5, 0],
+                rotate: index % 2 === 0 ? [-0.6, 0.6, -0.6] : [0.6, -0.6, 0.6],
               }
         }
         transition={{
           duration: 4.2 + (index % 3) * 0.4,
-          repeat: Infinity,
+          repeat: isCardVisible && !prefersReducedMotion ? Infinity : 0,
           ease: 'easeInOut',
           delay: (index * 0.15) % 2,
         }}
@@ -128,7 +133,7 @@ function CravingCategoryCard({
       >
         {/* Radial Ambient Glow */}
         <div
-          className="absolute -inset-4 rounded-full opacity-35 group-hover:opacity-100 transition-opacity duration-500 blur-2xl pointer-events-none transform-gpu"
+          className="absolute -inset-2 rounded-full opacity-25 group-hover:opacity-70 transition-opacity duration-300 pointer-events-none transform-gpu"
           style={{
             background: `radial-gradient(circle at center, ${category.glowColor} 0%, transparent 70%)`,
           }}
@@ -138,8 +143,8 @@ function CravingCategoryCard({
         <div
           className="relative w-24 h-24 sm:w-28 sm:h-28 md:w-32 md:h-32 rounded-full p-1.5 border-2 border-white/20 group-hover:border-primary-400 transition-all duration-300 shadow-[0_12px_35px_rgba(0,0,0,0.8)] overflow-hidden flex items-center justify-center bg-dark-900/90 transform-gpu group-hover:shadow-[0_16px_40px_rgba(249,115,22,0.45)]"
           style={{
-            backdropFilter: 'blur(16px)',
-            boxShadow: 'inset 0 2px 8px rgba(255,255,255,0.2), 0 12px 30px rgba(0,0,0,0.85)',
+            // Shadows and the glass highlight retain depth without per-card backdrop blur.
+            boxShadow: 'inset 0 2px 8px rgba(255,255,255,0.18), 0 10px 24px rgba(0,0,0,0.55)',
           }}
         >
           {/* Dynamic 4-Second Morphing Image Transition */}
@@ -150,24 +155,21 @@ function CravingCategoryCard({
               alt={activeProduct.name}
               initial={{
                 opacity: 0,
-                scale: 0.88,
-                translateY: 8,
-                filter: 'blur(4px)',
+                scale: prefersReducedMotion ? 1 : 0.9,
+                translateY: prefersReducedMotion ? 0 : 5,
               }}
               animate={{
                 opacity: 1,
                 scale: 1,
                 translateY: 0,
-                filter: 'blur(0px)',
               }}
               exit={{
                 opacity: 0,
-                scale: 0.88,
-                translateY: -8,
-                filter: 'blur(4px)',
+                scale: prefersReducedMotion ? 1 : 0.9,
+                translateY: prefersReducedMotion ? 0 : -5,
               }}
               transition={{
-                duration: 0.55,
+                duration: prefersReducedMotion ? 0.12 : 0.35,
                 ease: [0.16, 1, 0.3, 1],
               }}
               loading="lazy"

@@ -171,34 +171,65 @@ export default function PageRenderer({ schema, isEditorMode = false, onElementSe
   if (schema.type === 'CUSTOM_STATIC_PACKAGE') {
     const src = `${schema.r2Url}/${schema.entryFile}`;
     return (
-      <div className="w-full h-full min-h-screen relative">
-        {isEditorMode && (
-          <div className="absolute inset-0 bg-transparent z-50" onClick={() => onElementSelect && onElementSelect('iframe-root')}>
-            {/* Overlay to catch clicks in editor mode for Custom Packages */}
-          </div>
-        )}
-        <iframe 
-          src={src} 
-          sandbox="allow-scripts allow-same-origin"
-          className={`w-full h-full min-h-[800px] border-none bg-white ${isEditorMode && selectedSectionId === 'iframe-root' ? 'ring-4 ring-primary-500' : ''}`}
-          title="Custom Static Package"
-        />
+      <div className="w-full h-full min-h-screen">
+        {/* Keep the required category rail outside the legacy package overlay. */}
+        <CravingCategoriesSection config={{ headline: "WHAT'S YOUR CRAVING TODAY?", subtitle: 'Explore our menu by category.' }} />
+        <div className="w-full relative min-h-[800px]">
+          {isEditorMode && (
+            <div className="absolute inset-0 bg-transparent z-50" onClick={() => onElementSelect && onElementSelect('iframe-root')}>
+              {/* Editor interception is limited to the package preview, not the category rail. */}
+            </div>
+          )}
+          <iframe 
+            src={src} 
+            sandbox="allow-scripts allow-same-origin"
+            className={`w-full h-full min-h-[800px] border-none bg-white ${isEditorMode && selectedSectionId === 'iframe-root' ? 'ring-4 ring-primary-500' : ''}`}
+            title="Custom Static Package"
+          />
+        </div>
       </div>
     );
   }
 
-  // Filter out any obsolete duplicate categories sections from schema and deduplicate cravings
-  const cleanSections = (schema.sections || []).filter((s, idx, arr) => {
-    const type = (s.type || '').toUpperCase();
-    if (type === 'CATEGORIES') return false; // Remove obsolete duplicate categories
-    if (type === 'CRAVINGS' || type === 'CRAVING_CATEGORIES') {
-      const firstIdx = arr.findIndex((item) =>
-        ['CRAVINGS', 'CRAVING_CATEGORIES'].includes((item.type || '').toUpperCase())
-      );
-      if (idx !== firstIdx) return false;
-    }
-    return true;
+  // Required category rail: every schema gets the same real-data circular category UI.
+  // Keep the first configured category section (for any future permitted settings), force it
+  // visible, remove duplicates/legacy CATEGORIES blocks, and insert it after the hero if absent.
+  const categoryTypes = ['CRAVINGS', 'CRAVING_CATEGORIES'];
+  const originalSections = Array.isArray(schema.sections) ? schema.sections : [];
+  const categorySectionIndex = originalSections.findIndex((section) =>
+    categoryTypes.includes((section.type || '').toUpperCase())
+  );
+  const configuredCategorySection = categorySectionIndex >= 0
+    ? originalSections[categorySectionIndex]
+    : ({
+        id: 'olive-pizza-required-categories',
+        type: 'CRAVINGS',
+        isHidden: false,
+        config: {
+          headline: "WHAT'S YOUR CRAVING TODAY?",
+          subtitle: 'Explore our menu by category.',
+        },
+      } as SimplifiedSectionSchema);
+  const requiredCategorySection: SimplifiedSectionSchema = {
+    ...configuredCategorySection,
+    isHidden: false,
+  };
+  const cleanSections = originalSections.filter((section) => {
+    const type = (section.type || '').toUpperCase();
+    return type !== 'CATEGORIES' && !categoryTypes.includes(type);
   });
+  const categoryInsertIndex = categorySectionIndex >= 0
+    ? originalSections.slice(0, categorySectionIndex).filter((section) => {
+        const type = (section.type || '').toUpperCase();
+        return type !== 'CATEGORIES' && !categoryTypes.includes(type);
+      }).length
+    : (() => {
+        const heroIndex = cleanSections.findIndex((section) =>
+          ['HERO', 'VIDEO_HERO'].includes((section.type || '').toUpperCase())
+        );
+        return heroIndex >= 0 ? heroIndex + 1 : 0;
+      })();
+  cleanSections.splice(categoryInsertIndex, 0, requiredCategorySection);
 
   // Check if sections array explicitly includes an ads section
   const hasAdsSection = cleanSections.some(
