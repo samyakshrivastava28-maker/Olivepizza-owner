@@ -171,19 +171,22 @@ export default function PageRenderer({ schema, isEditorMode = false, onElementSe
   if (schema.type === 'CUSTOM_STATIC_PACKAGE') {
     const src = `${schema.r2Url}/${schema.entryFile}`;
     return (
-      <div className="w-full h-full min-h-screen relative">
+      <div className="w-full h-full min-h-screen">
+        {/* Keep the required category rail outside the legacy package overlay. */}
         <CravingCategoriesSection config={{ headline: "WHAT'S YOUR CRAVING TODAY?", subtitle: 'Explore our menu by category.' }} />
-        {isEditorMode && (
-          <div className="absolute inset-0 bg-transparent z-50" onClick={() => onElementSelect && onElementSelect('iframe-root')}>
-            {/* Overlay to catch clicks in editor mode for Custom Packages */}
-          </div>
-        )}
-        <iframe 
-          src={src} 
-          sandbox="allow-scripts allow-same-origin"
-          className={`w-full h-full min-h-[800px] border-none bg-white ${isEditorMode && selectedSectionId === 'iframe-root' ? 'ring-4 ring-primary-500' : ''}`}
-          title="Custom Static Package"
-        />
+        <div className="w-full relative min-h-[800px]">
+          {isEditorMode && (
+            <div className="absolute inset-0 bg-transparent z-50" onClick={() => onElementSelect && onElementSelect('iframe-root')}>
+              {/* Editor interception is limited to the package preview, not the category rail. */}
+            </div>
+          )}
+          <iframe 
+            src={src} 
+            sandbox="allow-scripts allow-same-origin"
+            className={`w-full h-full min-h-[800px] border-none bg-white ${isEditorMode && selectedSectionId === 'iframe-root' ? 'ring-4 ring-primary-500' : ''}`}
+            title="Custom Static Package"
+          />
+        </div>
       </div>
     );
   }
