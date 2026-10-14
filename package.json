@@ -15,7 +15,8 @@
     "server": "tsx backend/server.ts",
     "desktop": "electron electron/main.cjs",
     "build:electron": "npm run build:frontend && electron-builder --win --x64 --config electron-builder.json",
-    "build:mac": "npm run build:frontend && electron-builder --mac --config electron-builder.json"
+    "build:mac": "npm run build:frontend && electron-builder --mac --config electron-builder.json",
+    "test": "node verify_owner_app.cjs"
   },
   "engines": {
     "node": ">=20 <=25"

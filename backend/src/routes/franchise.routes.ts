@@ -3003,6 +3003,7 @@ router.get('/:id/telemetry', requireRole(['owner', 'admin', 'developer', 'platfo
     // Real order metrics
     const orderSnap = await adminDb.collection('orders').limit(200).get().catch(() => ({ docs: [] } as any));
     let todaySales = 0, todayOrders = 0, activeOrders = 0, completedOrders = 0;
+    let posSales = 0, onlineSales = 0;
     const today = new Date().toISOString().slice(0, 10);
     orderSnap.docs.forEach((d: any) => {
       const o = d.data();
@@ -3011,8 +3012,14 @@ router.get('/:id/telemetry', requireRole(['owner', 'admin', 'developer', 'platfo
       if (oDate !== today) return;
       const status = (o.status || '').toLowerCase();
       if (status !== 'cancelled' && status !== 'rejected') {
-        todaySales += Number(o.totalAmount || 0);
+        const amount = Number(o.totalAmount || 0);
+        todaySales += amount;
         todayOrders++;
+        if (o.source === 'POS' || o.orderSource === 'POS' || o.posTerminalId) {
+          posSales += amount;
+        } else {
+          onlineSales += amount;
+        }
       }
       if (['pending','accepted','preparing','ready','out_for_delivery'].includes(status)) activeOrders++;
       else if (['delivered','completed'].includes(status)) completedOrders++;
@@ -3034,7 +3041,7 @@ router.get('/:id/telemetry', requireRole(['owner', 'admin', 'developer', 'platfo
       success: true,
       franchiseId: id,
       franchise: { id, name: franchiseName },
-      telemetry: { todaySales, todayOrders, activeOrders, completedOrders, activeTerminals, activeRiders }
+      telemetry: { todaySales, todayOrders, activeOrders, completedOrders, posSales, onlineSales, activeTerminals, activeRiders }
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

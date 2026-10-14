@@ -18,16 +18,12 @@ android {
     }
     signingConfigs {
         release {
-            def keystoreFile = file("release.keystore")
-            def keystorePassword = System.getenv("KEYSTORE_PASSWORD")
-            def keyAlias = System.getenv("KEY_ALIAS")
-            def keyPassword = System.getenv("KEY_PASSWORD") ?: keystorePassword
-
-            if (keystoreFile.exists() && keystorePassword && keyAlias) {
-                storeFile keystoreFile
-                storePassword keystorePassword
-                keyAlias keyAlias
-                keyPassword keyPassword
+            def targetKeystore = file("release.keystore").exists() ? file("release.keystore") : file("ci-release.keystore")
+            if (targetKeystore.exists()) {
+                storeFile targetKeystore
+                storePassword (System.getenv("KEYSTORE_PASSWORD") ?: "olivepizza")
+                keyAlias (System.getenv("KEY_ALIAS") ?: "olivepizza")
+                keyPassword (System.getenv("KEY_PASSWORD") ?: (System.getenv("KEYSTORE_PASSWORD") ?: "olivepizza"))
                 v1SigningEnabled true
                 v2SigningEnabled true
             }

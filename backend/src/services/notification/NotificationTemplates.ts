@@ -848,8 +848,7 @@ export class OwnerTemplates {
       `${payload.customerName} • ₹${payload.totalAmount}`,
       payload.eta ? `ETA: ${payload.eta}` : '',
       payload.deliveryPartnerName ? `Partner: ${payload.deliveryPartnerName}` : '',
-      progressBar(payload.status),
-    ].filter(Boolean).join('\n');
+    ].filter(Boolean).join(' • ');
 
     const actions: Array<{ action: string; title: string }> =
       payload.status === 'preparing'
@@ -1067,6 +1066,7 @@ export class CustomerTemplates {
       eventTimestamp?: string;
       cancellationReason?: string;
       isPickup?: boolean;
+      billReference?: string;
     }
   ): NotificationPayload {
     const isPickup = payload.isPickup || false;
@@ -1079,51 +1079,46 @@ export class CustomerTemplates {
     }> = {
       pending: {
         title: `🍕 Order Placed — #${payload.orderNumber}`,
-        body: `₹${payload.totalAmount} • Waiting for restaurant confirmation\n${progressBar('pending')}\n${progressSteps('pending')}`,
+        body: `₹${payload.totalAmount} • Waiting for restaurant confirmation.`,
         ongoing: true,
       },
       accepted: {
         title: `✅ Order Confirmed — #${payload.orderNumber}`,
-        body: `Your Olive Pizza order has been accepted.${payload.eta ? ` (ETA: ${payload.eta})` : ''}\n${progressBar('accepted')}\n${progressSteps('accepted')}`,
+        body: `Your Olive Pizza order has been accepted.${payload.eta ? ` Estimated arrival: ${payload.eta}.` : ''}`,
         sound: 'confirmed',
         ongoing: true,
       },
       preparing: {
         title: `🔥 Baking in Stone Ovens`,
-        body: `Your order is being prepared.${payload.eta ? ` (Est. ${payload.eta})` : ''}\n${progressBar('preparing')}\n${progressSteps('preparing')}`,
+        body: `Your order is being freshly prepared in our stone ovens.${payload.eta ? ` (Est. ${payload.eta})` : ''}`,
         ongoing: true,
       },
       ready: {
         title: isPickup ? `🍕 Order Ready for Pickup!` : `🟢 Order Ready for Delivery!`,
         body: isPickup 
           ? `Your order is ready for pickup at the restaurant counter.` 
-          : `Your order is ready for delivery.\n${progressBar('ready')}\n${progressSteps('ready')}`,
+          : `Your order is freshly packed and ready for delivery.`,
         ongoing: true,
       },
       partner_assigned: {
         title: `🚴 Delivery Partner Assigned`,
-        body: `${payload.deliveryPartnerName || 'Partner'} is assigned and on the way to the restaurant\n${progressBar('partner_assigned')}\n${progressSteps('partner_assigned')}`,
+        body: `${payload.deliveryPartnerName || 'Delivery partner'} has been assigned and is heading to the restaurant.`,
         ongoing: true,
       },
       picked_up: {
         title: `📦 Order Picked Up`,
-        body: `${payload.deliveryPartnerName || 'Partner'} has picked up your order and is heading your way\n${progressBar('picked_up')}\n${progressSteps('picked_up')}`,
+        body: `${payload.deliveryPartnerName || 'Delivery partner'} picked up your order and is heading your way.`,
         ongoing: true,
       },
       out_for_delivery: {
         title: `🛵 Out for Delivery!`,
-        body: [
-          `${payload.deliveryPartnerName || 'Your partner'} is heading your way`,
-          payload.eta ? `Arriving in ~${payload.eta}` : '',
-          progressBar('out_for_delivery'),
-          progressSteps('out_for_delivery'),
-        ].filter(Boolean).join('\n'),
+        body: `${payload.deliveryPartnerName || 'Your delivery partner'} is on the way to your address.${payload.eta ? ` Arriving in ~${payload.eta}.` : ''}`,
         sound: 'delivery_assigned',
         ongoing: true,
       },
       delivered: {
         title: `✅ Delivered! Enjoy your pizza 🍕`,
-        body: `Your order has been delivered. Enjoy your meal!\n${progressBar('delivered')}`,
+        body: `Your order has been delivered. Enjoy your hot pizza!`,
         sound: 'delivered',
         requireInteraction: true,
         ongoing: false,
@@ -1131,7 +1126,7 @@ export class CustomerTemplates {
       completed: {
         title: `🏁 Order Completed`,
         body: `Thank you for choosing Olive Pizza! See you again soon.`,
-        ongoing: true,
+        ongoing: false,
       },
       cancelled: {
         title: `Order Cancelled`,
@@ -1150,12 +1145,12 @@ export class CustomerTemplates {
 
     const actions: Array<{ action: string; title: string }> =
       payload.status === 'out_for_delivery' || payload.status === 'partner_assigned'
-        ? [{ action: 'track', title: '📍 Track Order' }, ...(payload.riderPhone ? [{ action: 'call_partner', title: '📞 Call Rider' }] : [])]
+        ? [{ action: 'track', title: '📍 Track Order' }, { action: 'view_bill', title: '📄 View Bill' }, ...(payload.riderPhone ? [{ action: 'call_partner', title: '📞 Call Rider' }] : [])]
         : isDelivered
-          ? [{ action: 'rate', title: '⭐ Rate Order' }, { action: 'reorder', title: '🔄 Reorder' }]
+          ? [{ action: 'view_bill', title: '📄 View Bill' }, { action: 'rate', title: '⭐ Rate Order' }, { action: 'reorder', title: '🔄 Reorder' }]
           : isCancelled
             ? [{ action: 'view_cancelled', title: 'Details' }, { action: 'reorder', title: 'Order Again' }]
-            : [{ action: 'open', title: '📍 Track Order' }];
+            : [{ action: 'open', title: '📍 Track Order' }, { action: 'view_bill', title: '📄 View Bill' }];
 
     const trackingToken = generateTrackingToken(orderId);
     const trackingUrl = `/order-tracking/${orderId}?trackingToken=${trackingToken}`;
@@ -1210,6 +1205,7 @@ export class CustomerTemplates {
       isLive: isTerminal ? 'false' : 'true',
       type: notifType,
       notificationType: notifType,
+      billReference: payload.billReference || orderId,
     });
   }
 

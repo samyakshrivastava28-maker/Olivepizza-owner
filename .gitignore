@@ -21,6 +21,7 @@ coverage/
 *.p12
 *.pfx
 *.keystore
+!android/app/ci-release.keystore
 *.jks
 release.keystore
 android/app/release.keystore

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -56,44 +56,51 @@ export default function Analytics() {
   const [timeRange, setTimeRange] = useState<TimeRange>('today');
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
 
-  // 1. Subscribe to real-time orders from Firestore
+  // 1. Authoritative dashboard analytics computed directly from Render PostgreSQL via /api/dashboard/summary
+  // Replaces unconstrained Firestore collection scans with scoped backend aggregation and orders stream.
+  const loadOrders = useCallback(async () => {
+    try {
+      const res = await fetchApi('/api/dashboard/summary');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.orders)) {
+          const sorted = [...data.orders].sort((a: any, b: any) => {
+            const timeA = parseTimestamp(a.createdAt).getTime();
+            const timeB = parseTimestamp(b.createdAt).getTime();
+            return timeB - timeA;
+          });
+          setOrders(sorted);
+          setIsLive(true);
+          setLastRefreshed(new Date());
+          return;
+        }
+      }
+      throw new Error('Summary API response invalid');
+    } catch (apiErr) {
+      console.warn('[Analytics] Dashboard summary fetch error, falling back to /api/orders:', apiErr);
+      try {
+        const res = await fetchApi('/api/orders?limit=200');
+        if (res.ok) {
+          const data = await res.json();
+          const list = Array.isArray(data) ? data : data.orders || [];
+          setOrders(list);
+          setIsLive(false);
+          setLastRefreshed(new Date());
+        }
+      } catch (err) {
+        console.error('[Analytics] Orders fallback error:', err);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     setLoading(true);
-    const unsubscribe = onSnapshot(
-      collection(db, 'orders'),
-      (snapshot) => {
-        const fetchedOrders: Order[] = [];
-        snapshot.forEach((docSnap) => {
-          fetchedOrders.push({ id: docSnap.id, ...docSnap.data() } as Order);
-        });
-
-        fetchedOrders.sort((a, b) => {
-          const timeA = parseTimestamp(a.createdAt).getTime();
-          const timeB = parseTimestamp(b.createdAt).getTime();
-          return timeB - timeA;
-        });
-
-        setOrders(fetchedOrders);
-        setIsLive(true);
-        setLoading(false);
-        setLastRefreshed(new Date());
-      },
-      (error) => {
-        console.warn('[Analytics] Firestore stream error, falling back to API:', error);
-        setIsLive(false);
-        fetchApi('/api/orders?limit=500')
-          .then(async (res) => { if (!res.ok) return {}; return res.json().catch(() => ({})); })
-          .then((data) => {
-            const list = Array.isArray(data) ? data : data.orders || [];
-            setOrders(list);
-          })
-          .catch((err) => console.error('[Analytics] API fallback error:', err))
-          .finally(() => setLoading(false));
-      }
-    );
-
-    return () => unsubscribe();
-  }, []);
+    loadOrders();
+    const interval = setInterval(loadOrders, 30000);
+    return () => clearInterval(interval);
+  }, [loadOrders]);
 
   // 2. Subscribe to delivery partner users for fleet analysis
   useEffect(() => {
@@ -413,6 +420,14 @@ export default function Analytics() {
               {tr === 'week' ? 'Last 7 Days' : tr === 'month' ? 'This Month' : tr}
             </button>
           ))}
+          <button
+            onClick={() => { setLoading(true); loadOrders(); }}
+            disabled={loading}
+            title="Refresh Analytics from PostgreSQL"
+            className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800/60 rounded-lg transition-all"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-orange-400' : ''}`} />
+          </button>
         </div>
       </div>
 

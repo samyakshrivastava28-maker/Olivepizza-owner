@@ -78,15 +78,15 @@ ownerComponents.forEach((c) => {
   assert(fs.existsSync(path.join(ROOT, c)), `Rich component exists: ${c}`);
 });
 
-// 5. DataManager Sub-Module
-const dataManagerFiles = [
-  'frontend/src/pages/DataManager/DataManagerHub.tsx',
-  'frontend/src/pages/DataManager/Overview.tsx',
-  'frontend/src/pages/DataManager/ProviderDetail.tsx',
-  'frontend/src/pages/DataManager/ProviderRequirementsWizard.tsx',
+// 5. Canonical Operational Management Modules
+const canonicalModules = [
+  'frontend/src/pages/PrivacyGovernance.tsx',
+  'frontend/src/pages/FranchiseWorkspace.tsx',
+  'frontend/src/pages/RestaurantReports.tsx',
+  'frontend/src/pages/OrderManagement.tsx',
 ];
-dataManagerFiles.forEach((f) => {
-  assert(fs.existsSync(path.join(ROOT, f)), `DataManager module file: ${f}`);
+canonicalModules.forEach((f) => {
+  assert(fs.existsSync(path.join(ROOT, f)), `Canonical module file: ${f}`);
 });
 
 // 6. Security and RBAC Whitelist Check
