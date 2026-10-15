@@ -73,7 +73,7 @@ export class EmailVerificationService {
             Hello,
           </p>
           <p style="color: #374151; font-size: 15px; line-height: 22px; margin: 0 0 24px 0;">
-            Use the following 4-digit security code to complete your verification with Olive Pizza. This code is confidential and valid for <strong>5 minutes</strong>.
+            Use the following 6-digit security code to complete your verification with Olive Pizza. This code is confidential and valid for <strong>5 minutes</strong>.
           </p>
           <div style="background: #f3f4f6; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 24px;">
             <span style="font-family: monospace; font-size: 38px; font-weight: 900; letter-spacing: 12px; color: #059669; display: inline-block; margin-left: 12px;">
@@ -98,13 +98,13 @@ export class EmailVerificationService {
     `;
 
     // Dispatch email asynchronously using high-speed pooled SMTP queue
-    queueEmail(cleanEmail, 'Your Olive Pizza 4-Digit Verification Code', emailHtml, 'auth')
+    queueEmail(cleanEmail, 'Your Olive Pizza 6-Digit Verification Code', emailHtml, 'auth')
       .then((queueId) => {
         console.log(`[EmailVerificationService] ✅ Verification email queued for ${cleanEmail} (ID: ${queueId})`);
       })
       .catch((err: any) => {
         console.warn(`[EmailVerificationService] Queue error, using direct pooled SMTP send:`, err?.message);
-        sendEmailDirect(cleanEmail, 'Your Olive Pizza 4-Digit Verification Code', emailHtml)
+        sendEmailDirect(cleanEmail, 'Your Olive Pizza 6-Digit Verification Code', emailHtml)
           .then(() => console.log(`[EmailVerificationService] ✅ Verification email delivered directly via SMTP to ${cleanEmail}`))
           .catch((directErr: any) => console.error('[EmailVerificationService] ❌ Failed to dispatch email via SMTP:', directErr?.message || directErr));
       });

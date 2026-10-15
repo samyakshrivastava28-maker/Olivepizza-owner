@@ -14,7 +14,7 @@ export interface RateLimitStatus {
 
 export class LoginRateLimiterService {
   private static readonly COLLECTION = 'device_login_rate_limits';
-  public static readonly MAX_DEVICE_ATTEMPTS = 2; // Max 2 attempts allowed; 3rd is rejected
+  public static readonly MAX_DEVICE_ATTEMPTS = 10; // Max 10 attempts allowed per 15 min window
   public static readonly MAX_IP_ATTEMPTS = 20;     // Secondary IP flood protection
   public static readonly WINDOW_MS = 15 * 60 * 1000; // 15 minutes rolling window
 

@@ -99,9 +99,9 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     const userIdentifier = (user.email || user.uid || '').toLowerCase().trim();
     const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
 
-    // ── 1. Server-Enforced Login Rate Limiter (Max 2 attempts per 15 min per device, 3rd blocked for operational staff) ──
+    // ── 1. Server-Enforced Login Rate Limiter (Check lockout before resolving; only consume on failed attempt) ──
     if (targetApp !== 'CUSTOMER') {
-      const rateStatus = await LoginRateLimiterService.consumeAttempt(rawDeviceId, clientIp, userAgent, userIdentifier, targetApp);
+      const rateStatus = await LoginRateLimiterService.checkLimit(userIdentifier, clientIp, rawDeviceId, userAgent);
       if (!rateStatus.allowed) {
         res.setHeader('Retry-After', String(rateStatus.retryAfterSeconds));
         res.status(429).json({
@@ -129,7 +129,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
 
     if (!resolution.authorized) {
       if (targetApp !== 'CUSTOMER') {
-        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp);
+        await LoginRateLimiterService.consumeAttempt(rawDeviceId, clientIp, userAgent, userIdentifier, targetApp);
       }
       await AuthAuditService.logEvent({
         eventType: 'APP_AUTHORIZE_DENIED',

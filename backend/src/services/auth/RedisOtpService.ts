@@ -31,9 +31,19 @@ export class RedisOtpService {
   private static readonly TTL_SECONDS = 300; // 5 minutes strict expiry
   private static readonly COOLDOWN_SECONDS = 60; // 60 seconds resend cooldown
   private static readonly MAX_ATTEMPTS = 5; // Max 5 verification attempts before invalidation
-  private static readonly HMAC_SECRET = process.env.OTP_HMAC_SECRET || process.env.SESSION_SECRET || 'olive-pizza-production-otp-hmac-salt-key-2026';
+  
+  private static getHmacSecret(): string {
+    const secret = process.env.OTP_HMAC_SECRET || process.env.SESSION_SECRET;
+    if (!secret) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('FATAL: OTP_HMAC_SECRET environment variable is required in production.');
+      }
+      return 'olive-pizza-dev-otp-hmac-salt-key-2026';
+    }
+    return secret;
+  }
 
-  // Memory fallback storage for unit tests or when Redis is temporarily offline
+  // Memory fallback storage for unit tests ONLY when NOT in production
   private static memoryFallback = new Map<string, {
     codeHash: string;
     expiresAt: number;
@@ -50,13 +60,13 @@ export class RedisOtpService {
 
   private static computeHmac(code: string, identifier: string): string {
     return crypto
-      .createHmac('sha256', this.HMAC_SECRET)
+      .createHmac('sha256', this.getHmacSecret())
       .update(`${identifier.trim().toLowerCase()}:${code}`)
       .digest('hex');
   }
 
   /**
-   * Generates a new secure 4-digit OTP, applies rate limiting and cooldown,
+   * Generates a new secure 6-digit OTP, applies rate limiting and cooldown,
    * and stores the keyed HMAC in Redis with a 5-minute TTL.
    */
   public static async generateOtp(
@@ -88,8 +98,8 @@ export class RedisOtpService {
           }
         }
 
-        // Generate 4-digit code (1000-9999)
-        const code = crypto.randomInt(1000, 10000).toString();
+        // Generate 6-digit code (100000-999999)
+        const code = crypto.randomInt(100000, 1000000).toString();
         const codeHash = this.computeHmac(code, cleanId);
         const expiresAt = now + this.TTL_SECONDS * 1000;
 
@@ -118,7 +128,18 @@ export class RedisOtpService {
       }
     }
 
-    // Fallback in-memory handler
+    // Fail closed in production mode if Redis is not connected or failed
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[RedisOtpService] FATAL: Production OTP generation requires an active Redis cluster connection.');
+      return {
+        success: false,
+        expiresInSeconds: 0,
+        retryAfterSeconds: 30,
+        message: 'Authentication service temporarily unavailable. Please try again shortly.'
+      };
+    }
+
+    // Fallback in-memory handler for development / local testing
     const existing = this.memoryFallback.get(key);
     if (existing && existing.lastRequestedAt) {
       const elapsedSec = Math.floor((now - existing.lastRequestedAt) / 1000);
@@ -133,7 +154,7 @@ export class RedisOtpService {
       }
     }
 
-    const code = crypto.randomInt(1000, 10000).toString();
+    const code = crypto.randomInt(100000, 1000000).toString();
     const codeHash = this.computeHmac(code, cleanId);
     this.memoryFallback.set(key, {
       codeHash,
@@ -248,7 +269,17 @@ export class RedisOtpService {
       }
     }
 
-    // Memory fallback verification
+    // Fail closed in production mode if Redis is not connected or failed
+    if (process.env.NODE_ENV === 'production') {
+      console.error('[RedisOtpService] FATAL: Production OTP verification requires an active Redis cluster connection.');
+      return {
+        success: false,
+        code: 'SERVICE_ERROR',
+        message: 'Authentication service temporarily unavailable. Please try again shortly.'
+      };
+    }
+
+    // Memory fallback verification for development / local testing
     const record = this.memoryFallback.get(key);
     if (!record) {
       return {

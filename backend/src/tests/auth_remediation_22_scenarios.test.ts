@@ -180,13 +180,13 @@ describe('Olive Pizza — Authentication & Authorization Remediation (22 Scenari
   });
 
   // Scenario 10: Redis OTP generation with HMAC-SHA256 salt (raw code not stored in plaintext)
-  it('Scenario 10: Redis OTP generates 4-digit code and stores HMAC-SHA256 hash at rest', async () => {
+  it('Scenario 10: Redis OTP generates 6-digit code and stores HMAC-SHA256 hash at rest', async () => {
     const phone = '+919111222333';
     const result = await RedisOtpService.generateOtp(phone, 'test-login');
     assert.strictEqual(result.success, true);
     assert.ok(result.code);
-    assert.strictEqual(result.code.length, 4);
-    assert.ok(/^\d{4}$/.test(result.code));
+    assert.strictEqual(result.code.length, 6);
+    assert.ok(/^\d{6}$/.test(result.code));
   });
 
   // Scenario 11: Redis OTP verification fails on wrong code
@@ -195,7 +195,7 @@ describe('Olive Pizza — Authentication & Authorization Remediation (22 Scenari
     const gen = await RedisOtpService.generateOtp(phone, 'test-wrong');
     assert.strictEqual(gen.success, true);
 
-    const wrongCode = gen.code === '1234' ? '5678' : '1234';
+    const wrongCode = gen.code === '123456' ? '654321' : '123456';
     const verify = await RedisOtpService.verifyAndConsumeOtp(phone, wrongCode, 'test-wrong');
     assert.strictEqual(verify.success, false);
     assert.strictEqual(verify.code, 'INVALID_CODE');
@@ -208,12 +208,12 @@ describe('Olive Pizza — Authentication & Authorization Remediation (22 Scenari
     await RedisOtpService.generateOtp(phone, 'test-lockout');
 
     for (let i = 0; i < 4; i++) {
-      const v = await RedisOtpService.verifyAndConsumeOtp(phone, '0000', 'test-lockout');
+      const v = await RedisOtpService.verifyAndConsumeOtp(phone, '000000', 'test-lockout');
       assert.strictEqual(v.success, false);
     }
 
     // 5th attempt triggers lockout
-    const finalAttempt = await RedisOtpService.verifyAndConsumeOtp(phone, '0000', 'test-lockout');
+    const finalAttempt = await RedisOtpService.verifyAndConsumeOtp(phone, '000000', 'test-lockout');
     assert.strictEqual(finalAttempt.success, false);
     assert.strictEqual(finalAttempt.code, 'TOO_MANY_ATTEMPTS');
   });

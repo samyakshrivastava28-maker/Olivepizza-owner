@@ -176,7 +176,9 @@ router.get('/truecaller/session/:requestId', async (req: Request, res: Response)
         error: 'Verification session not found or expired.'
       });
     }
-    const customToken = session.status === 'VERIFIED' ? session.customToken : undefined;
+    const customToken = session.status === 'VERIFIED'
+      ? await truecaller.consumeCustomToken(requestId)
+      : undefined;
     return res.json({
       success: true,
       status: session.status,

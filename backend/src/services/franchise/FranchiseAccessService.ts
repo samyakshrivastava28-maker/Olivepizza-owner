@@ -596,38 +596,7 @@ export class FranchiseAccessService {
       const effectiveRmPhone = normalizePhone(rawInputPhone || userData?.phone || userData?.phoneNumber || rmData?.phone || rmData?.phoneNumber || '').e164 || '';
       const effectiveRmEmail = emailLower || rmData?.email || userData?.email || '';
 
-      // Auto-heal: Ensure users document and restaurant_managers document have APPROVED status and app access
-      const rmHealPayload: Record<string, any> = {
-        id: uid,
-        status: 'APPROVED',
-        isActive: true,
-        branchId: resolvedBranchId,
-        franchiseId: resolvedFranchiseId,
-        updatedAt: new Date().toISOString()
-      };
-      if (effectiveRmEmail) rmHealPayload.email = effectiveRmEmail;
-      if (effectiveRmPhone) {
-        rmHealPayload.phone = effectiveRmPhone;
-        rmHealPayload.phoneNumber = effectiveRmPhone;
-      }
-      adminDb.collection('restaurant_managers').doc(uid).set(rmHealPayload, { merge: true }).catch(() => {});
-
-      const userHealPayload: Record<string, any> = {
-        role: 'restaurant_manager',
-        allowedApps: Array.from(new Set([...(userData?.allowedApps || []), 'RESTAURANT_MANAGER'])),
-        applicationAccess: { ...(userData?.applicationAccess || {}), app_restaurant_management: true },
-        branchId: resolvedBranchId,
-        franchiseId: resolvedFranchiseId,
-        status: 'APPROVED',
-        isActive: true
-      };
-      if (effectiveRmEmail) userHealPayload.email = effectiveRmEmail;
-      if (effectiveRmPhone) {
-        userHealPayload.phone = effectiveRmPhone;
-        userHealPayload.phoneNumber = effectiveRmPhone;
-      }
-      adminDb.collection('users').doc(uid).set(userHealPayload, { merge: true }).catch(() => {});
-
+      // Pure read-only authorization resolution without side-effect writes
       return {
         authorized: true,
         requiresPin,
