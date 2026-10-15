@@ -1,4 +1,4 @@
-package com.getcapacitor.myapp;
+package in.olivepizza.owner;
 
 import static org.junit.Assert.*;
 
@@ -9,9 +9,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 /**
- * Instrumented test, which will execute on an Android device.
- *
- * @see <a href="http://d.android.com/tools/testing">Testing documentation</a>
+ * Instrumented test verifying application context for Olive Pizza owner app.
  */
 @RunWith(AndroidJUnit4.class)
 public class ExampleInstrumentedTest {
@@ -20,7 +18,6 @@ public class ExampleInstrumentedTest {
     public void useAppContext() throws Exception {
         // Context of the app under test.
         Context appContext = InstrumentationRegistry.getInstrumentation().getTargetContext();
-
-        assertEquals("com.getcapacitor.app", appContext.getPackageName());
+        assertEquals("in.olivepizza.owner", appContext.getPackageName());
     }
 }

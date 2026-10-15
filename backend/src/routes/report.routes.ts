@@ -11,17 +11,29 @@ import { GoogleSheetsMonthlyReportService } from '../services/reports/GoogleShee
 import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngine.js';
 import { pgPool, query } from '../config/postgres.js';
 import crypto from 'crypto';
+import { redisService, getRedisClient } from '../config/redis.js';
 
 const router = Router();
+
+export const isAuthorizedOwner = (user?: any): boolean => {
+  if (!user) return false;
+  const role = (user.role || '').toUpperCase();
+  const email = (user.email || '').toLowerCase();
+  return (
+    role === 'OWNER' ||
+    role === 'ADMIN' ||
+    role === 'PLATFORM_OWNER' ||
+    role === 'DEVELOPER' ||
+    email === 'olivepizzarjn@gmail.com' ||
+    email === 'webhub2811@gmail.com' ||
+    email === 'olivepizzamaker@gmail.com'
+  );
+};
 
 // Middleware: Require Owner or Admin role (supporting canonical roles and authorized master accounts)
 const requireOwnerOrAdmin = (req: AuthRequest, res: Response, next: any) => {
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
-  const role = (req.user.role || '').toLowerCase();
-  const isAuthorized = ['owner', 'admin', 'platform_owner', 'developer'].includes(role) ||
-    req.user.email === 'olivepizzarjn@gmail.com' ||
-    req.user.email === 'webhub2811@gmail.com';
-  if (!isAuthorized) {
+  if (!isAuthorizedOwner(req.user)) {
     return res.status(403).json({ error: 'Forbidden. Owner or Admin access required.' });
   }
   next();
@@ -297,13 +309,24 @@ async function handleListMonthlyReports(req: AuthRequest, res: Response): Promis
     const allReports = await CloudflareReportService.listMonthlyReports();
     
     // Filter reports according to authoritative caller scope
+    const filterBranchId = (req.query.branchId as string) || (req.query.restaurantId as string);
     const scopedReports = allReports.filter((r: any) => {
-      if (isOwner) return true;
+      if (isOwner) {
+        if (filterBranchId && filterBranchId !== 'all') {
+          return r.branchId === filterBranchId || r.restaurantId === filterBranchId;
+        }
+        return true;
+      }
       if (isFranchiseManager) {
-        return r.franchiseId === user.franchiseId || !r.franchiseId;
+        const matchesFranchise = r.franchiseId === user.franchiseId || !r.franchiseId;
+        if (filterBranchId && filterBranchId !== 'all') {
+          return matchesFranchise && (r.branchId === filterBranchId || r.restaurantId === filterBranchId);
+        }
+        return matchesFranchise;
       }
       if (isRestaurantManager) {
-        return (r.branchId && r.branchId === user.branchId) || (r.restaurantId && r.restaurantId === user.branchId);
+        const effectiveBranchId = user.branchId || filterBranchId;
+        return (r.branchId && r.branchId === effectiveBranchId) || (r.restaurantId && r.restaurantId === effectiveBranchId);
       }
       return false;
     });
@@ -327,6 +350,236 @@ async function handleListMonthlyReports(req: AuthRequest, res: Response): Promis
 
 router.get('/monthly', verifyToken, handleListMonthlyReports);
 router.get('/list', verifyToken, handleListMonthlyReports);
+
+/**
+ * Redis Rate-Limiter for Custom PDF Reports
+ * Key: ratelimit:pdf:custom:branch:{branchId}
+ * TTL: 3600s (1 hour)
+ * Owner: Unlimited access (bypasses check)
+ * Restaurant Manager: Max 2 custom PDFs per hour.
+ */
+async function getBranchCustomReportQuota(branchId: string, isOwner: boolean): Promise<{
+  remaining: number;
+  limit: number;
+  resetInSeconds: number;
+  minutesLeft: number;
+  allowed: boolean;
+}> {
+  if (isOwner) {
+    return {
+      remaining: 999,
+      limit: 2,
+      resetInSeconds: 0,
+      minutesLeft: 0,
+      allowed: true
+    };
+  }
+
+  const client = getRedisClient();
+  const redisKey = `ratelimit:pdf:custom:branch:${branchId}`;
+
+  if (!client || !redisService.isAvailable()) {
+    return {
+      remaining: 2,
+      limit: 2,
+      resetInSeconds: 3600,
+      minutesLeft: 60,
+      allowed: true
+    };
+  }
+
+  try {
+    const rawVal = await client.get(redisKey);
+    const count = rawVal ? parseInt(rawVal, 10) : 0;
+    const ttl = await client.ttl(redisKey);
+    const resetInSeconds = ttl > 0 ? ttl : 0;
+    const minutesLeft = Math.max(1, Math.ceil(resetInSeconds / 60));
+    const remaining = Math.max(0, 2 - count);
+
+    return {
+      remaining,
+      limit: 2,
+      resetInSeconds,
+      minutesLeft,
+      allowed: count < 2
+    };
+  } catch (err) {
+    console.warn('[ReportRoutes] Redis quota check error:', err);
+    return {
+      remaining: 2,
+      limit: 2,
+      resetInSeconds: 0,
+      minutesLeft: 0,
+      allowed: true
+    };
+  }
+}
+
+async function consumeBranchCustomReportQuota(branchId: string, isOwner: boolean): Promise<void> {
+  if (isOwner) return;
+
+  const client = getRedisClient();
+  if (!client || !redisService.isAvailable()) return;
+
+  const redisKey = `ratelimit:pdf:custom:branch:${branchId}`;
+  try {
+    const current = await client.incr(redisKey);
+    if (current === 1) {
+      await client.expire(redisKey, 3600);
+    }
+  } catch (err) {
+    console.warn('[ReportRoutes] Redis quota increment error:', err);
+  }
+}
+
+/**
+ * GET /api/reports/quota?branchId=...
+ * Returns remaining custom report quota for the restaurant branch.
+ * Owner accounts have unlimited access.
+ * Restaurant Managers have max 2 custom reports per 1 hour window.
+ */
+router.get('/quota', verifyToken, async (req: AuthRequest, res: Response) => {
+  try {
+    const user = req.user;
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const isOwner = isAuthorizedOwner(user);
+    const branchId = (req.query.branchId as string) || user.branchId || (user as any).restaurantId || 'main_branch';
+
+    const quota = await getBranchCustomReportQuota(branchId, isOwner);
+
+    res.json({
+      remaining: quota.remaining,
+      limit: 2,
+      resetInSeconds: quota.resetInSeconds
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function normalizePeriod(raw?: string): 'today' | 'yesterday' | 'last_day' | 'last_2_days' | 'this_week' | 'last_week' | 'this_month' | 'ongoing_month' | 'ongoing_month_live' | 'last_month' | 'this_year' | 'last_year' | 'all_time' | 'custom' {
+  if (!raw) return 'ongoing_month_live';
+  const clean = raw.toLowerCase().trim().replace(/[\s-]+/g, '_');
+  if (clean.includes('ongoing') || clean.includes('live')) return 'ongoing_month_live';
+  if (clean.includes('last_2') || clean.includes('2_day')) return 'last_2_days';
+  if (clean.includes('this_week')) return 'this_week';
+  if (clean.includes('last_week')) return 'last_week';
+  if (clean.includes('yesterday') || clean.includes('last_day')) return 'last_day';
+  if (clean.includes('today')) return 'today';
+  if (clean.includes('this_month')) return 'this_month';
+  if (clean.includes('last_month')) return 'last_month';
+  if (clean.includes('this_year')) return 'this_year';
+  if (clean.includes('last_year')) return 'last_year';
+  if (clean.includes('all_time')) return 'all_time';
+  if (clean.includes('custom')) return 'custom';
+  return 'ongoing_month_live';
+}
+
+/**
+ * Handler for Custom PDF Reports:
+ * - CUSTOM REPORTS RULE: Custom reports (Ongoing month live, last 2 days, this week, last day, all time, custom date ranges)
+ *   must NEVER be saved in Cloudflare R2!
+ * - Compiled directly in memory (Buffer) and streamed over HTTP.
+ * - RATE LIMITER: Uses Redis key `ratelimit:pdf:custom:branch:{branchId}` with 3600s TTL.
+ *   Restaurant managers max 2 custom PDFs/hr (429 if exceeded). Owners have unlimited access.
+ */
+async function handleCustomReportPdf(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+      return;
+    }
+
+    const callerRole = (user.role || '').toLowerCase();
+    const isOwner = isAuthorizedOwner(user);
+    const isFranchiseManager = ['franchise_owner', 'franchise_manager'].includes(callerRole);
+    const isRestaurantManager = ['restaurant_manager', 'manager', 'kitchen_manager'].includes(callerRole);
+
+    if (!isOwner && !isFranchiseManager && !isRestaurantManager) {
+      res.status(403).json({ error: 'Forbidden: Access to custom business reports is restricted.' });
+      return;
+    }
+
+    // Resolve branch and franchise
+    const branchId = (req.query.branchId as string) || req.body?.branchId || user.branchId || (user as any).restaurantId || 'main_branch';
+    const franchiseId = (req.query.franchiseId as string) || req.body?.franchiseId || user.franchiseId || 'fra_primary';
+    const channel = ((req.query.channel as string) || req.body?.channel || 'ALL') as 'ALL' | 'ONLINE' | 'POS';
+    const download = (req.query.download === 'true') || req.body?.download === true;
+
+    // Rate Limiter check for Restaurant Managers
+    const quota = await getBranchCustomReportQuota(branchId, isOwner);
+    if (!quota.allowed) {
+      res.status(429).json({
+        error: `Hourly custom PDF limit reached (2 PDFs/hr). Next PDF download available in ${quota.minutesLeft} minutes.`
+      });
+      return;
+    }
+
+    // Resolve date range & period
+    const rawPeriod = (req.query.period as string) || req.body?.period || (req.query.timeRange as string) || req.body?.timeRange || 'ongoing_month_live';
+    const normalizedPeriod = normalizePeriod(rawPeriod);
+    const customStart = (req.query.startDate as string) || req.body?.startDate;
+    const customEnd = (req.query.endDate as string) || req.body?.endDate;
+
+    const { dateRange, periodLabel } = SalesCalculationEngine.resolveDateRange(normalizedPeriod, customStart, customEnd);
+
+    // Fetch branch & franchise metadata
+    let branchName = 'Olive Pizza Branch';
+    let franchiseName = 'Olive Pizza Franchise';
+    let gstin = '22AAAAO1234A1Z5';
+    let fssai = '10522016000123';
+
+    try {
+      const bDoc = await adminDb.collection('franchises').doc(branchId).get();
+      if (bDoc.exists) {
+        const data = bDoc.data()!;
+        branchName = data.name || data.branchName || branchName;
+        franchiseName = data.franchiseName || franchiseName;
+        gstin = data.gstin || gstin;
+        fssai = data.fssai || fssai;
+      }
+    } catch (_) {}
+
+    // In-memory compilation only — NEVER SAVE IN CLOUDFLARE R2!
+    const pdfBuffer = await MonthlyPdfReportService.generateMonthlyReportBuffer({
+      startDate: dateRange.startDate,
+      endDate: dateRange.endDate,
+      periodLabel,
+      branchId,
+      branchName,
+      franchiseId,
+      franchiseName,
+      gstin,
+      fssai,
+      channel,
+      isCustomReport: true
+    });
+
+    // Increment branch usage count in Redis (if non-owner)
+    await consumeBranchCustomReportQuota(branchId, isOwner);
+
+    // Stream directly over HTTP
+    const filename = `Olive-Pizza-Report-${branchId}-${dateRange.startDate}-to-${dateRange.endDate}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdfBuffer);
+  } catch (err: any) {
+    console.error('[Custom Report Generation Error]:', err);
+    res.status(500).json({ error: err.message || 'Failed to generate custom report PDF' });
+  }
+}
+
+// Custom Report Streaming Endpoints (Never stored in Cloudflare R2)
+router.get('/custom/pdf', verifyToken, handleCustomReportPdf);
+router.post('/custom/pdf', verifyToken, handleCustomReportPdf);
+router.get('/custom-pdf', verifyToken, handleCustomReportPdf);
+router.post('/custom-pdf', verifyToken, handleCustomReportPdf);
+router.get('/custom', verifyToken, handleCustomReportPdf);
+router.post('/custom', verifyToken, handleCustomReportPdf);
+router.post('/generate-custom', verifyToken, handleCustomReportPdf);
+router.get('/generate-custom', verifyToken, handleCustomReportPdf);
 
 /**
  * POST /api/reports/generate-monthly

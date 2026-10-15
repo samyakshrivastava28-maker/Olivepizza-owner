@@ -2,7 +2,7 @@ name: Build iOS — Owner
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/firebase-test-lab-artifacts]
     tags:
       - 'v*'
   workflow_dispatch:
@@ -87,6 +87,35 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             PROVISIONING_PROFILE_SPECIFIER="" \
             2>&1 | xcpretty || true
+
+      
+      # Build & Package iOS XCTest Suite for Firebase Test Lab
+      - name: Build & Package Firebase Test Lab iOS XCTest
+        run: |
+          chmod +x scripts/package-ios-testlab.sh
+          ./scripts/package-ios-testlab.sh build-and-package "olivepizza-owner" "build/DerivedData" "testlab-artifacts"
+
+      # Upload Firebase Test Lab iOS Package
+      - name: Upload Firebase Test Lab iOS Package
+        uses: actions/upload-artifact@v4
+        with:
+          name: OlivePizza-Owner-FirebaseTestLab-iOS
+          path: testlab-artifacts/*.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      # Diagnostic Firebase Test Lab Execution (iOS)
+      - name: Firebase Test Lab Execution (iOS)
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -n "$GCP_SA_KEY" ] || [ -n "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "⚡ GCP service account key detected in secrets. Initiating iOS XCTest run..."
+          else
+            echo "ℹ️ Firebase Test Lab cloud runner skipped: GCP_SA_KEY secret not configured in repository."
+            echo "Single .xctestrun zip archive uploaded as workflow artifact 'OlivePizza-Owner-FirebaseTestLab-iOS'."
+          fi
 
       - name: Export Signed IPA (if signing secrets exist)
         env:

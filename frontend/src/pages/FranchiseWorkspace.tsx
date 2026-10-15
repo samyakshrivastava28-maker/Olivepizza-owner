@@ -48,12 +48,15 @@ import {
   BarChart3,
   PieChart,
   UtensilsCrossed,
-  ArrowRight
+  ArrowRight,
+  Download,
+  Eye
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { fetchApi } from '../lib/api';
 import toast from 'react-hot-toast';
+import { PdfViewerModal } from '../components/common/PdfViewerModal';
 
 export default function FranchiseWorkspace() {
   const { franchiseSlug } = useParams<{ franchiseSlug: string }>();
@@ -84,6 +87,32 @@ export default function FranchiseWorkspace() {
   const [historicalOrders, setHistoricalOrders] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [reportsData, setReportsData] = useState<any>(null);
+  const [monthlyPdfReports, setMonthlyPdfReports] = useState<any[]>([]);
+  const [reportsLoading, setReportsLoading] = useState<boolean>(false);
+  const [generatingCustomPdf, setGeneratingCustomPdf] = useState<boolean>(false);
+  const [customTimeRange, setCustomTimeRange] = useState<string>('Ongoing Month');
+  const [pdfModal, setPdfModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    pdfUrl: string;
+    downloadUrl?: string;
+    subtitle?: string;
+  }>({
+    isOpen: false,
+    title: '',
+    pdfUrl: '',
+  });
+
+  const openPdfViewer = (title: string, pdfUrl: string, downloadUrl?: string, subtitle?: string) => {
+    setPdfModal({
+      isOpen: true,
+      title,
+      pdfUrl,
+      downloadUrl: downloadUrl || `${pdfUrl}?download=true`,
+      subtitle,
+    });
+  };
+
   const [accessAccounts, setAccessAccounts] = useState<any[]>([]);
   const [pendingManagers, setPendingManagers] = useState<any[]>([]);
 
@@ -289,6 +318,82 @@ export default function FranchiseWorkspace() {
   const cleanFranchiseName = useMemo(() => {
     return franchise?.name || 'Olive Pizza';
   }, [franchise]);
+
+  // Load All-Time Monthly Reports for this Franchise & Branch
+  useEffect(() => {
+    if (!franchise?.id) return;
+    setReportsLoading(true);
+    const branchQuery = selectedBranchFilter !== 'all' ? `&branchId=${encodeURIComponent(selectedBranchFilter)}` : '';
+    fetchApi(`/api/reports/monthly?franchiseId=${encodeURIComponent(franchise.id)}${branchQuery}`)
+      .then(async (r) => (r.ok ? r.json() : {}))
+      .then((d) => {
+        if (Array.isArray(d)) setMonthlyPdfReports(d);
+        else if (Array.isArray(d.reports)) setMonthlyPdfReports(d.reports);
+      })
+      .catch((e) => console.warn('[FranchiseWorkspace] PDF reports load fallback:', e))
+      .finally(() => setReportsLoading(false));
+  }, [franchise?.id, selectedBranchFilter]);
+
+  const handleGenerateFranchiseCustomPdf = async (timeRange: string, action: 'preview' | 'download' = 'preview') => {
+    if (!franchise) return;
+    setGeneratingCustomPdf(true);
+    const toastId = toast.loading(`Generating ${timeRange} audit PDF for ${cleanFranchiseName}...`);
+    try {
+      const targetBranchId = selectedBranchFilter !== 'all' ? selectedBranchFilter : (branches[0]?.id || 'main_branch');
+      const targetBranchName = selectedBranchFilter !== 'all'
+        ? (branches.find((b) => b.id === selectedBranchFilter)?.name || selectedBranchFilter)
+        : `${cleanFranchiseName} — Consolidated`;
+
+      const res = await fetchApi('/api/reports/generate-custom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          timeRange,
+          branchId: targetBranchId,
+          branchName: targetBranchName,
+          franchiseId: franchise.id,
+          franchiseName: cleanFranchiseName,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.report) {
+        toast.success(`Custom ${timeRange} PDF ready!`, { id: toastId });
+        const viewUrl = data.report.viewUrl || data.report.pdfUrl;
+        const downloadUrl = data.report.downloadUrl || `${viewUrl}?download=true`;
+
+        if (action === 'download') {
+          const a = document.createElement('a');
+          a.href = downloadUrl;
+          a.download = `OlivePizza_${cleanFranchiseName.replace(/\s+/g, '_')}_${timeRange.replace(/\s+/g, '_')}.pdf`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        } else {
+          openPdfViewer(
+            `Custom Statement — ${timeRange}`,
+            viewUrl,
+            downloadUrl,
+            `${cleanFranchiseName} • ${targetBranchName} • Owner Unlimited Access`
+          );
+        }
+
+        // Refresh monthly list
+        const branchQuery = selectedBranchFilter !== 'all' ? `&branchId=${encodeURIComponent(selectedBranchFilter)}` : '';
+        fetchApi(`/api/reports/monthly?franchiseId=${encodeURIComponent(franchise.id)}${branchQuery}`)
+          .then(async (r) => (r.ok ? r.json() : {}))
+          .then((d) => {
+            if (Array.isArray(d)) setMonthlyPdfReports(d);
+            else if (Array.isArray(d.reports)) setMonthlyPdfReports(d.reports);
+          });
+      } else {
+        toast.error(data.error || 'Failed to generate custom report', { id: toastId });
+      }
+    } catch (err: any) {
+      toast.error('Failed to generate PDF: ' + err.message, { id: toastId });
+    } finally {
+      setGeneratingCustomPdf(false);
+    }
+  };
 
   // State for Live Dashboard Stream filters
   const [liveStreamFilter, setLiveStreamFilter] = useState<'all' | 'active' | 'preparing' | 'ready' | 'delivery' | 'completed'>('all');
@@ -2044,24 +2149,36 @@ export default function FranchiseWorkspace() {
       {/* ─── 10. TAB: FINANCIAL & REPORTS ─────────────────────────────────────── */}
       {activeTab === 'reports' && (
         <div className="space-y-6">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
                 <span>Financial Statements & Operational Reports</span>
               </h3>
               <p className="text-xs text-slate-400">
-                Authoritative financial reporting and Google Sheets sync for {cleanFranchiseName}
+                Authoritative financial reporting and Cloudflare R2 archive for {cleanFranchiseName}
               </p>
             </div>
             <button
-              onClick={() => loadFranchiseWorkspace()}
-              className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs transition flex items-center gap-1"
+              onClick={() => {
+                loadFranchiseWorkspace();
+                if (franchise?.id) {
+                  const branchQuery = selectedBranchFilter !== 'all' ? `&branchId=${encodeURIComponent(selectedBranchFilter)}` : '';
+                  fetchApi(`/api/reports/monthly?franchiseId=${encodeURIComponent(franchise.id)}${branchQuery}`)
+                    .then(async (r) => (r.ok ? r.json() : {}))
+                    .then((d) => {
+                      if (Array.isArray(d)) setMonthlyPdfReports(d);
+                      else if (Array.isArray(d.reports)) setMonthlyPdfReports(d.reports);
+                    });
+                }
+              }}
+              className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs transition flex items-center gap-1.5"
             >
               <RefreshCw className="w-3.5 h-3.5" /> Refresh Reports
             </button>
           </div>
 
+          {/* Quick Metrics */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-2">
               <span className="text-xs text-slate-400 font-semibold uppercase">Total Recorded Revenue</span>
@@ -2086,8 +2203,199 @@ export default function FranchiseWorkspace() {
                 <span className="w-2 h-2 rounded-full bg-cyan-400"></span>
                 <h4 className="text-base font-bold text-white">Encrypted Object Store</h4>
               </div>
-              <p className="text-[11px] text-slate-500">Signed billing invoices and financial statements</p>
+              <p className="text-[11px] text-slate-500">{monthlyPdfReports.length} statements archived</p>
             </div>
+          </div>
+
+          {/* Section B: Custom Reports with 7 Time Filters */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Filter className="w-4 h-4 text-amber-400" />
+                  <span>On-Demand Custom Audit Reports</span>
+                </h4>
+                <p className="text-xs text-slate-400">Select any window to export. Owner has unlimited custom PDF downloads.</p>
+              </div>
+              <span className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3" /> Unlimited Downloads
+              </span>
+            </div>
+
+            {/* 7 Time Filters */}
+            <div className="flex flex-wrap gap-2">
+              {[
+                'Ongoing Month',
+                'Previous Month',
+                'This Week',
+                'Previous Week',
+                'Last Day',
+                'Last 2 Days',
+                'All Time',
+              ].map((range) => {
+                const isSelected = customTimeRange === range;
+                return (
+                  <button
+                    key={range}
+                    onClick={() => setCustomTimeRange(range)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'bg-amber-500 text-black shadow-md shadow-amber-500/20'
+                        : 'bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/60'
+                    }`}
+                  >
+                    <Clock className="w-3 h-3" />
+                    {range}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
+              <div className="text-xs text-slate-400">
+                Selected Filter: <strong className="text-amber-400">{customTimeRange}</strong> • Branch Scope:{' '}
+                <strong className="text-white">
+                  {selectedBranchFilter === 'all'
+                    ? 'All Branches'
+                    : branches.find((b) => b.id === selectedBranchFilter)?.name || selectedBranchFilter}
+                </strong>
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  onClick={() => handleGenerateFranchiseCustomPdf(customTimeRange, 'preview')}
+                  disabled={generatingCustomPdf}
+                  className="flex-1 sm:flex-none px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition disabled:opacity-50"
+                >
+                  <Eye className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Preview in App</span>
+                </button>
+                <button
+                  onClick={() => handleGenerateFranchiseCustomPdf(customTimeRange, 'download')}
+                  disabled={generatingCustomPdf}
+                  className="flex-1 sm:flex-none px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition shadow-md shadow-amber-500/20 disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download Custom PDF</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Section C: All-Time Monthly Reports from Cloudflare R2 */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-cyan-400" />
+                  <span>All-Time Monthly Statements Archive (Cloudflare R2)</span>
+                </h4>
+                <p className="text-xs text-slate-400">
+                  Authoritative monthly executive balance sheets & financial statements
+                </p>
+              </div>
+              <span className="text-xs font-bold text-slate-400">
+                {monthlyPdfReports.length} {monthlyPdfReports.length === 1 ? 'Report' : 'Reports'}
+              </span>
+            </div>
+
+            {reportsLoading ? (
+              <div className="text-center py-10 space-y-2">
+                <div className="w-8 h-8 rounded-full border-2 border-amber-500 border-t-transparent animate-spin mx-auto" />
+                <p className="text-xs text-slate-400">Loading Cloudflare R2 archive...</p>
+              </div>
+            ) : monthlyPdfReports.length === 0 ? (
+              <div className="text-center py-12 text-slate-500 space-y-3">
+                <FileText className="w-10 h-10 mx-auto text-slate-600 opacity-40" />
+                <p className="text-xs font-semibold text-slate-400">No monthly PDF statements found for this branch.</p>
+                <p className="text-[11px] text-slate-500 max-w-sm mx-auto">
+                  Monthly audit reports are archived on the 1st of every month at 00:05 AM IST.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {monthlyPdfReports.map((r: any, idx: number) => {
+                  const viewLink = r.viewUrl || r.reportUrl || `/api/reports/monthly/${r.id}/view`;
+                  const downloadLink = r.downloadUrl || `${viewLink}?download=true`;
+                  const revenue = Number(r.revenue || 0);
+                  const ordersCount = Number(r.orders || 0);
+                  const aov = r.averageOrderValue
+                    ? Math.round(r.averageOrderValue)
+                    : ordersCount > 0
+                    ? Math.round(revenue / ordersCount)
+                    : 0;
+
+                  return (
+                    <div
+                      key={r.id || idx}
+                      className="p-4 bg-slate-950/70 border border-slate-800 rounded-xl space-y-3 flex flex-col justify-between"
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="px-2.5 py-0.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-full text-[11px] font-black uppercase flex items-center gap-1">
+                            <Calendar className="w-3 h-3" /> {r.period || `${r.month || ''} ${r.year || ''}`}
+                          </span>
+                          <span className="px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-[10px] font-bold flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" /> Audited
+                          </span>
+                        </div>
+
+                        <div>
+                          <h5 className="text-xs font-extrabold text-white">
+                            {r.branchName || r.title || `Olive Pizza — ${r.branchId || 'HQ'}`}
+                          </h5>
+                          <span className="text-[10px] text-slate-400 block">
+                            {cleanFranchiseName} • Cloudflare R2
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/80 text-[10px]">
+                          <div className="bg-slate-900 p-2 rounded-lg">
+                            <span className="text-slate-500 block uppercase font-bold">Gross</span>
+                            <span className="text-emerald-400 font-mono font-bold block mt-0.5">
+                              ₹{revenue.toLocaleString('en-IN')}
+                            </span>
+                          </div>
+                          <div className="bg-slate-900 p-2 rounded-lg">
+                            <span className="text-slate-500 block uppercase font-bold">Orders</span>
+                            <span className="text-white font-mono font-bold block mt-0.5">{ordersCount}</span>
+                          </div>
+                          <div className="bg-slate-900 p-2 rounded-lg">
+                            <span className="text-slate-500 block uppercase font-bold">AOV</span>
+                            <span className="text-amber-400 font-mono font-bold block mt-0.5">₹{aov}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-2 border-t border-slate-800/60">
+                        <button
+                          onClick={() =>
+                            openPdfViewer(
+                              r.title || `${r.period || ''} Statement`,
+                              viewLink,
+                              downloadLink,
+                              `${cleanFranchiseName} • ${r.branchName || r.branchId || 'Branch'}`
+                            )
+                          }
+                          className="flex-1 py-1.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5 text-blue-400" />
+                          <span>View PDF</span>
+                        </button>
+                        <a
+                          href={downloadLink}
+                          download
+                          className="flex-1 py-1.5 px-3 bg-amber-500 hover:bg-amber-400 text-black rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Download</span>
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2251,6 +2559,16 @@ export default function FranchiseWorkspace() {
           </div>
         </div>
       )}
+
+      {/* In-App PDF Viewer Modal */}
+      <PdfViewerModal
+        isOpen={pdfModal.isOpen}
+        onClose={() => setPdfModal((prev) => ({ ...prev, isOpen: false }))}
+        title={pdfModal.title}
+        pdfUrl={pdfModal.pdfUrl}
+        downloadUrl={pdfModal.downloadUrl}
+        subtitle={pdfModal.subtitle}
+      />
     </div>
   );
 }

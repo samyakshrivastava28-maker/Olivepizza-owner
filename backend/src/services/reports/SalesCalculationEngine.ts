@@ -110,18 +110,25 @@ export class SalesCalculationEngine {
    * Resolves standard predefined or custom date range into [startDate, endDate] in IST.
    */
   public static resolveDateRange(
-    period: 'today' | 'yesterday' | 'this_week' | 'last_week' | 'this_month' | 'last_month' | 'this_year' | 'last_year' | 'custom' = 'today',
+    period: 'today' | 'yesterday' | 'last_day' | 'last_2_days' | 'this_week' | 'last_week' | 'this_month' | 'ongoing_month' | 'ongoing_month_live' | 'last_month' | 'this_year' | 'last_year' | 'all_time' | 'custom' = 'today',
     customStart?: string,
     customEnd?: string
   ): { dateRange: DateRange; periodLabel: string } {
     const todayStr = BillingNumberService.getLocalDateString();
     const now = new Date();
 
-    if (period === 'yesterday') {
+    if (period === 'yesterday' || period === 'last_day') {
       const y = new Date(now);
       y.setDate(y.getDate() - 1);
       const yStr = BillingNumberService.getLocalDateString(y);
       return { dateRange: { startDate: yStr, endDate: yStr }, periodLabel: 'Yesterday' };
+    }
+
+    if (period === 'last_2_days') {
+      const twoDaysAgo = new Date(now);
+      twoDaysAgo.setDate(twoDaysAgo.getDate() - 1);
+      const startStr = BillingNumberService.getLocalDateString(twoDaysAgo);
+      return { dateRange: { startDate: startStr, endDate: todayStr }, periodLabel: 'Last 2 Days' };
     }
 
     if (period === 'this_week') {
@@ -150,11 +157,12 @@ export class SalesCalculationEngine {
       };
     }
 
-    if (period === 'this_month') {
+    if (period === 'this_month' || period === 'ongoing_month' || period === 'ongoing_month_live') {
       const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
+      const monthName = now.toLocaleString('en-US', { month: 'long' });
       return {
         dateRange: { startDate: BillingNumberService.getLocalDateString(firstDay), endDate: todayStr },
-        periodLabel: 'This Month'
+        periodLabel: `Ongoing Month (${monthName} ${now.getFullYear()})`
       };
     }
 
@@ -175,6 +183,13 @@ export class SalesCalculationEngine {
       return {
         dateRange: { startDate: BillingNumberService.getLocalDateString(firstDayYear), endDate: todayStr },
         periodLabel: 'This Year'
+      };
+    }
+
+    if (period === 'all_time') {
+      return {
+        dateRange: { startDate: '2024-01-01', endDate: todayStr },
+        periodLabel: 'All Time'
       };
     }
 

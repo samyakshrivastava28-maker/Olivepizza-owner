@@ -21,12 +21,36 @@ import {
   ShieldCheck,
   Building2,
   Eye,
+  Filter,
+  Clock,
+  Printer,
+  ChevronDown,
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
 import { Order } from '../types/models';
 import { fetchApi } from '../lib/api';
 import toast from 'react-hot-toast';
+import { PdfViewerModal } from '../components/common/PdfViewerModal';
+
+export type TimeRangeFilter =
+  | 'Ongoing Month'
+  | 'Previous Month'
+  | 'This Week'
+  | 'Previous Week'
+  | 'Last Day'
+  | 'Last 2 Days'
+  | 'All Time';
+
+const TIME_RANGES: TimeRangeFilter[] = [
+  'Ongoing Month',
+  'Previous Month',
+  'This Week',
+  'Previous Week',
+  'Last Day',
+  'Last 2 Days',
+  'All Time',
+];
 
 function parseTimestamp(val: any): Date {
   if (!val) return new Date();
@@ -39,12 +63,43 @@ function parseTimestamp(val: any): Date {
 }
 
 export default function RestaurantReports() {
-  const [activeTab, setActiveTab] = useState<'analytics_hub' | 'ongoing' | 'last_month' | 'pdfs'>('analytics_hub');
+  const [activeTab, setActiveTab] = useState<'analytics_hub' | 'custom_reports' | 'ongoing' | 'last_month' | 'pdfs'>('analytics_hub');
   const [orders, setOrders] = useState<Order[]>([]);
   const [pdfReports, setPdfReports] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [generatingCustomPdf, setGeneratingCustomPdf] = useState(false);
   const [syncingSheet, setSyncingSheet] = useState(false);
+
+  // Franchise & Branch Selection State
+  const [branches, setBranches] = useState<any[]>([]);
+  const [selectedBranch, setSelectedBranch] = useState<string>('all');
+
+  // Custom Report Time Filter State (7 options)
+  const [customTimeRange, setCustomTimeRange] = useState<TimeRangeFilter>('Ongoing Month');
+
+  // In-App PDF Preview Modal State
+  const [pdfModal, setPdfModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    pdfUrl: string;
+    downloadUrl?: string;
+    subtitle?: string;
+  }>({
+    isOpen: false,
+    title: '',
+    pdfUrl: '',
+  });
+
+  const openPdfViewer = (title: string, pdfUrl: string, downloadUrl?: string, subtitle?: string) => {
+    setPdfModal({
+      isOpen: true,
+      title,
+      pdfUrl,
+      downloadUrl: downloadUrl || `${pdfUrl}?download=true`,
+      subtitle,
+    });
+  };
 
   // Looker Studio & Google Sheets Configuration
   const [lookerConfig, setLookerConfig] = useState<{
@@ -71,7 +126,54 @@ export default function RestaurantReports() {
   const lastMonthDate = new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1);
   const lastMonthName = lastMonthDate.toLocaleString('default', { month: 'long', year: 'numeric' });
 
-  // Load orders for analytics calculations & Looker Config
+  // 1. Fetch Branches for Selection
+  useEffect(() => {
+    fetchApi('/api/franchises/list')
+      .then(async (res) => (res.ok ? res.json() : {}))
+      .then((data) => {
+        if (data.franchises && Array.isArray(data.franchises)) {
+          const allB: any[] = [];
+          data.franchises.forEach((f: any) => {
+            if (Array.isArray(f.branches)) {
+              allB.push(...f.branches.map((b: any) => ({ ...b, franchiseName: f.name })));
+            }
+          });
+          if (allB.length > 0) setBranches(allB);
+        }
+      })
+      .catch(() => {});
+
+    fetchApi('/api/franchises/fra_rajnandgaon/branches')
+      .then(async (res) => (res.ok ? res.json() : {}))
+      .then((data) => {
+        if (data.branches && Array.isArray(data.branches)) {
+          setBranches((prev) => {
+            const map = new Map(prev.map((b) => [b.id, b]));
+            data.branches.forEach((b: any) => map.set(b.id, b));
+            return Array.from(map.values());
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  // 2. Fetch PDF reports list (scoped to selectedBranch)
+  const loadPdfReports = useCallback((branchId: string = selectedBranch) => {
+    const query = branchId !== 'all' ? `?branchId=${encodeURIComponent(branchId)}` : '';
+    fetchApi(`/api/reports/monthly${query}`)
+      .then(async (res) => { if (!res.ok) return {}; return res.json().catch(() => ({})); })
+      .then((data) => {
+        if (Array.isArray(data)) setPdfReports(data);
+        else if (data.reports) setPdfReports(data.reports);
+      })
+      .catch((e) => console.warn('[RestaurantReports] Reports list fallback:', e));
+  }, [selectedBranch]);
+
+  useEffect(() => {
+    loadPdfReports(selectedBranch);
+  }, [selectedBranch, loadPdfReports]);
+
+  // 3. Load orders for analytics calculations & Looker Config
   useEffect(() => {
     setLoading(true);
     const unsubscribe = onSnapshot(
@@ -92,19 +194,6 @@ export default function RestaurantReports() {
       }
     );
 
-    // Fetch PDF reports list
-    const loadPdfReports = () => {
-      fetchApi('/api/reports/monthly')
-        .then(async (res) => { if (!res.ok) return {}; return res.json().catch(() => ({})); })
-        .then((data) => {
-          if (Array.isArray(data)) setPdfReports(data);
-          else if (data.reports) setPdfReports(data.reports);
-        })
-        .catch((e) => console.warn('[RestaurantReports] Reports list fallback:', e));
-    };
-
-    loadPdfReports();
-
     // Fetch Looker Studio & Google Sheets Config
     fetchApi('/api/reports/looker-studio/config')
       .then(async (res) => { if (!res.ok) return {}; return res.json().catch(() => ({})); })
@@ -119,24 +208,80 @@ export default function RestaurantReports() {
     return () => unsubscribe();
   }, []);
 
+  // Filter orders by Branch Selection
+  const branchFilteredOrders = useMemo(() => {
+    if (selectedBranch === 'all') return orders;
+    return orders.filter(
+      (o: any) =>
+        o.branchId === selectedBranch ||
+        (selectedBranch === 'main_branch' && (!o.branchId || o.branchId === 'main_branch'))
+    );
+  }, [orders, selectedBranch]);
+
   // Ongoing Month Orders (Current Month)
   const currentMonthOrders = useMemo(() => {
     const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1).getTime();
-    return orders.filter((o) => {
+    return branchFilteredOrders.filter((o) => {
       const t = parseTimestamp(o.createdAt).getTime();
       return t >= startOfMonth;
     });
-  }, [orders]);
+  }, [branchFilteredOrders]);
 
   // Last Month Orders
   const lastMonthOrders = useMemo(() => {
     const startOfLast = new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1).getTime();
     const endOfLast = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1).getTime();
-    return orders.filter((o) => {
+    return branchFilteredOrders.filter((o) => {
       const t = parseTimestamp(o.createdAt).getTime();
       return t >= startOfLast && t < endOfLast;
     });
-  }, [orders]);
+  }, [branchFilteredOrders]);
+
+  // Custom Time Filter Orders
+  const customRangeOrders = useMemo(() => {
+    const now = new Date();
+    const nowMs = now.getTime();
+
+    return branchFilteredOrders.filter((o) => {
+      const t = parseTimestamp(o.createdAt).getTime();
+
+      switch (customTimeRange) {
+        case 'Ongoing Month': {
+          const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+          return t >= startOfMonth;
+        }
+        case 'Previous Month': {
+          const startOfLast = new Date(now.getFullYear(), now.getMonth() - 1, 1).getTime();
+          const endOfLast = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+          return t >= startOfLast && t < endOfLast;
+        }
+        case 'This Week': {
+          const day = now.getDay();
+          const diff = now.getDate() - day + (day === 0 ? -6 : 1);
+          const startOfWeek = new Date(now.getFullYear(), now.getMonth(), diff).setHours(0, 0, 0, 0);
+          return t >= startOfWeek;
+        }
+        case 'Previous Week': {
+          const day = now.getDay();
+          const diff = now.getDate() - day + (day === 0 ? -6 : 1) - 7;
+          const startOfPrevWeek = new Date(now.getFullYear(), now.getMonth(), diff).setHours(0, 0, 0, 0);
+          const endOfPrevWeek = startOfPrevWeek + 7 * 24 * 60 * 60 * 1000;
+          return t >= startOfPrevWeek && t < endOfPrevWeek;
+        }
+        case 'Last Day': {
+          const oneDayAgo = nowMs - 24 * 60 * 60 * 1000;
+          return t >= oneDayAgo;
+        }
+        case 'Last 2 Days': {
+          const twoDaysAgo = nowMs - 48 * 60 * 60 * 1000;
+          return t >= twoDaysAgo;
+        }
+        case 'All Time':
+        default:
+          return true;
+      }
+    });
+  }, [branchFilteredOrders, customTimeRange]);
 
   // Aggregation function helper
   const aggregateOrders = (orderList: Order[]) => {
@@ -197,6 +342,14 @@ export default function RestaurantReports() {
 
   const currentStats = useMemo(() => aggregateOrders(currentMonthOrders), [currentMonthOrders]);
   const lastMonthStats = useMemo(() => aggregateOrders(lastMonthOrders), [lastMonthOrders]);
+  const customStats = useMemo(() => aggregateOrders(customRangeOrders), [customRangeOrders]);
+
+  // Selected branch label
+  const selectedBranchLabel = useMemo(() => {
+    if (selectedBranch === 'all') return 'All Franchise Branches (Consolidated)';
+    const found = branches.find((b) => b.id === selectedBranch);
+    return found ? found.name || found.id : selectedBranch;
+  }, [selectedBranch, branches]);
 
   // Sync Live Google Sheets On-Demand
   const handleSyncGoogleSheets = async () => {
@@ -246,7 +399,7 @@ export default function RestaurantReports() {
     }
   };
 
-  // Generate On-Demand Report PDF
+  // Generate On-Demand Report PDF (Opens in In-App PdfViewerModal)
   const handleGeneratePdf = async (type: 'monthly' | 'financial') => {
     setGeneratingPdf(true);
     const toastId = toast.loading(`Generating official ${type} audit PDF report...`);
@@ -254,20 +407,24 @@ export default function RestaurantReports() {
       const res = await fetchApi('/api/reports/generate-monthly', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type, month: lastMonthName }),
+        body: JSON.stringify({
+          type,
+          month: lastMonthName,
+          branchId: selectedBranch !== 'all' ? selectedBranch : undefined,
+        }),
       });
       const data = await res.json();
       if (data.success && data.report) {
-        toast.success('Report PDF generated and archived successfully!', { id: toastId });
-        fetchApi('/api/reports/monthly')
-          .then(async (r) => { if (!r.ok) return {}; return r.json().catch(() => ({})); })
-          .then((d) => {
-            if (Array.isArray(d)) setPdfReports(d);
-            else if (d.reports) setPdfReports(d.reports);
-          });
+        toast.success('Report PDF generated and archived in Cloudflare R2!', { id: toastId });
+        loadPdfReports(selectedBranch);
         const urlToOpen = data.report.viewUrl || data.report.downloadUrl || data.report.pdfUrl;
         if (urlToOpen) {
-          window.open(urlToOpen, '_blank');
+          openPdfViewer(
+            `Olive Pizza — ${lastMonthName} Official Statement`,
+            urlToOpen,
+            data.report.downloadUrl,
+            `Branch: ${selectedBranchLabel} • Cloudflare R2 Archival`
+          );
         }
       } else {
         toast.error(data.error || 'Failed to generate report', { id: toastId });
@@ -279,10 +436,56 @@ export default function RestaurantReports() {
     }
   };
 
+  // Generate Custom PDF Report (Unlimited for Owner)
+  const handleGenerateCustomPdf = async (timeRange: TimeRangeFilter, action: 'preview' | 'download' = 'preview') => {
+    setGeneratingCustomPdf(true);
+    const toastId = toast.loading(`Generating custom audit PDF (${timeRange})...`);
+    try {
+      const res = await fetchApi('/api/reports/generate-custom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          timeRange,
+          branchId: selectedBranch !== 'all' ? selectedBranch : 'main_branch',
+          branchName: selectedBranchLabel,
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.report) {
+        toast.success(`Custom ${timeRange} PDF ready!`, { id: toastId });
+        const viewUrl = data.report.viewUrl || data.report.pdfUrl;
+        const downloadUrl = data.report.downloadUrl || `${viewUrl}?download=true`;
+
+        if (action === 'download') {
+          const a = document.createElement('a');
+          a.href = downloadUrl;
+          a.download = `OlivePizza_${timeRange.replace(/\s+/g, '_')}_Report.pdf`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        } else {
+          openPdfViewer(
+            `Custom Statement — ${timeRange}`,
+            viewUrl,
+            downloadUrl,
+            `Branch: ${selectedBranchLabel} • Owner Unlimited Access`
+          );
+        }
+        loadPdfReports(selectedBranch);
+      } else {
+        toast.error(data.error || 'Failed to generate custom report', { id: toastId });
+      }
+    } catch (err: any) {
+      toast.error('Failed to generate custom PDF: ' + err.message, { id: toastId });
+    } finally {
+      setGeneratingCustomPdf(false);
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Top Header & Navigation Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#0E1524] p-5 rounded-2xl border border-slate-800 shadow-lg">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-[#0E1524] p-5 rounded-2xl border border-slate-800 shadow-lg">
         <div>
           <div className="flex items-center gap-2.5">
             <h1 className="text-xl font-extrabold text-white tracking-tight">Financial & Business Analytics</h1>
@@ -291,21 +494,57 @@ export default function RestaurantReports() {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Live Google Sheets Billing, Google Looker Studio BI, and Official Audit Statements.
+            Cloudflare R2 Encrypted PDF Archive, Live Google Sheets Billing, and Looker Studio Executive BI.
           </p>
+        </div>
+
+        {/* Branch Selector Dropdown (Allows Owner to Select Any Restaurant) */}
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-[#0B0F17] rounded-xl border border-orange-500/30 text-xs text-slate-300">
+          <Building2 className="w-4 h-4 text-orange-400 shrink-0" />
+          <span className="font-bold text-slate-400">Scope:</span>
+          <select
+            value={selectedBranch}
+            onChange={(e) => setSelectedBranch(e.target.value)}
+            className="bg-transparent text-white font-bold focus:outline-none cursor-pointer text-xs pr-1"
+          >
+            <option value="all" className="bg-[#0B0F17] text-white">
+              All Branches (Consolidated)
+            </option>
+            {branches.map((b) => (
+              <option key={b.id} value={b.id} className="bg-[#0B0F17] text-white">
+                {b.name || b.id} {b.city ? `(${b.city})` : ''}
+              </option>
+            ))}
+            {branches.length === 0 && (
+              <option value="main_branch" className="bg-[#0B0F17] text-white">
+                Olive Pizza — Rajnandgaon HQ
+              </option>
+            )}
+          </select>
+          <ChevronDown className="w-3.5 h-3.5 text-slate-500 pointer-events-none" />
         </div>
 
         {/* Tab Switcher */}
         <div className="flex flex-wrap items-center gap-1.5 bg-[#0B0F17] p-1.5 rounded-xl border border-slate-800">
           <button
             onClick={() => setActiveTab('analytics_hub')}
-            className={`px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+            className={`px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
               activeTab === 'analytics_hub'
                 ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
-            <BarChart3 className="w-3.5 h-3.5" /> Looker Studio Hub
+            <BarChart3 className="w-3.5 h-3.5" /> Looker Hub
+          </button>
+          <button
+            onClick={() => setActiveTab('custom_reports')}
+            className={`px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === 'custom_reports'
+                ? 'bg-orange-500 text-white shadow-md shadow-orange-500/20'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <Filter className="w-3.5 h-3.5" /> Custom Reports
           </button>
           <button
             onClick={() => setActiveTab('ongoing')}
@@ -348,16 +587,17 @@ export default function RestaurantReports() {
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex items-center gap-2 px-3 py-1.5 bg-[#0B0F17] rounded-xl border border-slate-800 text-xs text-slate-300">
                 <Building2 className="w-3.5 h-3.5 text-orange-400" />
-                <span className="font-bold text-white">Olive Pizza — Rajnandgaon Franchise</span>
+                <span className="font-bold text-white">{selectedBranchLabel}</span>
               </div>
               <div className="flex items-center gap-2 px-3 py-1.5 bg-[#0B0F17] rounded-xl border border-slate-800 text-xs text-slate-300">
                 <Calendar className="w-3.5 h-3.5 text-orange-400" />
-                <span>Month: <strong className="text-white font-mono">{lookerConfig.currentSheetTitle || currentMonthName}</strong></span>
+                <span>
+                  Month: <strong className="text-white font-mono">{lookerConfig.currentSheetTitle || currentMonthName}</strong>
+                </span>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              {/* Sync Now */}
               <button
                 onClick={handleSyncGoogleSheets}
                 disabled={syncingSheet}
@@ -367,7 +607,6 @@ export default function RestaurantReports() {
                 Sync Live Sheet
               </button>
 
-              {/* Open Google Sheets */}
               {lookerConfig.liveSheetUrl && (
                 <a
                   href={lookerConfig.liveSheetUrl}
@@ -381,7 +620,6 @@ export default function RestaurantReports() {
                 </a>
               )}
 
-              {/* Configure Embed URL */}
               <button
                 onClick={() => setShowConfigModal(true)}
                 className="p-2 bg-[#0B0F17] hover:bg-slate-800 border border-slate-700/70 text-slate-300 rounded-xl text-xs transition-all"
@@ -495,7 +733,120 @@ export default function RestaurantReports() {
         </div>
       )}
 
-      {/* TAB 2: ONGOING MONTH */}
+      {/* TAB 2: CUSTOM REPORTS (WITH 7 TIME FILTERS & UNLIMITED OWNER DOWNLOADS) */}
+      {activeTab === 'custom_reports' && (
+        <div className="space-y-6">
+          <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-6 shadow-md space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
+              <div>
+                <h3 className="text-sm font-extrabold text-white uppercase tracking-wider flex items-center gap-2">
+                  <Filter className="w-4 h-4 text-orange-400" /> Custom Filtered Reports & On-Demand PDF Export
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Filter historical orders across 7 predefined windows. Owner has unlimited custom PDF downloads.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full text-xs font-bold flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5" /> Owner Unlimited Custom Downloads
+                </span>
+              </div>
+            </div>
+
+            {/* 7 Time Filters Selection Bar */}
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-300 uppercase tracking-wider block">
+                Select Reporting Time Window:
+              </label>
+              <div className="flex flex-wrap gap-2">
+                {TIME_RANGES.map((range) => {
+                  const isSelected = customTimeRange === range;
+                  return (
+                    <button
+                      key={range}
+                      onClick={() => setCustomTimeRange(range)}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+                        isSelected
+                          ? 'bg-orange-500 text-white shadow-md shadow-orange-500/25 ring-2 ring-orange-500/30'
+                          : 'bg-[#0B0F17] hover:bg-slate-800 text-slate-300 border border-slate-800 hover:text-white'
+                      }`}
+                    >
+                      <Clock className="w-3 h-3 text-orange-400" />
+                      {range}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Metrics Snapshot for the Selected Time Range */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 pt-2">
+              <div className="bg-[#0B0F17] border border-slate-800 rounded-xl p-4">
+                <span className="text-[10px] font-bold text-slate-400 uppercase block">Selected Window Gross</span>
+                <span className="text-xl font-black text-white font-mono mt-1 block">
+                  ₹{customStats.revenue.toLocaleString('en-IN')}
+                </span>
+                <span className="text-[10px] text-orange-400 mt-0.5 block">{customTimeRange}</span>
+              </div>
+
+              <div className="bg-[#0B0F17] border border-slate-800 rounded-xl p-4">
+                <span className="text-[10px] font-bold text-slate-400 uppercase block">Total Orders</span>
+                <span className="text-xl font-black text-white font-mono mt-1 block">
+                  {customStats.totalOrders}
+                </span>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">{customStats.completed} delivered</span>
+              </div>
+
+              <div className="bg-[#0B0F17] border border-slate-800 rounded-xl p-4">
+                <span className="text-[10px] font-bold text-slate-400 uppercase block">UPI / Online Paid</span>
+                <span className="text-xl font-black text-emerald-400 font-mono mt-1 block">
+                  ₹{customStats.upiTotal.toLocaleString('en-IN')}
+                </span>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">Digital settlement</span>
+              </div>
+
+              <div className="bg-[#0B0F17] border border-slate-800 rounded-xl p-4">
+                <span className="text-[10px] font-bold text-slate-400 uppercase block">Average Ticket Size</span>
+                <span className="text-xl font-black text-orange-400 font-mono mt-1 block">
+                  ₹{customStats.aov}
+                </span>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">Per completed bill</span>
+              </div>
+            </div>
+
+            {/* Action Bar: In-App Preview & Direct Download */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 bg-[#0B0F17] rounded-xl border border-slate-800">
+              <div className="text-xs text-slate-400">
+                Scope: <strong className="text-white">{selectedBranchLabel}</strong> • Filter:{' '}
+                <strong className="text-orange-400">{customTimeRange}</strong>
+              </div>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  onClick={() => handleGenerateCustomPdf(customTimeRange, 'preview')}
+                  disabled={generatingCustomPdf}
+                  className="flex-1 sm:flex-none px-4 py-2.5 bg-[#161f30] hover:bg-[#1e2a42] border border-slate-700/60 text-slate-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+                >
+                  <Eye className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Preview PDF in App</span>
+                </button>
+
+                <button
+                  onClick={() => handleGenerateCustomPdf(customTimeRange, 'download')}
+                  disabled={generatingCustomPdf}
+                  className="flex-1 sm:flex-none px-4 py-2.5 bg-orange-600 hover:bg-orange-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-orange-600/20 disabled:opacity-50"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download Custom PDF</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 3: ONGOING MONTH */}
       {activeTab === 'ongoing' && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -562,7 +913,9 @@ export default function RestaurantReports() {
                       <span className="text-xs font-bold text-white block">{p.name}</span>
                       <span className="text-[11px] text-slate-400">{p.qty} sold</span>
                     </div>
-                    <span className="font-mono font-extrabold text-orange-400 text-xs">₹{p.revenue.toLocaleString('en-IN')}</span>
+                    <span className="font-mono font-extrabold text-orange-400 text-xs">
+                      ₹{p.revenue.toLocaleString('en-IN')}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -571,7 +924,7 @@ export default function RestaurantReports() {
         </div>
       )}
 
-      {/* TAB 3: LAST MONTH AUDITED */}
+      {/* TAB 4: LAST MONTH AUDITED */}
       {activeTab === 'last_month' && (
         <div className="space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -610,7 +963,7 @@ export default function RestaurantReports() {
         </div>
       )}
 
-      {/* TAB 4: REPORT PDFS ARCHIVE */}
+      {/* TAB 5: REPORT PDFS ARCHIVE */}
       {activeTab === 'pdfs' && (
         <div className="bg-[#0E1524] border border-slate-800 rounded-2xl p-6 shadow-md space-y-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-4">
@@ -625,14 +978,7 @@ export default function RestaurantReports() {
 
             <div className="flex items-center gap-2">
               <button
-                onClick={() => {
-                  fetchApi('/api/reports/monthly')
-                    .then(async (r) => { if (!r.ok) return {}; return r.json().catch(() => ({})); })
-                    .then((d) => {
-                      if (Array.isArray(d)) setPdfReports(d);
-                      else if (d.reports) setPdfReports(d.reports);
-                    });
-                }}
+                onClick={() => loadPdfReports(selectedBranch)}
                 className="p-2 bg-[#0B0F17] hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all"
                 title="Refresh Reports"
               >
@@ -651,7 +997,7 @@ export default function RestaurantReports() {
           {pdfReports.length === 0 ? (
             <div className="text-center py-14 text-slate-500 text-xs space-y-3">
               <FileText className="w-10 h-10 mx-auto text-slate-600 opacity-40" />
-              <p className="font-semibold text-slate-400">No monthly PDF statements found.</p>
+              <p className="font-semibold text-slate-400">No monthly PDF statements found for this branch.</p>
               <p className="text-slate-500 max-w-sm mx-auto">
                 Monthly reports are automatically finalized on the 1st of every month at 00:05 AM IST, or you can generate on-demand.
               </p>
@@ -660,7 +1006,7 @@ export default function RestaurantReports() {
                 disabled={generatingPdf}
                 className="mt-2 px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded-xl text-xs inline-flex items-center gap-1.5 shadow-md shadow-orange-600/20"
               >
-                <Download className="w-3.5 h-3.5" /> Generate September 2026 PDF
+                <Download className="w-3.5 h-3.5" /> Generate {lastMonthName} PDF
               </button>
             </div>
           ) : (
@@ -669,8 +1015,12 @@ export default function RestaurantReports() {
                 const viewLink = r.viewUrl || r.reportUrl || `/api/reports/monthly/${r.id}/view`;
                 const downloadLink = r.downloadUrl || `${viewLink}?download=true`;
                 const revenue = Number(r.revenue || 0);
-                const orders = Number(r.orders || 0);
-                const aov = r.averageOrderValue ? Math.round(r.averageOrderValue) : (orders > 0 ? Math.round(revenue / orders) : 0);
+                const ordersCount = Number(r.orders || 0);
+                const aov = r.averageOrderValue
+                  ? Math.round(r.averageOrderValue)
+                  : ordersCount > 0
+                  ? Math.round(revenue / ordersCount)
+                  : 0;
 
                 return (
                   <div
@@ -710,7 +1060,7 @@ export default function RestaurantReports() {
                         <div className="bg-[#121927] p-2.5 rounded-xl border border-slate-800">
                           <div className="text-[10px] font-bold text-slate-400 uppercase">Total Orders</div>
                           <div className="text-sm font-black text-white font-mono mt-0.5">
-                            {orders}
+                            {ordersCount}
                           </div>
                         </div>
                         <div className="bg-[#121927] p-2.5 rounded-xl border border-slate-800">
@@ -722,20 +1072,23 @@ export default function RestaurantReports() {
                       </div>
                     </div>
 
-                    {/* Action Buttons: View & Download */}
+                    {/* Action Buttons: View in In-App Modal & Direct Download */}
                     <div className="flex items-center gap-2 pt-2 border-t border-slate-800/60">
-                      <a
-                        href={viewLink}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="flex-1 py-2 px-3 bg-[#161f30] hover:bg-[#1e2a42] border border-slate-700/60 text-slate-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all"
+                      <button
+                        onClick={() =>
+                          openPdfViewer(
+                            r.title || `${r.month || ''} ${r.year || ''} Monthly Statement`,
+                            viewLink,
+                            downloadLink,
+                            `Branch: ${r.branchName || r.branchId || selectedBranchLabel}`
+                          )
+                        }
+                        className="flex-1 py-2 px-3 bg-[#161f30] hover:bg-[#1e2a42] border border-slate-700/60 text-slate-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer"
                       >
                         <Eye className="w-3.5 h-3.5 text-blue-400" /> View PDF
-                      </a>
+                      </button>
                       <a
                         href={downloadLink}
-                        target="_blank"
-                        rel="noreferrer"
                         download
                         className="flex-1 py-2 px-3 bg-orange-600 hover:bg-orange-500 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-md shadow-orange-600/20"
                       >
@@ -801,6 +1154,16 @@ export default function RestaurantReports() {
           </div>
         </div>
       )}
+
+      {/* In-App PDF Viewer Modal */}
+      <PdfViewerModal
+        isOpen={pdfModal.isOpen}
+        onClose={() => setPdfModal((prev) => ({ ...prev, isOpen: false }))}
+        title={pdfModal.title}
+        pdfUrl={pdfModal.pdfUrl}
+        downloadUrl={pdfModal.downloadUrl}
+        subtitle={pdfModal.subtitle}
+      />
     </div>
   );
 }
