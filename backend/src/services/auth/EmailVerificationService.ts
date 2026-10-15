@@ -1,7 +1,14 @@
-import crypto from 'crypto';
+/**
+ * EmailVerificationService.ts — Redis-Backed Production Email Verification Engine
+ * 
+ * Powered by RedisOtpService for HMAC-SHA256 keyed storage, atomic single-use Lua script
+ * consumption, 5-minute strict TTL, and 60-second cooldown, combined with direct pooled SMTP delivery.
+ */
+
 import { adminDb, adminAuth } from '../../config/firebase.js';
 import { queueEmail, sendEmailDirect } from '../email.service.js';
 import { AuthAuditService } from './AuthAuditService.js';
+import { RedisOtpService } from './RedisOtpService.js';
 
 export interface VerificationSendResult {
   success: boolean;
@@ -15,101 +22,46 @@ export interface VerificationSendResult {
 export interface VerificationCheckResult {
   success: boolean;
   message: string;
+  remainingAttempts?: number;
 }
 
 export class EmailVerificationService {
-  private static readonly COLLECTION = 'email_verification_codes';
-  private static readonly CODE_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes strict TTL
-  private static readonly RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds cooldown
-  private static readonly MAX_REQUESTS_15M = 3; // Max 3 code requests per 15 minutes
-  private static readonly REQUEST_WINDOW_MS = 15 * 60 * 1000;
-  private static readonly MAX_VERIFY_ATTEMPTS = 5; // Max 5 verification attempts per code
-
-  private static getDocId(email: string): string {
-    return email.toLowerCase().trim();
-  }
-
-  private static hashCode(code: string, salt: string): string {
-    return crypto.createHash('sha256').update(`${salt}:${code}`).digest('hex');
-  }
-
   /**
    * Alias for sendVerificationCode
    */
-  public static async sendCode(email: string, purpose?: string, ipAddress: string = '127.0.0.1'): Promise<VerificationSendResult> {
-    return this.sendVerificationCode(email, ipAddress);
+  public static async sendCode(email: string, purpose: string = 'email_login', ipAddress: string = '127.0.0.1'): Promise<VerificationSendResult> {
+    return this.sendVerificationCode(email, ipAddress, purpose);
   }
 
   /**
    * Request a 4-digit verification code sent to the specified email address.
    */
-  public static async sendVerificationCode(email: string, ipAddress: string = '127.0.0.1'): Promise<VerificationSendResult> {
+  public static async sendVerificationCode(
+    email: string,
+    ipAddress: string = '127.0.0.1',
+    purpose: string = 'email_login'
+  ): Promise<VerificationSendResult> {
     if (!email || !email.includes('@')) {
       return { success: false, message: 'A valid email address is required.' };
     }
 
     const cleanEmail = email.toLowerCase().trim();
-    const docId = this.getDocId(cleanEmail);
-    const now = Date.now();
 
-    if (!adminDb) {
-      return { success: false, message: 'Database service unavailable.' };
-    }
+    // Generate code via RedisOtpService with HMAC storage, 60s cooldown, and 5-min TTL
+    const otpResult = await RedisOtpService.generateOtp(cleanEmail, purpose);
 
-    const ref = adminDb.collection(this.COLLECTION).doc(docId);
-    const snap = await ref.get();
-    const existing = snap.data();
-
-    // Check 60-second cooldown
-    if (existing && existing.lastRequestedAt && (now - existing.lastRequestedAt < this.RESEND_COOLDOWN_MS)) {
-      const waitSeconds = Math.ceil((this.RESEND_COOLDOWN_MS - (now - existing.lastRequestedAt)) / 1000);
+    if (!otpResult.success || !otpResult.code) {
       return {
         success: false,
-        message: `Please wait ${waitSeconds} seconds before requesting a new code.`,
-        retryAfterSeconds: waitSeconds,
+        message: otpResult.message,
+        retryAfterSeconds: otpResult.retryAfterSeconds,
+        expiresInSeconds: 0
       };
     }
 
-    // Check 15-minute rate limit for code requests
-    let requestCount = 1;
-    let windowStart = now;
-    if (existing && existing.windowStart && (now - existing.windowStart < this.REQUEST_WINDOW_MS)) {
-      windowStart = existing.windowStart;
-      requestCount = (existing.requestCount || 0) + 1;
-      if (requestCount > this.MAX_REQUESTS_15M) {
-        const waitSeconds = Math.ceil((windowStart + this.REQUEST_WINDOW_MS - now) / 1000);
-        return {
-          success: false,
-          message: 'Too many verification requests. Please try again later.',
-          retryAfterSeconds: waitSeconds,
-        };
-      }
-    }
+    const code = otpResult.code;
 
-    // Generate cryptographically secure 4-digit code (1000 to 9999)
-    const codeNumber = crypto.randomInt(1000, 10000);
-    const code = codeNumber.toString();
-    const salt = crypto.randomBytes(16).toString('hex');
-    const codeHash = this.hashCode(code, salt);
-    const expiresAt = now + this.CODE_EXPIRY_MS;
-
-    // Store salted hash at rest
-    await ref.set({
-      email: cleanEmail,
-      codeHash,
-      salt,
-      expiresAt,
-      lastRequestedAt: now,
-      windowStart,
-      requestCount,
-      verifyAttempts: 0,
-      attempts: 0,
-      used: false,
-      consumed: false,
-      ipAddress,
-    });
-
-    // Send styled transactional email using existing direct transporter
+    // Send styled transactional email using existing pooled SMTP transport
     const emailHtml = `
       <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 520px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; border: 1px solid #f0f0f0; box-shadow: 0 4px 20px rgba(0,0,0,0.05);">
         <div style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); padding: 32px 24px; text-align: center;">
@@ -145,7 +97,7 @@ export class EmailVerificationService {
       </div>
     `;
 
-    // Dispatch email asynchronously using high-speed pooled SMTP queue (matching order emails)
+    // Dispatch email asynchronously using high-speed pooled SMTP queue
     queueEmail(cleanEmail, 'Your Olive Pizza 4-Digit Verification Code', emailHtml, 'auth')
       .then((queueId) => {
         console.log(`[EmailVerificationService] ✅ Verification email queued for ${cleanEmail} (ID: ${queueId})`);
@@ -163,22 +115,28 @@ export class EmailVerificationService {
       identifier: cleanEmail,
       ipAddress,
       status: 'SUCCESS',
-      metadata: { expiresInSeconds: 300, backgroundDispatched: true },
+      metadata: { expiresInSeconds: otpResult.expiresInSeconds, purpose },
     }).catch(() => {});
 
     const isDevelopment = process.env.NODE_ENV !== 'production' || process.env.PHONE_AUTH_MODE === 'development';
     return {
       success: true,
       message: 'Verification code sent successfully. Valid for 5 minutes.',
-      expiresInSeconds: 300,
+      expiresInSeconds: otpResult.expiresInSeconds,
+      retryAfterSeconds: otpResult.retryAfterSeconds,
       demoCode: isDevelopment ? code : undefined,
     };
   }
 
   /**
-   * Verify the 4-digit code provided by the user.
+   * Verify the 4-digit code atomically via Redis Lua script.
    */
-  public static async verifyCode(email: string, code: string, ipAddress: string = '127.0.0.1'): Promise<VerificationCheckResult> {
+  public static async verifyCode(
+    email: string,
+    code: string,
+    ipAddress: string = '127.0.0.1',
+    purpose: string = 'email_login'
+  ): Promise<VerificationCheckResult> {
     if (!email || !code) {
       return { success: false, message: 'Email and 4-digit code are required.' };
     }
@@ -190,69 +148,24 @@ export class EmailVerificationService {
       return { success: false, message: 'Verification code must be exactly 4 digits.' };
     }
 
-    if (!adminDb) {
-      return { success: false, message: 'Database service unavailable.' };
-    }
+    // Atomically verify and consume via Redis Lua script
+    const verifyResult = await RedisOtpService.verifyAndConsumeOtp(cleanEmail, cleanCode, purpose);
 
-    const docId = this.getDocId(cleanEmail);
-    const ref = adminDb.collection(this.COLLECTION).doc(docId);
-    const snap = await ref.get();
-
-    if (!snap.exists) {
-      return { success: false, message: 'No active verification code found for this email. Please request a code.' };
-    }
-
-    const data = snap.data()!;
-    const now = Date.now();
-
-    if (data.consumed || data.used) {
-      return { success: false, message: 'This verification code has already been used. Please request a new code.' };
-    }
-
-    if (now > data.expiresAt) {
-      return { success: false, message: 'Verification code has expired. Please request a new code.' };
-    }
-
-    const currentAttempts = (data.attempts !== undefined ? data.attempts : (data.verifyAttempts || 0)) + 1;
-    if (currentAttempts > this.MAX_VERIFY_ATTEMPTS || (data.attempts !== undefined && data.attempts >= this.MAX_VERIFY_ATTEMPTS)) {
-      // Invalidate code due to brute-force attempts
-      await ref.update({ used: true, consumed: true, verifyAttempts: currentAttempts, attempts: currentAttempts });
-      await AuthAuditService.logEvent({
-        eventType: 'EMAIL_CODE_FAILED',
-        identifier: cleanEmail,
-        ipAddress,
-        status: 'BLOCKED',
-        metadata: { reason: 'MAX_ATTEMPTS_EXCEEDED' },
-      });
-      return { success: false, message: 'Maximum verification attempts exceeded. Please request a new code.' };
-    }
-
-    const expectedHash = this.hashCode(cleanCode, data.salt);
-    const isMatch = crypto.timingSafeEqual(
-      Buffer.from(expectedHash, 'utf8'),
-      Buffer.from(data.codeHash, 'utf8')
-    );
-
-    if (!isMatch) {
-      await ref.update({ verifyAttempts: currentAttempts, attempts: currentAttempts });
+    if (!verifyResult.success) {
       await AuthAuditService.logEvent({
         eventType: 'EMAIL_CODE_FAILED',
         identifier: cleanEmail,
         ipAddress,
         status: 'FAILED',
-        metadata: { attempt: currentAttempts },
-      });
-      return { success: false, message: 'Incorrect verification code. Please check and try again.' };
-    }
+        metadata: { code: verifyResult.code, remainingAttempts: verifyResult.remainingAttempts },
+      }).catch(() => {});
 
-    // Mark code as used immediately (single-use)
-    await ref.update({
-      used: true,
-      consumed: true,
-      verifiedAt: now,
-      verifyAttempts: currentAttempts,
-      attempts: currentAttempts,
-    });
+      return {
+        success: false,
+        message: verifyResult.message,
+        remainingAttempts: verifyResult.remainingAttempts
+      };
+    }
 
     // Authoritatively mark user record as email verified in Firebase Auth and Firestore
     try {
@@ -262,12 +175,14 @@ export class EmailVerificationService {
           await adminAuth.updateUser(authUser.uid, { emailVerified: true }).catch(() => {});
         }
       }
-      const userQuery = await adminDb.collection('users').where('email', '==', cleanEmail).limit(1).get();
-      if (!userQuery.empty) {
-        await userQuery.docs[0].ref.update({
-          emailVerified: true,
-          emailVerifiedAt: new Date().toISOString(),
-        });
+      if (adminDb) {
+        const userQuery = await adminDb.collection('users').where('email', '==', cleanEmail).limit(1).get().catch(() => null);
+        if (userQuery && !userQuery.empty) {
+          await userQuery.docs[0].ref.update({
+            emailVerified: true,
+            emailVerifiedAt: new Date().toISOString(),
+          }).catch(() => {});
+        }
       }
     } catch (err) {
       console.warn('[EmailVerificationService] Notice: could not update auth/users collection flag:', err);
@@ -278,7 +193,7 @@ export class EmailVerificationService {
       identifier: cleanEmail,
       ipAddress,
       status: 'SUCCESS',
-    });
+    }).catch(() => {});
 
     return { success: true, message: 'Email verified successfully.' };
   }

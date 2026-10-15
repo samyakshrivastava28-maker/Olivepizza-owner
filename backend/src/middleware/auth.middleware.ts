@@ -3,6 +3,7 @@ import { adminAuth, adminDb } from '../config/firebase.js';
 import { FranchiseScopeService, ScopeContext } from '../services/franchise/FranchiseScopeService.js';
 import { ApiSecurityMiddleware } from '../security/ApiSecurityMiddleware.js';
 import { sanitizeError, redactSensitiveData } from '../utils/logSanitizer.js';
+import { normalizePhone, getPhoneQueryVariants } from '../utils/phoneNormalization.js';
 
 export async function logSecurityEventServer(params: {
   action: string;
@@ -90,6 +91,9 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
       try {
         let userData: any = null;
         const userDoc = await adminDb.collection('users').doc(uid).get();
+        const rawPhone = decodedToken.phone_number || (decodedToken as any).phone || '';
+        const phoneVariants = getPhoneQueryVariants(rawPhone);
+
         if (userDoc.exists) {
           userData = userDoc.data()!;
         } else if (decodedToken.email) {
@@ -97,12 +101,34 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           const q = await adminDb.collection('users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
           if (!q.empty) {
             userData = q.docs[0].data();
-            // Auto link UID for future instant lookups
             adminDb.collection('users').doc(uid).set({ ...userData, uid }, { merge: true }).catch(() => {});
           }
         }
 
+        // Phone-based lookup in users collection if not found yet
+        if (!userData && phoneVariants.length > 0) {
+          for (const variant of phoneVariants) {
+            const qPhone = await adminDb.collection('users').where('phoneNumber', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+            if (!qPhone.empty) {
+              userData = qPhone.docs[0].data();
+              adminDb.collection('users').doc(uid).set({ ...userData, uid }, { merge: true }).catch(() => {});
+              break;
+            }
+            const qPhoneAlt = await adminDb.collection('users').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+            if (!qPhoneAlt.empty) {
+              userData = qPhoneAlt.docs[0].data();
+              adminDb.collection('users').doc(uid).set({ ...userData, uid }, { merge: true }).catch(() => {});
+              break;
+            }
+          }
+        }
+
         if (userData) {
+          // Instant Session Revocation enforcement
+          if (userData.authRevokedAt && decodedToken.auth_time && (decodedToken.auth_time * 1000 < userData.authRevokedAt)) {
+            res.status(401).json({ error: 'Session has been revoked by the owner. Please sign in again.', code: 'SESSION_REVOKED' });
+            return;
+          }
           if (userData.isActive === false || userData.status === 'REVOKED' || userData.role === 'REVOKED' || userData.status === 'suspended') {
             res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked', code: 'ACCOUNT_REVOKED' });
             return;
@@ -122,7 +148,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
         if (role === 'customer' || !role) {
           const emailLower = decodedToken.email ? decodedToken.email.toLowerCase().trim() : '';
 
-          // Check restaurant_managers by UID and Email fallback
+          // Check restaurant_managers by UID, Email, and Phone fallback
           let rmData: any = null;
           const rmDoc = await adminDb.collection('restaurant_managers').doc(uid).get().catch(() => null);
           if (rmDoc && rmDoc.exists) {
@@ -134,10 +160,26 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
               adminDb.collection('restaurant_managers').doc(uid).set({ ...rmData, id: uid }, { merge: true }).catch(() => {});
             }
           }
+          if (!rmData && phoneVariants.length > 0) {
+            for (const variant of phoneVariants) {
+              const snap = await adminDb.collection('restaurant_managers').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+              if (!snap.empty) {
+                rmData = snap.docs[0].data();
+                adminDb.collection('restaurant_managers').doc(uid).set({ ...rmData, id: uid }, { merge: true }).catch(() => {});
+                break;
+              }
+              const snapAlt = await adminDb.collection('restaurant_managers').where('phoneNumber', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+              if (!snapAlt.empty) {
+                rmData = snapAlt.docs[0].data();
+                adminDb.collection('restaurant_managers').doc(uid).set({ ...rmData, id: uid }, { merge: true }).catch(() => {});
+                break;
+              }
+            }
+          }
 
           if (rmData) {
-            if (rmData.isActive === false || rmData.status === 'REVOKED' || rmData.status === 'TERMINATED') {
-              res.status(403).json({ error: 'Forbidden: Restaurant manager account has been revoked', code: 'ACCOUNT_REVOKED' });
+            if (rmData.isActive === false || rmData.status === 'REVOKED' || rmData.status === 'TERMINATED' || rmData.status === 'suspended') {
+              res.status(403).json({ error: 'Forbidden: Restaurant manager account has been revoked or suspended', code: 'ACCOUNT_REVOKED' });
               return;
             }
             if (rmData.status === 'APPROVED' || rmData.isActive === true) {
@@ -148,7 +190,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
             }
           }
 
-          // Check delivery_partners by UID and Email fallback
+          // Check delivery_partners by UID, Email, and Phone fallback
           if (role === 'customer' || !role) {
             let dpData: any = null;
             const dpDoc = await adminDb.collection('delivery_partners').doc(uid).get().catch(() => null);
@@ -161,9 +203,25 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
                 adminDb.collection('delivery_partners').doc(uid).set({ ...dpData, id: uid }, { merge: true }).catch(() => {});
               }
             }
+            if (!dpData && phoneVariants.length > 0) {
+              for (const variant of phoneVariants) {
+                const snap = await adminDb.collection('delivery_partners').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+                if (!snap.empty) {
+                  dpData = snap.docs[0].data();
+                  adminDb.collection('delivery_partners').doc(uid).set({ ...dpData, id: uid }, { merge: true }).catch(() => {});
+                  break;
+                }
+                const snapAlt = await adminDb.collection('delivery_partners').where('phoneNumber', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+                if (!snapAlt.empty) {
+                  dpData = snapAlt.docs[0].data();
+                  adminDb.collection('delivery_partners').doc(uid).set({ ...dpData, id: uid }, { merge: true }).catch(() => {});
+                  break;
+                }
+              }
+            }
 
             if (dpData) {
-              if (dpData.isActive === false || dpData.status === 'REVOKED' || dpData.status === 'INACTIVE' || dpData.status === 'BLOCKED') {
+              if (dpData.isActive === false || dpData.status === 'REVOKED' || dpData.status === 'INACTIVE' || dpData.status === 'BLOCKED' || dpData.status === 'suspended') {
                 res.status(403).json({ error: 'Forbidden: Delivery partner account has been revoked or deactivated', code: 'ACCOUNT_REVOKED' });
                 return;
               }
@@ -175,7 +233,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
             }
           }
 
-          // Check franchise_users by UID and Email fallback
+          // Check franchise_users by UID, Email, and Phone fallback
           if (role === 'customer' || !role) {
             let fuData: any = null;
             const fuDoc = await adminDb.collection('franchise_users').doc(uid).get().catch(() => null);
@@ -186,6 +244,16 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
               if (!fuSnap.empty) {
                 fuData = fuSnap.docs[0].data();
                 adminDb.collection('franchise_users').doc(uid).set({ ...fuData, id: uid }, { merge: true }).catch(() => {});
+              }
+            }
+            if (!fuData && phoneVariants.length > 0) {
+              for (const variant of phoneVariants) {
+                const snap = await adminDb.collection('franchise_users').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+                if (!snap.empty) {
+                  fuData = snap.docs[0].data();
+                  adminDb.collection('franchise_users').doc(uid).set({ ...fuData, id: uid }, { merge: true }).catch(() => {});
+                  break;
+                }
               }
             }
 
@@ -202,7 +270,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
             }
           }
 
-          // Check pos_accounts by UID and Email fallback
+          // Check pos_accounts by UID, Email, and Phone fallback
           if (role === 'customer' || !role) {
             let posData: any = null;
             const posDoc = await adminDb.collection('pos_accounts').doc(uid).get().catch(() => null);
@@ -213,6 +281,16 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
               if (!posSnap.empty) {
                 posData = posSnap.docs[0].data();
                 adminDb.collection('pos_accounts').doc(uid).set({ ...posData, id: uid }, { merge: true }).catch(() => {});
+              }
+            }
+            if (!posData && phoneVariants.length > 0) {
+              for (const variant of phoneVariants) {
+                const snap = await adminDb.collection('pos_accounts').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+                if (!snap.empty) {
+                  posData = snap.docs[0].data();
+                  adminDb.collection('pos_accounts').doc(uid).set({ ...posData, id: uid }, { merge: true }).catch(() => {});
+                  break;
+                }
               }
             }
 

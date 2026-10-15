@@ -1,6 +1,17 @@
+/**
+ * FirebasePhoneVerificationProvider.ts — Unified Phone Auth Provider
+ * 
+ * Supports both:
+ * 1. Firebase Phone Authentication (ID Token verification)
+ * 2. Backend Redis-Managed SMS OTP with Fast2SMS transport, atomic Lua consumption, and HMAC hashing
+ */
+
 import { PhoneVerificationProvider, OTPRequestResult, VerificationResult } from './PhoneVerificationProvider.js';
 import { adminAuth, adminDb } from '../../config/firebase.js';
 import { DevOtpBypassService } from './DevOtpBypassService.js';
+import { normalizePhone } from '../../utils/phoneNormalization.js';
+import { RedisOtpService } from '../auth/RedisOtpService.js';
+import { Fast2SmsService } from '../sms/Fast2SmsService.js';
 
 export class FirebasePhoneVerificationProvider implements PhoneVerificationProvider {
   private isDevelopment: boolean;
@@ -10,20 +21,11 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
   }
 
   public normalizePhone(phone: string): { valid: boolean; formattedPhone: string; error?: string } {
-    if (!phone) {
-      return { valid: false, formattedPhone: '', error: 'Phone number is required' };
+    const norm = normalizePhone(phone);
+    if (!norm.isValid) {
+      return { valid: false, formattedPhone: '', error: 'Invalid phone number format. Please provide a 10-digit mobile number.' };
     }
-    const cleaned = phone.replace(/\D/g, '');
-    if (cleaned.length === 10) {
-      return { valid: true, formattedPhone: `+91${cleaned}` };
-    }
-    if (cleaned.length === 12 && cleaned.startsWith('91')) {
-      return { valid: true, formattedPhone: `+${cleaned}` };
-    }
-    if (phone.startsWith('+') && cleaned.length >= 10 && cleaned.length <= 15) {
-      return { valid: true, formattedPhone: `+${cleaned}` };
-    }
-    return { valid: false, formattedPhone: '', error: 'Invalid phone number format. Please provide a 10-digit mobile number.' };
+    return { valid: true, formattedPhone: norm.e164 };
   }
 
   /**
@@ -32,7 +34,6 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
   public async getHealthStatus(): Promise<{ ok: boolean; provider: string; configured: boolean; latencyMs?: number; error?: string }> {
     const start = Date.now();
     try {
-      // Light check to ensure Firebase Admin Auth is reachable
       await adminAuth.listUsers(1);
       return {
         ok: true,
@@ -52,40 +53,65 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
   }
 
   /**
-   * Instructs client to execute client-side Firebase Phone Auth via reCAPTCHA + SMS
+   * Generates a Redis-backed OTP and dispatches it via Fast2SMS / SMS Gateway
    */
-  public async sendOtp(phone: string, userId: string, _ipAddress?: string): Promise<OTPRequestResult> {
+  public async sendOtp(phone: string, _userId: string, _ipAddress?: string): Promise<OTPRequestResult> {
     const norm = this.normalizePhone(phone);
     if (!norm.valid) {
       return { success: false, error: norm.error };
+    }
+
+    // Generate secure OTP via RedisOtpService with HMAC storage, cooldown and 5m TTL
+    const otpResult = await RedisOtpService.generateOtp(norm.formattedPhone, 'phone_login');
+
+    if (!otpResult.success || !otpResult.code) {
+      return {
+        success: false,
+        error: otpResult.message,
+        cooldownSeconds: otpResult.retryAfterSeconds,
+        expiresInSeconds: 0
+      };
+    }
+
+    // Dispatch SMS via Fast2SMS gateway
+    const smsResult = await Fast2SmsService.sendOtp(norm.formattedPhone, otpResult.code);
+
+    if (!smsResult.success) {
+      // In dev mode or when Fast2SMS is not configured, still return clear status
+      return {
+        success: false,
+        error: smsResult.message || 'Failed to dispatch SMS OTP.',
+        provider: 'fast2sms'
+      };
     }
 
     return {
       success: true,
-      message: 'Firebase Phone OTP initiated. Please complete the reCAPTCHA verification on your device.',
-      provider: 'firebase',
-      expiresInSeconds: 300,
-      cooldownSeconds: 60
+      message: 'SMS verification code sent successfully. Valid for 5 minutes.',
+      provider: 'fast2sms',
+      expiresInSeconds: otpResult.expiresInSeconds,
+      cooldownSeconds: otpResult.retryAfterSeconds,
+      pinId: smsResult.requestId
     };
   }
 
   /**
-   * Verifies Firebase Phone Authentication
-   * Supports verifying Firebase ID Tokens directly, development-only OTP bypass, as well as test environment PINs
+   * Verifies Phone Authentication:
+   * 1. Firebase ID Tokens directly (JWT).
+   * 2. Redis-backed SMS OTP codes (atomic Lua consumption & HMAC).
+   * 3. Dev bypass in development environments.
    */
   public async verifyOtp(phone: string, code: string, userId: string, pinId?: string): Promise<VerificationResult> {
-    // 1. Mandatory non-empty OTP validation
     if (!code || typeof code !== 'string' || !code.trim()) {
       return { success: false, error: 'OTP code cannot be empty.' };
     }
 
-    // 2. Mandatory phone number format validation
     const norm = this.normalizePhone(phone);
     if (!norm.valid) {
       return { success: false, error: norm.error };
     }
 
-    // 3. If code or pinId is a Firebase ID Token (JWT format)
+    // 1. Firebase ID Token (JWT candidate)
     const tokenCandidate = (code && code.split('.').length === 3) ? code : (pinId && pinId.split('.').length === 3 ? pinId : null);
     if (tokenCandidate) {
       try {
@@ -100,7 +126,6 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
         }
 
         const now = Date.now();
-        // Sync to Firestore
         if (userId && !userId.startsWith('anon_')) {
           await this.syncVerifiedPhone(userId, verifiedPhone);
         }
@@ -117,8 +142,22 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
       }
     }
 
-    // 4. Strict Development-Only OTP Bypass
-    // Allows any non-empty OTP code to pass during local development/testing without requiring real SMS delivery
+    // 2. Redis-backed atomic OTP verification
+    const redisVerify = await RedisOtpService.verifyAndConsumeOtp(norm.formattedPhone, code, 'phone_login');
+    if (redisVerify.success) {
+      const now = Date.now();
+      if (userId && !userId.startsWith('anon_')) {
+        await this.syncVerifiedPhone(userId, norm.formattedPhone);
+      }
+      return {
+        success: true,
+        phone: norm.formattedPhone,
+        provider: 'backend_redis',
+        verifiedAt: now
+      };
+    }
+
+    // 3. Strict Development-Only OTP Bypass
     if (DevOtpBypassService.isDevOtpBypassActive()) {
       const now = Date.now();
       if (userId && !userId.startsWith('anon_')) {
@@ -132,7 +171,7 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
       };
     }
 
-    // 5. Test / Sandbox phone numbers in development mode
+    // 4. Test / Sandbox phone numbers in development mode
     if (this.isDevelopment) {
       const isTestPhone = norm.formattedPhone === '+919999999999' || norm.formattedPhone === '+918305500767' || norm.formattedPhone.endsWith('123456');
       if (isTestPhone && (code === '123456' || code === '000000')) {
@@ -149,10 +188,10 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
       }
     }
 
-    // 6. If passed numeric OTP without ID token in production, require client Firebase Auth confirmation
+    // Return the specific Redis failure (e.g. EXPIRED, TOO_MANY_ATTEMPTS, or INVALID_CODE with remaining attempts)
     return {
       success: false,
-      error: 'Please verify the phone OTP using Firebase Phone Auth on your device.'
+      error: redisVerify.message || 'Invalid or expired verification code.'
     };
   }
 
@@ -164,8 +203,9 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
       const now = Date.now();
       await adminDb.collection('users').doc(uid).set({
         phone,
+        phoneNumber: phone,
         phoneVerified: true,
-        verificationMethod: 'firebase',
+        verificationMethod: 'sms_otp',
         verifiedAt: now,
         phoneSetupCompleted: true
       }, { merge: true });

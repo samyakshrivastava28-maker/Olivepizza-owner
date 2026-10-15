@@ -50,7 +50,8 @@ import {
   UtensilsCrossed,
   ArrowRight,
   Download,
-  Eye
+  Eye,
+  Trash2
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
@@ -133,6 +134,143 @@ export default function FranchiseWorkspace() {
     assignedBranchId: ''
   });
   const [actionLoading, setActionLoading] = useState<boolean>(false);
+
+  // Rider management modals and form
+  const [showAddRiderModal, setShowAddRiderModal] = useState<boolean>(false);
+  const [showEditRiderModal, setShowEditRiderModal] = useState<boolean>(false);
+  const [selectedRider, setSelectedRider] = useState<any>(null);
+  const [riderForm, setRiderForm] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    branchId: '',
+    vehicleNumber: '',
+    vehicleType: 'Bike'
+  });
+
+  const handleOpenAddRider = () => {
+    setRiderForm({
+      name: '',
+      phone: '',
+      email: '',
+      branchId: branches[0]?.id || 'main_branch',
+      vehicleNumber: '',
+      vehicleType: 'Bike'
+    });
+    setShowAddRiderModal(true);
+  };
+
+  const handleOpenEditRider = (r: any) => {
+    setSelectedRider(r);
+    setRiderForm({
+      name: r.name || '',
+      phone: r.phone || r.phoneNumber || '',
+      email: r.email || '',
+      branchId: r.branchId || branches[0]?.id || 'main_branch',
+      vehicleNumber: r.vehicleNumber || '',
+      vehicleType: r.vehicleType || 'Bike'
+    });
+    setShowEditRiderModal(true);
+  };
+
+  const handleCreateRider = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!franchise?.id) return;
+    if (!riderForm.name.trim() || !riderForm.phone.trim()) {
+      toast.error('Rider name and phone number are required');
+      return;
+    }
+    setActionLoading(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${franchise.id}/riders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(riderForm)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to onboard rider');
+      toast.success(`Rider ${riderForm.name} onboarded successfully!`);
+      setShowAddRiderModal(false);
+      const rRes = await fetchApi(`/api/franchises/${franchise.id}/riders`);
+      const rData = await rRes.json();
+      if (Array.isArray(rData.riders)) setRiders(rData.riders);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to onboard rider');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleUpdateRider = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!franchise?.id || !selectedRider?.id) return;
+    setActionLoading(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${franchise.id}/riders/${selectedRider.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(riderForm)
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update rider');
+      toast.success('Rider details updated successfully!');
+      setShowEditRiderModal(false);
+      const rRes = await fetchApi(`/api/franchises/${franchise.id}/riders`);
+      const rData = await rRes.json();
+      if (Array.isArray(rData.riders)) setRiders(rData.riders);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to update rider');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleToggleRiderStatus = async (r: any) => {
+    if (!franchise?.id) return;
+    const isCurrentlyActive = r.isActive !== false && r.status !== 'INACTIVE' && r.status !== 'REVOKED';
+    const newActive = !isCurrentlyActive;
+    const actionLabel = newActive ? 'Reinstate' : 'Suspend';
+    if (!confirm(`Are you sure you want to ${actionLabel} ${r.name}?`)) return;
+    setActionLoading(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${franchise.id}/riders/${r.id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive: newActive })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Failed to ${actionLabel} rider`);
+      toast.success(`Rider ${r.name} ${newActive ? 'reinstated' : 'suspended & session revoked'}!`);
+      const rRes = await fetchApi(`/api/franchises/${franchise.id}/riders`);
+      const rData = await rRes.json();
+      if (Array.isArray(rData.riders)) setRiders(rData.riders);
+    } catch (err: any) {
+      toast.error(err.message || `Failed to ${actionLabel} rider`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleDeleteRider = async (r: any) => {
+    if (!franchise?.id) return;
+    if (!confirm(`Permanently remove rider ${r.name}? Their login tokens will be immediately revoked.`)) return;
+    setActionLoading(true);
+    try {
+      const res = await fetchApi(`/api/franchises/${franchise.id}/riders/${r.id}`, {
+        method: 'DELETE'
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete rider');
+      toast.success(`Rider ${r.name} deleted and revoked`);
+      const rRes = await fetchApi(`/api/franchises/${franchise.id}/riders`);
+      const rData = await rRes.json();
+      if (Array.isArray(rData.riders)) setRiders(rData.riders);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to delete rider');
+    } finally {
+      setActionLoading(false);
+    }
+  };
 
   // 1. Fetch All Franchises (for Context Switcher)
   useEffect(() => {
@@ -2079,7 +2217,7 @@ export default function FranchiseWorkspace() {
       {/* ─── 9. TAB: DELIVERY FLEET ─────────────────────────────────────────── */}
       {activeTab === 'delivery' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <Bike className="w-4 h-4 text-sky-400" />
@@ -2089,58 +2227,120 @@ export default function FranchiseWorkspace() {
                 Store-bound delivery fleet assigned to {cleanFranchiseName}
               </p>
             </div>
-            <button
-              onClick={() => loadFranchiseWorkspace()}
-              className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs transition flex items-center gap-1"
-            >
-              <RefreshCw className="w-3.5 h-3.5" /> Refresh Fleet
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleOpenAddRider}
+                className="px-3.5 py-2 bg-sky-500 hover:bg-sky-400 text-black font-bold rounded-xl text-xs transition flex items-center gap-1.5 shadow-lg shadow-sky-500/20"
+              >
+                <Plus className="w-3.5 h-3.5" /> Onboard Rider
+              </button>
+              <button
+                onClick={() => loadFranchiseWorkspace()}
+                className="p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs transition flex items-center gap-1"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Refresh Fleet
+              </button>
+            </div>
           </div>
 
           {riders.length === 0 ? (
-            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center max-w-md mx-auto space-y-3">
-              <Bike className="w-10 h-10 mx-auto text-slate-600" />
-              <h4 className="text-sm font-bold text-white">No Riders Assigned Yet</h4>
-              <p className="text-xs text-slate-400">
-                Delivery partners onboarded for this franchise will appear here with live availability and route tracking.
-              </p>
+            <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-12 text-center max-w-md mx-auto space-y-4">
+              <Bike className="w-12 h-12 mx-auto text-slate-600" />
+              <div className="space-y-1">
+                <h4 className="text-sm font-bold text-white">No Riders Assigned Yet</h4>
+                <p className="text-xs text-slate-400">
+                  Onboard your first delivery rider to enable store-bound delivery dispatch for {cleanFranchiseName}.
+                </p>
+              </div>
+              <button
+                onClick={handleOpenAddRider}
+                className="px-4 py-2.5 bg-sky-500 hover:bg-sky-400 text-black font-bold rounded-xl text-xs transition inline-flex items-center gap-1.5 shadow-lg shadow-sky-500/20"
+              >
+                <Plus className="w-4 h-4" /> Onboard Delivery Partner
+              </button>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {riders.map((r) => (
-                <div key={r.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-sm font-bold text-white">{r.name}</span>
-                      <p className="text-[10px] text-slate-400 font-mono">{r.phone || r.email}</p>
-                    </div>
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                      r.status === 'AVAILABLE'
-                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                        : r.status === 'ON_DELIVERY' || r.status === 'BUSY'
-                        ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30 animate-pulse'
-                        : 'bg-slate-800 text-slate-400 border border-slate-700'
-                    }`}>
-                      {r.status || 'AVAILABLE'}
-                    </span>
-                  </div>
+              {riders.map((r) => {
+                const isRiderActive = r.isActive !== false && r.status !== 'INACTIVE' && r.status !== 'REVOKED' && r.status !== 'SUSPENDED';
+                const branchObj = branches.find((b) => b.id === r.branchId);
+                const branchName = branchObj?.name || r.branchId || 'Main Branch';
 
-                  <div className="space-y-1 text-xs text-slate-300 pt-2 border-t border-slate-800">
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Branch:</span>
-                      <span className="text-slate-300 font-medium">{r.branchId || 'main_branch'}</span>
+                return (
+                  <div key={r.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-lg flex flex-col justify-between">
+                    <div className="space-y-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <span className="text-sm font-bold text-white block">{r.name}</span>
+                          <p className="text-xs text-slate-400 font-mono flex items-center gap-1 mt-0.5">
+                            <Phone className="w-3 h-3 text-slate-500" />
+                            {r.phone || r.phoneNumber || 'No phone'}
+                          </p>
+                          {r.email && (
+                            <p className="text-[11px] text-slate-500 font-mono truncate max-w-[200px]">
+                              {r.email}
+                            </p>
+                          )}
+                        </div>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          !isRiderActive
+                            ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                            : r.status === 'ON_DELIVERY' || r.status === 'BUSY'
+                            ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30 animate-pulse'
+                            : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                        }`}>
+                          {!isRiderActive ? 'SUSPENDED' : (r.status || 'AVAILABLE')}
+                        </span>
+                      </div>
+
+                      <div className="space-y-1 text-xs text-slate-300 pt-2 border-t border-slate-800">
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Branch:</span>
+                          <span className="text-slate-200 font-medium truncate max-w-[150px]">{branchName}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Vehicle:</span>
+                          <span className="text-white font-mono">{r.vehicleNumber || r.vehicleType || 'Bike'}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-slate-500">Active Deliveries:</span>
+                          <span className="text-amber-400 font-bold font-mono">{r.activeOrdersCount || 0} Orders</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Vehicle:</span>
-                      <span className="text-white font-mono">{r.vehicleNumber || r.vehicleType || 'Two-Wheeler'}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Active Deliveries:</span>
-                      <span className="text-amber-400 font-bold font-mono">{r.activeOrdersCount || 0} Orders</span>
+
+                    <div className="pt-2 border-t border-slate-800/80 flex items-center gap-1.5">
+                      <button
+                        onClick={() => handleOpenEditRider(r)}
+                        className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition"
+                      >
+                        <Edit2 className="w-3 h-3 text-sky-400" />
+                        <span>Edit</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleToggleRiderStatus(r)}
+                        className={`flex-1 py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1 transition ${
+                          isRiderActive
+                            ? 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        }`}
+                      >
+                        <Power className="w-3 h-3" />
+                        <span>{isRiderActive ? 'Suspend' : 'Reinstate'}</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleDeleteRider(r)}
+                        className="p-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 rounded-lg transition border border-rose-500/30"
+                        title="Delete rider & revoke session"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -2553,6 +2753,238 @@ export default function FranchiseWorkspace() {
                 <button type="button" onClick={() => setShowEditAccessModal(false)} className="px-4 py-2 bg-slate-800 text-white rounded-xl">Cancel</button>
                 <button type="submit" disabled={actionLoading} className="px-4 py-2 bg-amber-500 font-bold text-black rounded-xl">
                   {actionLoading ? 'Saving...' : 'Save Access Changes'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Onboard Rider Modal */}
+      {showAddRiderModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Bike className="w-5 h-5 text-sky-400" />
+                <h3 className="font-bold text-white text-base">Onboard Delivery Partner</h3>
+              </div>
+              <button
+                onClick={() => setShowAddRiderModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateRider} className="space-y-3.5 text-xs">
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Rider Full Name *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Rahul Verma"
+                  value={riderForm.name}
+                  onChange={(e) => setRiderForm({ ...riderForm, name: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-600 focus:outline-none focus:border-sky-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Mobile Number (Login Identity) *</label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-2.5 text-slate-500 font-mono font-bold">+91</span>
+                  <input
+                    type="tel"
+                    required
+                    placeholder="9876543210"
+                    value={riderForm.phone}
+                    onChange={(e) => setRiderForm({ ...riderForm, phone: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-12 pr-3.5 py-2.5 text-white font-mono placeholder-slate-600 focus:outline-none focus:border-sky-500"
+                  />
+                </div>
+                <p className="text-[10px] text-slate-500 mt-1">Used for Rider App SMS OTP and Truecaller login</p>
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Email Address (Optional)</label>
+                <input
+                  type="email"
+                  placeholder="rider@olivepizza.in"
+                  value={riderForm.email}
+                  onChange={(e) => setRiderForm({ ...riderForm, email: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white placeholder-slate-600 focus:outline-none focus:border-sky-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">Assigned Branch *</label>
+                  <select
+                    value={riderForm.branchId}
+                    onChange={(e) => setRiderForm({ ...riderForm, branchId: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:border-sky-500"
+                  >
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">Vehicle Type</label>
+                  <select
+                    value={riderForm.vehicleType}
+                    onChange={(e) => setRiderForm({ ...riderForm, vehicleType: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="Bike">Motorcycle</option>
+                    <option value="Scooter">Scooter</option>
+                    <option value="EV_Bike">Electric Bike</option>
+                    <option value="Car">Car</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Vehicle Registration Number</label>
+                <input
+                  type="text"
+                  placeholder="e.g. CG-08-AB-1234"
+                  value={riderForm.vehicleNumber}
+                  onChange={(e) => setRiderForm({ ...riderForm, vehicleNumber: e.target.value.toUpperCase() })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white uppercase font-mono placeholder-slate-600 focus:outline-none focus:border-sky-500"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowAddRiderModal(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionLoading}
+                  className="px-4 py-2 bg-sky-500 hover:bg-sky-400 text-black font-bold rounded-xl shadow-lg shadow-sky-500/20 disabled:opacity-50"
+                >
+                  {actionLoading ? 'Onboarding...' : 'Onboard Partner'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Rider Modal */}
+      {showEditRiderModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Edit2 className="w-5 h-5 text-sky-400" />
+                <h3 className="font-bold text-white text-base">Edit Delivery Partner</h3>
+              </div>
+              <button
+                onClick={() => setShowEditRiderModal(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateRider} className="space-y-3.5 text-xs">
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Rider Full Name *</label>
+                <input
+                  type="text"
+                  required
+                  value={riderForm.name}
+                  onChange={(e) => setRiderForm({ ...riderForm, name: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:border-sky-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Mobile Number (Canonical Phone) *</label>
+                <input
+                  type="tel"
+                  required
+                  value={riderForm.phone}
+                  onChange={(e) => setRiderForm({ ...riderForm, phone: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white font-mono focus:outline-none focus:border-sky-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Email Address</label>
+                <input
+                  type="email"
+                  value={riderForm.email}
+                  onChange={(e) => setRiderForm({ ...riderForm, email: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white focus:outline-none focus:border-sky-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">Assigned Branch</label>
+                  <select
+                    value={riderForm.branchId}
+                    onChange={(e) => setRiderForm({ ...riderForm, branchId: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:border-sky-500"
+                  >
+                    {branches.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">Vehicle Type</label>
+                  <select
+                    value={riderForm.vehicleType}
+                    onChange={(e) => setRiderForm({ ...riderForm, vehicleType: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-white focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="Bike">Motorcycle</option>
+                    <option value="Scooter">Scooter</option>
+                    <option value="EV_Bike">Electric Bike</option>
+                    <option value="Car">Car</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Vehicle Number</label>
+                <input
+                  type="text"
+                  value={riderForm.vehicleNumber}
+                  onChange={(e) => setRiderForm({ ...riderForm, vehicleNumber: e.target.value.toUpperCase() })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-white uppercase font-mono focus:outline-none focus:border-sky-500"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowEditRiderModal(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={actionLoading}
+                  className="px-4 py-2 bg-sky-500 hover:bg-sky-400 text-black font-bold rounded-xl shadow-lg shadow-sky-500/20 disabled:opacity-50"
+                >
+                  {actionLoading ? 'Saving...' : 'Save Changes'}
                 </button>
               </div>
             </form>

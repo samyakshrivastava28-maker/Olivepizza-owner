@@ -1,5 +1,6 @@
 import { adminDb, adminAuth } from '../../config/firebase.js';
 import { FranchiseScopeService } from './FranchiseScopeService.js';
+import { normalizePhone, getPhoneQueryVariants, phonesMatch } from '../../utils/phoneNormalization.js';
 
 export interface FranchiseAccessEntry {
   franchiseId: string;
@@ -339,8 +340,11 @@ export class FranchiseAccessService {
       };
     }
 
-    // 2. Fetch user profile
+    // 2. Fetch user profile via UID, Email, or Phone variants
     let userData: any = null;
+    const rawInputPhone = phoneNumber || '';
+    const phoneVariants = getPhoneQueryVariants(rawInputPhone);
+
     let userSnap = await adminDb.collection('users').doc(uid).get().catch(() => null);
     if (userSnap && userSnap.exists) {
       userData = userSnap.data();
@@ -350,6 +354,26 @@ export class FranchiseAccessService {
         userData = q.docs[0].data();
       }
     }
+
+    if (!userData && phoneVariants.length > 0) {
+      for (const variant of phoneVariants) {
+        const qPhone = await adminDb.collection('users').where('phoneNumber', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+        if (!qPhone.empty) {
+          userData = qPhone.docs[0].data();
+          break;
+        }
+        const qPhoneAlt = await adminDb.collection('users').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+        if (!qPhoneAlt.empty) {
+          userData = qPhoneAlt.docs[0].data();
+          break;
+        }
+      }
+    }
+
+    const effectivePhoneVariants = Array.from(new Set([
+      ...phoneVariants,
+      ...getPhoneQueryVariants(userData?.phoneNumber || userData?.phone || '')
+    ]));
 
     const isOwnerRole = userData?.role === 'owner' || userData?.role === 'platform_owner';
 
@@ -364,11 +388,11 @@ export class FranchiseAccessService {
         isProfileComplete: true,
         user: {
           uid,
-          email: emailLower || 'owner@olivepizza.in',
+          email: emailLower || userData?.email || 'owner@olivepizza.in',
           name: userData?.name || 'Olive Pizza Administrator',
           role: 'owner',
-          phone: userData?.phone || userData?.phoneNumber || '',
-          phoneNumber: userData?.phone || userData?.phoneNumber || '',
+          phone: userData?.phone || userData?.phoneNumber || rawInputPhone,
+          phoneNumber: userData?.phone || userData?.phoneNumber || rawInputPhone,
           branchId: resolvedBranch,
           branchName: 'Olive Pizza Enterprise',
           branchIds: ['all'],
@@ -389,8 +413,8 @@ export class FranchiseAccessService {
         isProfileComplete: true,
         user: {
           uid,
-          email: emailLower,
-          name: userData?.name || emailLower.split('@')[0] || 'Customer',
+          email: emailLower || userData?.email || '',
+          name: userData?.name || (emailLower ? emailLower.split('@')[0] : 'Customer'),
           role: 'customer',
           branchId: 'main_branch',
           branchName: 'Olive Pizza',
@@ -403,7 +427,7 @@ export class FranchiseAccessService {
       };
     }
 
-    // 4. Check if account is suspended / deactivated
+    // 4. Check if account is suspended / deactivated / revoked
     if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended' || userData.status === 'SUSPENDED' || userData.status === 'REVOKED')) {
       return {
         authorized: false,
@@ -413,40 +437,48 @@ export class FranchiseAccessService {
     }
 
     // 5. Look up franchise assignments from franchises collection directly
-    // This handles cases where an owner entered the manager's email in the franchise modal
+    // Matches by email or phone (supporting cases where owner entered phone in modal)
     let assignedFranchiseDoc: any = null;
     let assignedRoleFromFranchise = '';
 
-    if (emailLower) {
-      const bSnap = await adminDb.collection('franchises').get().catch(() => ({ docs: [] } as any));
-      for (const d of bSnap.docs) {
-        const b = d.data();
-        if (b.restaurantManagerEmail && b.restaurantManagerEmail.toLowerCase().trim() === emailLower) {
-          assignedFranchiseDoc = { id: d.id, ...b };
+    const bSnap = await adminDb.collection('franchises').get().catch(() => ({ docs: [] } as any));
+    for (const d of bSnap.docs) {
+      const b = d.data();
+      const rmEmailMatch = emailLower && b.restaurantManagerEmail && b.restaurantManagerEmail.toLowerCase().trim() === emailLower;
+      const foEmailMatch = emailLower && b.franchiseOwnerEmail && b.franchiseOwnerEmail.toLowerCase().trim() === emailLower;
+      const rmPhoneMatch = effectivePhoneVariants.some(v => phonesMatch(b.restaurantManagerPhone, v));
+      const foPhoneMatch = effectivePhoneVariants.some(v => phonesMatch(b.franchiseOwnerPhone, v));
+
+      if (rmEmailMatch || rmPhoneMatch) {
+        assignedFranchiseDoc = { id: d.id, ...b };
+        assignedRoleFromFranchise = 'restaurant_manager';
+        break;
+      }
+      if (foEmailMatch || foPhoneMatch) {
+        assignedFranchiseDoc = { id: d.id, ...b };
+        assignedRoleFromFranchise = 'franchise_owner';
+        break;
+      }
+    }
+
+    if (!assignedFranchiseDoc) {
+      const feSnap = await adminDb.collection('franchise_entities').get().catch(() => ({ docs: [] } as any));
+      for (const d of feSnap.docs) {
+        const fe = d.data();
+        const rmEmailMatch = emailLower && fe.restaurantManagerEmail && fe.restaurantManagerEmail.toLowerCase().trim() === emailLower;
+        const foEmailMatch = emailLower && fe.franchiseOwnerEmail && fe.franchiseOwnerEmail.toLowerCase().trim() === emailLower;
+        const rmPhoneMatch = effectivePhoneVariants.some(v => phonesMatch(fe.restaurantManagerPhone, v));
+        const foPhoneMatch = effectivePhoneVariants.some(v => phonesMatch(fe.franchiseOwnerPhone, v));
+
+        if (rmEmailMatch || rmPhoneMatch) {
+          assignedFranchiseDoc = { id: d.id, ...fe, mainBranchId: fe.mainBranchId || d.id };
           assignedRoleFromFranchise = 'restaurant_manager';
           break;
         }
-        if (b.franchiseOwnerEmail && b.franchiseOwnerEmail.toLowerCase().trim() === emailLower) {
-          assignedFranchiseDoc = { id: d.id, ...b };
+        if (foEmailMatch || foPhoneMatch) {
+          assignedFranchiseDoc = { id: d.id, ...fe, mainBranchId: fe.mainBranchId || d.id };
           assignedRoleFromFranchise = 'franchise_owner';
           break;
-        }
-      }
-
-      if (!assignedFranchiseDoc) {
-        const feSnap = await adminDb.collection('franchise_entities').get().catch(() => ({ docs: [] } as any));
-        for (const d of feSnap.docs) {
-          const fe = d.data();
-          if (fe.restaurantManagerEmail && fe.restaurantManagerEmail.toLowerCase().trim() === emailLower) {
-            assignedFranchiseDoc = { id: d.id, ...fe, mainBranchId: fe.mainBranchId || d.id };
-            assignedRoleFromFranchise = 'restaurant_manager';
-            break;
-          }
-          if (fe.franchiseOwnerEmail && fe.franchiseOwnerEmail.toLowerCase().trim() === emailLower) {
-            assignedFranchiseDoc = { id: d.id, ...fe, mainBranchId: fe.mainBranchId || d.id };
-            assignedRoleFromFranchise = 'franchise_owner';
-            break;
-          }
         }
       }
     }
@@ -520,6 +552,20 @@ export class FranchiseAccessService {
           rmData = rmSnap.docs[0].data();
         }
       }
+      if (!rmData && effectivePhoneVariants.length > 0) {
+        for (const variant of effectivePhoneVariants) {
+          const rmPhoneSnap = await adminDb.collection('restaurant_managers').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!rmPhoneSnap.empty) {
+            rmData = rmPhoneSnap.docs[0].data();
+            break;
+          }
+          const rmPhoneAltSnap = await adminDb.collection('restaurant_managers').where('phoneNumber', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!rmPhoneAltSnap.empty) {
+            rmData = rmPhoneAltSnap.docs[0].data();
+            break;
+          }
+        }
+      }
 
       if (rmData) {
         if (rmData.status === 'PENDING_OWNER_APPROVAL') {
@@ -547,18 +593,26 @@ export class FranchiseAccessService {
       // Dynamic PIN requirement: only require PIN if a pinHash is actually set on profile
       const requiresPin = Boolean(userData?.pinHash || rmData?.pinHash);
 
+      const effectiveRmPhone = normalizePhone(rawInputPhone || userData?.phone || userData?.phoneNumber || rmData?.phone || rmData?.phoneNumber || '').e164 || '';
+      const effectiveRmEmail = emailLower || rmData?.email || userData?.email || '';
+
       // Auto-heal: Ensure users document and restaurant_managers document have APPROVED status and app access
-      adminDb.collection('restaurant_managers').doc(uid).set({
+      const rmHealPayload: Record<string, any> = {
         id: uid,
-        email: emailLower,
         status: 'APPROVED',
         isActive: true,
         branchId: resolvedBranchId,
         franchiseId: resolvedFranchiseId,
         updatedAt: new Date().toISOString()
-      }, { merge: true }).catch(() => {});
+      };
+      if (effectiveRmEmail) rmHealPayload.email = effectiveRmEmail;
+      if (effectiveRmPhone) {
+        rmHealPayload.phone = effectiveRmPhone;
+        rmHealPayload.phoneNumber = effectiveRmPhone;
+      }
+      adminDb.collection('restaurant_managers').doc(uid).set(rmHealPayload, { merge: true }).catch(() => {});
 
-      adminDb.collection('users').doc(uid).set({
+      const userHealPayload: Record<string, any> = {
         role: 'restaurant_manager',
         allowedApps: Array.from(new Set([...(userData?.allowedApps || []), 'RESTAURANT_MANAGER'])),
         applicationAccess: { ...(userData?.applicationAccess || {}), app_restaurant_management: true },
@@ -566,7 +620,13 @@ export class FranchiseAccessService {
         franchiseId: resolvedFranchiseId,
         status: 'APPROVED',
         isActive: true
-      }, { merge: true }).catch(() => {});
+      };
+      if (effectiveRmEmail) userHealPayload.email = effectiveRmEmail;
+      if (effectiveRmPhone) {
+        userHealPayload.phone = effectiveRmPhone;
+        userHealPayload.phoneNumber = effectiveRmPhone;
+      }
+      adminDb.collection('users').doc(uid).set(userHealPayload, { merge: true }).catch(() => {});
 
       return {
         authorized: true,
@@ -574,7 +634,9 @@ export class FranchiseAccessService {
         isProfileComplete: true,
         user: {
           uid,
-          email: emailLower,
+          email: effectiveRmEmail,
+          phone: effectiveRmPhone,
+          phoneNumber: effectiveRmPhone,
           name: userData?.name || rmData?.name || assignedFranchiseDoc?.restaurantManagerName || 'Restaurant Manager',
           role: 'restaurant_manager',
           branchId: resolvedBranchId,
@@ -623,6 +685,20 @@ export class FranchiseAccessService {
           posData = pSnap.docs[0].data();
         }
       }
+      if (!posData && effectivePhoneVariants.length > 0) {
+        for (const variant of effectivePhoneVariants) {
+          const pPhoneSnap = await adminDb.collection('pos_accounts').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!pPhoneSnap.empty) {
+            posData = pPhoneSnap.docs[0].data();
+            break;
+          }
+          const pPhoneAltSnap = await adminDb.collection('pos_accounts').where('phoneNumber', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!pPhoneAltSnap.empty) {
+            posData = pPhoneAltSnap.docs[0].data();
+            break;
+          }
+        }
+      }
 
       if (posData) {
         if (posData.status === 'PENDING_OWNER_APPROVAL') {
@@ -650,25 +726,39 @@ export class FranchiseAccessService {
       // Dynamic PIN requirement
       const requiresPin = Boolean(userData?.pinHash || posData?.pinHash);
 
+      const effectivePosPhone = normalizePhone(rawInputPhone || userData?.phone || userData?.phoneNumber || posData?.phone || posData?.phoneNumber || '').e164 || '';
+      const effectivePosEmail = emailLower || posData?.email || userData?.email || '';
+
       // Auto-heal
-      adminDb.collection('pos_accounts').doc(uid).set({
+      const posHealPayload: Record<string, any> = {
         id: uid,
-        email: emailLower,
         status: 'APPROVED',
         isActive: true,
         franchiseId: resolvedFranchiseId,
         branchId: resolvedBranchId,
         updatedAt: new Date().toISOString()
-      }, { merge: true }).catch(() => {});
+      };
+      if (effectivePosEmail) posHealPayload.email = effectivePosEmail;
+      if (effectivePosPhone) {
+        posHealPayload.phone = effectivePosPhone;
+        posHealPayload.phoneNumber = effectivePosPhone;
+      }
+      adminDb.collection('pos_accounts').doc(uid).set(posHealPayload, { merge: true }).catch(() => {});
 
-      adminDb.collection('users').doc(uid).set({
+      const userPosHealPayload: Record<string, any> = {
         allowedApps: Array.from(new Set([...(userData?.allowedApps || []), 'POS'])),
         applicationAccess: { ...(userData?.applicationAccess || {}), app_pos: true },
         franchiseId: resolvedFranchiseId,
         branchId: resolvedBranchId,
         status: 'APPROVED',
         isActive: true
-      }, { merge: true }).catch(() => {});
+      };
+      if (effectivePosEmail) userPosHealPayload.email = effectivePosEmail;
+      if (effectivePosPhone) {
+        userPosHealPayload.phone = effectivePosPhone;
+        userPosHealPayload.phoneNumber = effectivePosPhone;
+      }
+      adminDb.collection('users').doc(uid).set(userPosHealPayload, { merge: true }).catch(() => {});
 
       return {
         authorized: true,
@@ -676,7 +766,9 @@ export class FranchiseAccessService {
         isProfileComplete: true,
         user: {
           uid,
-          email: emailLower,
+          email: effectivePosEmail,
+          phone: effectivePosPhone,
+          phoneNumber: effectivePosPhone,
           name: userData?.name || posData?.name || 'POS Operator',
           role: 'pos_operator',
           branchId: resolvedBranchId,
@@ -720,6 +812,20 @@ export class FranchiseAccessService {
           fuData = fuSnap.docs[0].data();
         }
       }
+      if (!fuData && effectivePhoneVariants.length > 0) {
+        for (const variant of effectivePhoneVariants) {
+          const fuPhoneSnap = await adminDb.collection('franchise_users').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!fuPhoneSnap.empty) {
+            fuData = fuPhoneSnap.docs[0].data();
+            break;
+          }
+          const fuPhoneAltSnap = await adminDb.collection('franchise_users').where('phoneNumber', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!fuPhoneAltSnap.empty) {
+            fuData = fuPhoneAltSnap.docs[0].data();
+            break;
+          }
+        }
+      }
 
       if (fuData) {
         if (fuData.status === 'PENDING' || fuData.status === 'PENDING_OWNER_APPROVAL') {
@@ -741,23 +847,37 @@ export class FranchiseAccessService {
         };
       }
 
+      const effectiveFuPhone = normalizePhone(rawInputPhone || userData?.phone || userData?.phoneNumber || fuData?.phone || fuData?.phoneNumber || '').e164 || '';
+      const effectiveFuEmail = emailLower || fuData?.email || userData?.email || '';
+
       // Auto-heal
-      adminDb.collection('franchise_users').doc(uid).set({
+      const fuHealPayload: Record<string, any> = {
         id: uid,
-        email: emailLower,
         status: 'APPROVED',
         isActive: true,
         franchiseId: resolvedFranchiseId,
         updatedAt: new Date().toISOString()
-      }, { merge: true }).catch(() => {});
+      };
+      if (effectiveFuEmail) fuHealPayload.email = effectiveFuEmail;
+      if (effectiveFuPhone) {
+        fuHealPayload.phone = effectiveFuPhone;
+        fuHealPayload.phoneNumber = effectiveFuPhone;
+      }
+      adminDb.collection('franchise_users').doc(uid).set(fuHealPayload, { merge: true }).catch(() => {});
 
-      adminDb.collection('users').doc(uid).set({
+      const userFuHealPayload: Record<string, any> = {
         allowedApps: Array.from(new Set([...(userData?.allowedApps || []), 'FRANCHISE_MANAGER'])),
         applicationAccess: { ...(userData?.applicationAccess || {}), app_franchise_management: true },
         franchiseId: resolvedFranchiseId,
         status: 'APPROVED',
         isActive: true
-      }, { merge: true }).catch(() => {});
+      };
+      if (effectiveFuEmail) userFuHealPayload.email = effectiveFuEmail;
+      if (effectiveFuPhone) {
+        userFuHealPayload.phone = effectiveFuPhone;
+        userFuHealPayload.phoneNumber = effectiveFuPhone;
+      }
+      adminDb.collection('users').doc(uid).set(userFuHealPayload, { merge: true }).catch(() => {});
 
       return {
         authorized: true,
@@ -765,7 +885,9 @@ export class FranchiseAccessService {
         isProfileComplete: true,
         user: {
           uid,
-          email: emailLower,
+          email: effectiveFuEmail,
+          phone: effectiveFuPhone,
+          phoneNumber: effectiveFuPhone,
           name: userData?.name || fuData?.name || assignedFranchiseDoc?.franchiseOwnerName || 'Franchise Partner',
           role: 'franchise_manager',
           branchId: resolvedBranchId,
@@ -805,6 +927,20 @@ export class FranchiseAccessService {
           dpData = dpSnap.docs[0].data();
         }
       }
+      if (!dpData && effectivePhoneVariants.length > 0) {
+        for (const variant of effectivePhoneVariants) {
+          const dpPhoneSnap = await adminDb.collection('delivery_partners').where('phone', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!dpPhoneSnap.empty) {
+            dpData = dpPhoneSnap.docs[0].data();
+            break;
+          }
+          const dpPhoneAltSnap = await adminDb.collection('delivery_partners').where('phoneNumber', '==', variant).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!dpPhoneAltSnap.empty) {
+            dpData = dpPhoneAltSnap.docs[0].data();
+            break;
+          }
+        }
+      }
 
       if (dpData) {
         if (dpData.status === 'PENDING' || dpData.status === 'PENDING_OWNER_APPROVAL') {
@@ -826,25 +962,39 @@ export class FranchiseAccessService {
         };
       }
 
+      const effectiveDpPhone = normalizePhone(rawInputPhone || userData?.phone || userData?.phoneNumber || dpData?.phone || dpData?.phoneNumber || '').e164 || '';
+      const effectiveDpEmail = emailLower || dpData?.email || userData?.email || '';
+
       // Auto-heal
-      adminDb.collection('delivery_partners').doc(uid).set({
+      const dpHealPayload: Record<string, any> = {
         id: uid,
-        email: emailLower,
         status: 'approved',
         isActive: true,
         franchiseId: resolvedFranchiseId,
         branchId: resolvedBranchId,
         updatedAt: new Date().toISOString()
-      }, { merge: true }).catch(() => {});
+      };
+      if (effectiveDpEmail) dpHealPayload.email = effectiveDpEmail;
+      if (effectiveDpPhone) {
+        dpHealPayload.phone = effectiveDpPhone;
+        dpHealPayload.phoneNumber = effectiveDpPhone;
+      }
+      adminDb.collection('delivery_partners').doc(uid).set(dpHealPayload, { merge: true }).catch(() => {});
 
-      adminDb.collection('users').doc(uid).set({
+      const userDpHealPayload: Record<string, any> = {
         allowedApps: Array.from(new Set([...(userData?.allowedApps || []), 'DELIVERY'])),
         applicationAccess: { ...(userData?.applicationAccess || {}), app_delivery: true },
         franchiseId: resolvedFranchiseId,
         branchId: resolvedBranchId,
         status: 'APPROVED',
         isActive: true
-      }, { merge: true }).catch(() => {});
+      };
+      if (effectiveDpEmail) userDpHealPayload.email = effectiveDpEmail;
+      if (effectiveDpPhone) {
+        userDpHealPayload.phone = effectiveDpPhone;
+        userDpHealPayload.phoneNumber = effectiveDpPhone;
+      }
+      adminDb.collection('users').doc(uid).set(userDpHealPayload, { merge: true }).catch(() => {});
 
       return {
         authorized: true,
@@ -852,13 +1002,17 @@ export class FranchiseAccessService {
         isProfileComplete: Boolean(dpData?.vehicleNumber || dpData?.name),
         user: {
           uid,
-          email: emailLower,
+          email: effectiveDpEmail,
+          phone: effectiveDpPhone,
+          phoneNumber: effectiveDpPhone,
           name: dpData?.name || userData?.name || 'Delivery Partner',
           role: 'delivery_partner',
           branchId: resolvedBranchId,
           branchName: assignedFranchiseDoc?.name || 'Olive Pizza Branch',
           branchIds: [resolvedBranchId],
           franchiseId: resolvedFranchiseId,
+          vehicleType: dpData?.vehicleType || 'Bike',
+          vehicleNumber: dpData?.vehicleNumber || '',
           permissions: ['delivery.orders', 'delivery.location'],
           allowedApps: ['DELIVERY'],
           applicationAccess: { app_delivery: true }

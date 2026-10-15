@@ -28,7 +28,7 @@ export class VeriphoneService {
   private readonly CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days cache
 
   private constructor() {
-    this.apiKey = process.env.VERIPHONE_API_KEY || '9A278366811B4244AB0A1C1A06A3AEC4';
+    this.apiKey = process.env.VERIPHONE_API_KEY || '';
   }
 
   public static getInstance(): VeriphoneService {

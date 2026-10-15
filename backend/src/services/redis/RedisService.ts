@@ -116,6 +116,10 @@ class RedisService {
     };
   }
 
+  public isRedisConnected(): boolean {
+    return this.isConnected;
+  }
+
   public getClient(): Redis | null {
     return this.client;
   }

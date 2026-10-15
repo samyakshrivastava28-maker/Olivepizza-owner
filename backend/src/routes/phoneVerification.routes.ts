@@ -1,4 +1,5 @@
 import express, { Request, Response } from 'express';
+import crypto from 'crypto';
 import { adminDb, adminAuth } from '../config/firebase.js';
 import { phoneVerificationService } from '../services/phone-verification/PhoneVerificationService.js';
 import { authLimiter } from '../config/security.config.js';
@@ -8,10 +9,9 @@ import { veriphoneService } from '../services/phone-verification/VeriphoneServic
 const router = express.Router();
 const truecaller = phoneVerificationService.getTruecallerProvider();
 
-// Authentication Middleware with fallback to body/header UID
+// Secure Authentication Middleware: Never trust client-supplied UIDs from body or headers
 const authenticateUser = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const token = req.headers.authorization?.split('Bearer ')[1];
-  let userUid = req.body?.userId || (req.headers['x-user-uid'] as string);
 
   if (token) {
     try {
@@ -19,11 +19,12 @@ const authenticateUser = async (req: express.Request, res: express.Response, nex
       (req as any).user = decoded;
       return next();
     } catch (error) {
-      console.warn('[PhoneVerification] Token verification fallback:', error);
+      console.warn('[PhoneVerification] Token verification notice:', error);
     }
   }
 
-  (req as any).user = { uid: userUid || `anon_${Date.now()}` };
+  // Ephemeral, unprivileged anonymous session - cannot authorize any staff access
+  (req as any).user = { uid: `anon_${crypto.randomUUID()}` };
   next();
 };
 
@@ -272,7 +273,7 @@ router.use(authenticateUser);
 router.post('/send-otp', authLimiter, async (req: Request, res: Response) => {
   try {
     const { phoneNumber } = req.body;
-    const uid = (req as any).user?.uid || req.body?.userId || 'anonymous';
+    const uid = (req as any).user?.uid || 'anonymous';
     const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
 
     if (!phoneNumber) {

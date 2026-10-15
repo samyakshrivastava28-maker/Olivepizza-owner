@@ -10,6 +10,7 @@ import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogl
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 import { PosAccountService } from '../services/auth/PosAccountService.js';
 import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
+import { normalizePhone } from '../utils/phoneNormalization.js';
 
 const router = Router();
 
@@ -1548,16 +1549,21 @@ router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform
       return;
     }
 
-    const { name, email, phone, branchId, vehicleNumber } = req.body;
+    const { name, email, phone, branchId, vehicleNumber, vehicleType } = req.body;
 
     if (!name || !phone) {
       res.status(400).json({ error: 'Rider name and phone number are required' });
       return;
     }
 
-    const cleanPhone = phone.trim().replace(/[^\d+]/g, '');
-    const cleanEmail = email ? email.trim().toLowerCase() : `rider.${cleanPhone.replace(/\D/g, '')}@olivepizza.in`;
-    const riderId = `rider_${cleanPhone.replace(/\D/g, '').slice(-6)}_${Date.now().toString().slice(-4)}`;
+    const normPhone = normalizePhone(phone);
+    if (!normPhone.isValid || !normPhone.e164) {
+      res.status(400).json({ error: 'Invalid Indian phone number. Please enter a valid 10-digit mobile number.' });
+      return;
+    }
+
+    const cleanEmail = email ? email.trim().toLowerCase() : `rider.${normPhone.national}@olivepizza.in`;
+    const riderId = `rider_${normPhone.national.slice(-6)}_${Date.now().toString().slice(-4)}`;
     const now = new Date().toISOString();
 
     let targetUid = riderId;
@@ -1581,14 +1587,18 @@ router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform
       uid: targetUid,
       name: name.trim(),
       email: cleanEmail,
-      phone: cleanPhone,
+      phone: normPhone.e164,
+      phoneNumber: normPhone.e164,
       role: 'delivery_partner',
+      allowedApps: ['DELIVERY'],
+      applicationAccess: { app_delivery: true },
       phoneVerified: true,
       franchiseId: id,
       branchId: branchId || 'main_branch',
-      vehicleNumber: vehicleNumber || '',
+      vehicleNumber: vehicleNumber ? vehicleNumber.trim().toUpperCase() : '',
+      vehicleType: vehicleType || 'Bike',
       isActive: true,
-      status: 'ACTIVE',
+      status: 'APPROVED',
       isOnline: false,
       rating: 5.0,
       totalDeliveries: 0,
@@ -1607,13 +1617,18 @@ router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform
       uid: targetUid,
       name: riderData.name,
       email: cleanEmail,
-      phone: cleanPhone,
+      phone: normPhone.e164,
+      phoneNumber: normPhone.e164,
       phoneVerified: true,
       role: 'delivery_partner',
+      allowedApps: ['DELIVERY'],
+      applicationAccess: { app_delivery: true },
+      status: 'APPROVED',
       franchiseId: id,
       branchId: riderData.branchId,
       isActive: true,
       vehicleNumber: riderData.vehicleNumber,
+      vehicleType: riderData.vehicleType,
       updatedAt: now
     }, { merge: true }).catch(() => {});
 
@@ -1626,7 +1641,7 @@ router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform
       actionType: 'RIDER_PROVISIONED',
       entityType: 'delivery_partner',
       entityId: riderId,
-      details: { name: riderData.name, email: cleanEmail, phone: cleanPhone, franchiseId: id }
+      details: { name: riderData.name, email: cleanEmail, phone: normPhone.e164, franchiseId: id }
     });
 
     res.status(201).json({ success: true, rider: riderData });
@@ -1635,7 +1650,71 @@ router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform
   }
 });
 
-// PATCH /:id/riders/:riderId/status - Toggle Rider Status
+// PUT /:id/riders/:riderId - Update Rider Details & Branch Reassignment
+router.put('/:id/riders/:riderId', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_manager', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, riderId } = req.params;
+    const isOwner = FranchiseScopeService.isGlobalOwner(req.user?.email, req.user?.role);
+    if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
+      res.status(403).json({ error: 'Cross-franchise access denied' });
+      return;
+    }
+
+    const { name, phone, email, branchId, vehicleNumber, vehicleType, emergencyContact } = req.body;
+    const now = new Date().toISOString();
+
+    const existingDoc = await adminDb.collection('delivery_partners').doc(riderId).get();
+    if (!existingDoc.exists) {
+      res.status(404).json({ error: 'Delivery partner record not found' });
+      return;
+    }
+    const existing = existingDoc.data() || {};
+    const targetUid = existing.uid || riderId;
+
+    const updates: Record<string, any> = {
+      updatedAt: now,
+      updatedBy: req.user?.email || req.user?.uid || 'manager'
+    };
+
+    if (name) updates.name = name.trim();
+    if (phone) {
+      const norm = normalizePhone(phone);
+      if (norm.isValid && norm.e164) {
+        updates.phone = norm.e164;
+        updates.phoneNumber = norm.e164;
+      }
+    }
+    if (email) updates.email = email.trim().toLowerCase();
+    if (branchId) updates.branchId = branchId;
+    if (vehicleNumber !== undefined) updates.vehicleNumber = String(vehicleNumber).trim().toUpperCase();
+    if (vehicleType) updates.vehicleType = vehicleType;
+    if (emergencyContact) updates.emergencyContact = emergencyContact;
+
+    await adminDb.collection('delivery_partners').doc(riderId).set(updates, { merge: true });
+    if (targetUid !== riderId) {
+      await adminDb.collection('delivery_partners').doc(targetUid).set(updates, { merge: true });
+    }
+    await adminDb.collection('users').doc(targetUid).set(updates, { merge: true }).catch(() => {});
+
+    await FranchiseScopeService.logFranchiseAudit({
+      organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
+      franchiseId: id,
+      branchId: updates.branchId || existing.branchId || 'main_branch',
+      actorUid: req.user?.uid || 'franchise_manager',
+      actorEmail: req.user?.email || 'manager@olivepizza.in',
+      actionType: 'RIDER_UPDATED',
+      entityType: 'delivery_partner',
+      entityId: riderId,
+      details: { updates }
+    });
+
+    res.json({ success: true, message: 'Rider updated successfully', updates });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to update delivery partner' });
+  }
+});
+
+// PATCH /:id/riders/:riderId/status - Toggle Rider Status (Activate / Deactivate)
 router.patch('/:id/riders/:riderId/status', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_manager', 'restaurant_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id, riderId } = req.params;
@@ -1648,26 +1727,51 @@ router.patch('/:id/riders/:riderId/status', requireRole(['owner', 'admin', 'deve
     const { isActive } = req.body;
     const now = new Date().toISOString();
 
-    await adminDb.collection('delivery_partners').doc(riderId).set({
+    const existingDoc = await adminDb.collection('delivery_partners').doc(riderId).get();
+    const targetUid = existingDoc.exists ? (existingDoc.data()?.uid || riderId) : riderId;
+
+    const partnerUpdates: Record<string, any> = {
       isActive: Boolean(isActive),
-      status: isActive ? 'ACTIVE' : 'INACTIVE',
+      status: isActive ? 'APPROVED' : 'INACTIVE',
       updatedAt: now,
       updatedBy: req.user?.email || 'manager'
-    }, { merge: true });
+    };
+
+    await adminDb.collection('delivery_partners').doc(riderId).set(partnerUpdates, { merge: true });
+    if (targetUid !== riderId) {
+      await adminDb.collection('delivery_partners').doc(targetUid).set(partnerUpdates, { merge: true });
+    }
 
     if (!isActive) {
+      // Instant Revocation
       try {
-        await adminAuth.revokeRefreshTokens(riderId);
-        await adminAuth.setCustomUserClaims(riderId, { role: 'REVOKED', revokedAt: now });
-        await adminDb.collection('users').doc(riderId).set({
+        await adminAuth.revokeRefreshTokens(targetUid);
+        await adminAuth.setCustomUserClaims(targetUid, { role: 'REVOKED', revokedAt: now });
+        await adminDb.collection('users').doc(targetUid).set({
           isActive: false,
           status: 'REVOKED',
-          role: 'REVOKED',
+          authRevokedAt: now,
           revokedAt: now,
-          revokedReason: 'Deactivated by franchise manager'
+          revokedReason: 'Deactivated by franchise manager / owner'
         }, { merge: true });
       } catch (revErr) {
         console.warn('[FranchiseRoutes] Rider revocation warning:', revErr);
+      }
+    } else {
+      // Instant Reinstatement
+      try {
+        await adminDb.collection('users').doc(targetUid).set({
+          isActive: true,
+          status: 'APPROVED',
+          role: 'delivery_partner',
+          allowedApps: ['DELIVERY'],
+          applicationAccess: { app_delivery: true },
+          authRevokedAt: null,
+          revokedAt: null,
+          revokedReason: null
+        }, { merge: true });
+      } catch (reinstateErr) {
+        console.warn('[FranchiseRoutes] Rider reinstatement warning:', reinstateErr);
       }
     }
 
@@ -1688,21 +1792,28 @@ router.delete('/:id/riders/:riderId', requireRole(['owner', 'admin', 'developer'
     }
 
     const now = new Date().toISOString();
+    const existingDoc = await adminDb.collection('delivery_partners').doc(riderId).get();
+    const targetUid = existingDoc.exists ? (existingDoc.data()?.uid || riderId) : riderId;
+
     try {
-      await adminAuth.revokeRefreshTokens(riderId);
-      await adminAuth.setCustomUserClaims(riderId, { role: 'REVOKED', revokedAt: now });
-      await adminDb.collection('users').doc(riderId).set({
+      await adminAuth.revokeRefreshTokens(targetUid);
+      await adminAuth.setCustomUserClaims(targetUid, { role: 'REVOKED', revokedAt: now });
+      await adminDb.collection('users').doc(targetUid).set({
         isActive: false,
-        status: 'REVOKED',
-        role: 'REVOKED',
+        status: 'DELETED',
+        authRevokedAt: now,
         revokedAt: now,
-        revokedReason: 'Deleted by franchise manager'
+        revokedReason: 'Deleted by franchise manager / owner'
       }, { merge: true });
     } catch (revErr) {
       console.warn('[FranchiseRoutes] Rider deletion revocation warning:', revErr);
     }
 
     await adminDb.collection('delivery_partners').doc(riderId).delete();
+    if (targetUid !== riderId) {
+      await adminDb.collection('delivery_partners').doc(targetUid).delete().catch(() => {});
+    }
+
     res.json({ success: true, message: 'Rider deleted successfully' });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to delete rider' });
