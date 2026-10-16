@@ -318,15 +318,18 @@ export class NotificationEngine {
           || sanitizedData.type === 'DELIVERY_ASSIGNED'
           || sanitizedData.stage === 'delivery_assigned';
 
-        // Do not strip notification block for restaurant/delivery apps or when OS tray banner is required
-        if (isDataOnlyCategory && androidConfig && !isUrgentStaffApp) {
+        const isShiftTransition = sanitizedData.type === 'WORK_SHIFT_STARTED' || sanitizedData.type === 'WORK_SHIFT_ENDED';
+        // Actionable staff alarms are handled by the native Android messaging service, which
+        // builds the one-shot custom-sound notification and order action buttons itself. If we
+        // also attach an FCM notification block, Android may display it without invoking that
+        // native handler while the app is backgrounded or killed.
+        const isNativeManagedStaffAlarm = isUrgentStaffApp && options.category === 'alarm_actionable';
+
+        if (isDataOnlyCategory && androidConfig && (!isUrgentStaffApp || isNativeManagedStaffAlarm)) {
           delete androidConfig.notification;
         }
-
-        const isShiftTransition = sanitizedData.type === 'WORK_SHIFT_STARTED' || sanitizedData.type === 'WORK_SHIFT_ENDED';
-        // Android must receive these as high-priority data-only pushes so the native app can
-        // create a single-sound alert with Continue Work / Done actions. APNs keeps its alert block.
-        if (isShiftTransition && androidConfig) delete androidConfig.notification;
+        // Shift transitions are always native-managed on Android, including their action buttons.
+        if ((isShiftTransition || isNativeManagedStaffAlarm) && androidConfig) delete androidConfig.notification;
 
         const message: admin.messaging.MulticastMessage = {
           tokens: chunk,
@@ -336,8 +339,8 @@ export class NotificationEngine {
           webpush: payload.webpush,
         };
 
-        // Attach top-level notification for urgent staff apps, simple_informational, or whenever payload.notification exists
-        if (!isShiftTransition && (!isDataOnlyCategory || isUrgentStaffApp) && (payload.notification || sanitizedData.title)) {
+        // Keep the visible APNs alert while Android receives data-only pushes for native operational UI.
+        if (!isShiftTransition && !isNativeManagedStaffAlarm && (!isDataOnlyCategory || isUrgentStaffApp) && (payload.notification || sanitizedData.title)) {
           message.notification = payload.notification || {
             title: sanitizedData.title || 'Olive Pizza Alert',
             body: sanitizedData.body || 'Immediate action required'
