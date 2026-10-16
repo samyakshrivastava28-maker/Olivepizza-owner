@@ -25,8 +25,8 @@ const SCHEDULES = 'rider_work_schedules';
 const USERS = 'users';
 const RIDERS = 'delivery_partners';
 const WEEK_MINUTES = 7 * 24 * 60;
-const SAFE_START_SOUNDS = new Set(['order_alert', 'system_alert', 'delivery_chime']);
-const SAFE_END_SOUNDS = new Set(['order_delivered', 'system_alert', 'delivery_chime']);
+const SAFE_START_SOUNDS = new Set(['new_order', 'order_alert']);
+const SAFE_END_SOUNDS = new Set(['order_delivered', 'order_confirmed']);
 
 function isValidTime(value: unknown): value is string {
   return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
@@ -124,7 +124,7 @@ export class RiderWorkScheduleService {
       }
     }
 
-    const startSound = SAFE_START_SOUNDS.has(value.startSound) ? value.startSound : 'order_alert';
+    const startSound = SAFE_START_SOUNDS.has(value.startSound) ? value.startSound : 'new_order';
     const endSound = SAFE_END_SOUNDS.has(value.endSound) ? value.endSound : 'order_delivered';
     return {
       uid,
@@ -295,7 +295,7 @@ export class RiderWorkScheduleService {
       : 'You are now offline. Tap Continue Work to extend your shift or Done to finish for today.';
     const type = started ? 'WORK_SHIFT_STARTED' : 'WORK_SHIFT_ENDED';
     const sound = started ? schedule.startSound : schedule.endSound;
-    const channelId = started ? 'olive_shift_started_v1' : 'olive_shift_ended_v1';
+    const channelId = started ? `olive_shift_started_${sound}` : `olive_shift_ended_${sound}`;
     const payload: any = {
       notification: { title, body },
       data: {
@@ -316,7 +316,7 @@ export class RiderWorkScheduleService {
         headers: { 'apns-priority': '10' },
         payload: { aps: {
           alert: { title, body },
-          sound: started ? 'order_alert.mp3' : 'order_delivered.mp3',
+          sound: started ? 'new_order.wav' : 'order_delivered.wav',
           category: type
         } }
       },
