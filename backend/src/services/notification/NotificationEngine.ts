@@ -142,6 +142,41 @@ export class NotificationEngine {
       return { successCount: 0, failureCount: 0, tokensFound: 0, errors: [] };
     }
 
+    const isTargetedOperationalAlert = options.category === 'alarm_actionable'
+      && ['restaurant', 'delivery'].includes(String(options.targetApp || '').toLowerCase());
+
+    // Native operational alerts carry the UID they were sent to. Use one recipient per
+    // Firebase message so the device can discard stale alerts after logout/account switching.
+    if (isTargetedOperationalAlert) {
+      const recipientUids = [...new Set(firebaseUserIds.filter((uid) => typeof uid === 'string' && uid.trim()))];
+      if (recipientUids.length > 1) {
+        const baseEventId = options.eventId || payload.data?.eventId;
+        const results = await Promise.all(recipientUids.map((uid) => {
+          const recipientEventId = baseEventId ? `${baseEventId}:${uid}` : undefined;
+          const recipientPayload: NotificationPayload = {
+            ...payload,
+            data: { ...(payload.data || {}), recipientUid: uid, ...(recipientEventId ? { eventId: recipientEventId } : {}) }
+          };
+          return this.sendBulk([uid], recipientPayload, {
+            ...options,
+            ...(recipientEventId ? { eventId: recipientEventId } : {})
+          });
+        }));
+        return results.reduce<SendResult>((total, result) => ({
+          successCount: total.successCount + result.successCount,
+          failureCount: total.failureCount + result.failureCount,
+          tokensFound: total.tokensFound + result.tokensFound,
+          errors: [...total.errors, ...result.errors]
+        }), { successCount: 0, failureCount: 0, tokensFound: 0, errors: [] });
+      }
+      if (recipientUids.length === 1) {
+        payload = {
+          ...payload,
+          data: { ...(payload.data || {}), recipientUid: recipientUids[0] }
+        };
+      }
+    }
+
     // ── 0a. Server-Side Idempotency Guard ────────────────────────────────────
     const eventId = options.eventId || payload.data?.eventId;
     if (eventId) {
