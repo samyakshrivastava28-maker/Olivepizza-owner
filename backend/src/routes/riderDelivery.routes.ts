@@ -12,6 +12,7 @@ import { notificationEngine } from '../services/notification/NotificationEngine.
 import { RiderDispatchEngine } from '../services/delivery/RiderDispatchEngine.js';
 import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
+import { RiderWorkScheduleService } from '../services/delivery/RiderWorkScheduleService.js';
 
 const router = Router();
 
@@ -940,6 +941,72 @@ router.post('/status', async (req: AuthRequest, res: Response): Promise<void> =>
     }
 
     const targetOnline = Boolean(isOnline);
+    const userRef = adminDb.collection('users').doc(uid);
+    const riderRef = adminDb.collection('delivery_partners').doc(uid);
+    const [statusUserSnap, statusRiderSnap] = await Promise.all([
+      userRef.get(),
+      riderRef.get().catch(() => null)
+    ]);
+    const statusUser = statusUserSnap.exists ? statusUserSnap.data() || {} : {};
+    const statusRider = statusRiderSnap?.exists ? statusRiderSnap.data() || {} : {};
+    const role = String(statusUser.role || statusRider.role || req.user?.role || '').toLowerCase();
+    const accountState = String(statusUser.accountStatus || statusUser.status || statusRider.accountStatus || statusRider.status || '').toLowerCase();
+    const isActive = statusUser.isActive !== false && statusRider.isActive !== false
+      && !['disabled', 'deactivated', 'rejected', 'revoked', 'deleted', 'suspended', 'blocked'].includes(accountState);
+
+    if (!isActive || (!statusUserSnap.exists && !statusRiderSnap?.exists)) {
+      res.status(403).json({ success: false, code: 'RIDER_ACCOUNT_INACTIVE', error: 'This delivery account is not active. Ask the owner to review your access.' });
+      return;
+    }
+
+    // Native background tracking is a location heartbeat only. It can never re-enable a rider
+    // after the scheduler has set them offline or after an owner disables the account.
+    if (req.body?.backgroundService === true) {
+      if (!['delivery_partner', 'delivery', 'rider'].includes(role)) {
+        res.status(403).json({ success: false, code: 'DELIVERY_PARTNER_REQUIRED', error: 'A delivery partner account is required for background tracking.' });
+        return;
+      }
+      if (!targetOnline || (statusUser.isOnline !== true && statusRider.isOnline !== true)) {
+        res.status(409).json({ success: false, code: 'RIDER_OFFLINE', error: 'Background location cannot change an offline rider back to online.' });
+        return;
+      }
+      const rawLat = req.body?.lat ?? req.body?.latitude;
+      const rawLng = req.body?.lng ?? req.body?.longitude;
+      const lat = Number(rawLat);
+      const lng = Number(rawLng);
+      if (rawLat === undefined || rawLng === undefined || !Number.isFinite(lat) || !Number.isFinite(lng)
+        || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        res.status(400).json({ success: false, code: 'INVALID_LOCATION', error: 'Valid latitude and longitude are required.' });
+        return;
+      }
+      const locationUpdate = {
+        lat, lng, latitude: lat, longitude: lng,
+        accuracy: Number.isFinite(Number(req.body?.accuracy)) ? Number(req.body.accuracy) : null,
+        lastLocationUpdate: new Date().toISOString(),
+        lastBackgroundLocationUpdate: new Date().toISOString()
+      };
+      await Promise.all([
+        userRef.set(locationUpdate, { merge: true }),
+        riderRef.set(locationUpdate, { merge: true })
+      ]);
+      res.json({ success: true, backgroundLocationUpdated: true, isOnline: true });
+      return;
+    }
+
+    if (targetOnline && ['delivery_partner', 'delivery', 'rider'].includes(role)) {
+      const scheduleSnap = await adminDb.collection('rider_work_schedules').doc(uid).get();
+      if (scheduleSnap.exists) {
+        const schedule = scheduleSnap.data() as any;
+        if (schedule?.enabled && !RiderWorkScheduleService.isCurrentlyScheduled({ uid, ...schedule })) {
+          res.status(403).json({
+            success: false,
+            code: 'OUTSIDE_WORK_SCHEDULE',
+            error: 'Your saved work time is not active. Use Continue Work or wait for your next scheduled start.'
+          });
+          return;
+        }
+      }
+    }
 
     // If going Online, GPS fix is strictly mandatory
     if (targetOnline) {
