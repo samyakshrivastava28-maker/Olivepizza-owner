@@ -224,13 +224,44 @@ export class RiderWorkScheduleService {
     for (const scheduleDoc of docs) {
       const uid = scheduleDoc.id;
       const schedule = { uid, ...scheduleDoc.data() } as RiderWorkSchedule & Record<string, any>;
+      const [userSnap, riderSnap] = await Promise.all([
+        adminDb.collection(USERS).doc(uid).get().catch(() => null),
+        adminDb.collection(RIDERS).doc(uid).get().catch(() => null)
+      ]);
+      const user = userSnap?.exists ? userSnap.data() : {};
+      const rider = riderSnap?.exists ? riderSnap.data() : {};
+      const role = String(user?.role || rider?.role || '').toLowerCase();
+      const accountStatus = String(user?.status || rider?.status || '').toLowerCase();
+      const isAuthorizedRider = ['delivery_partner', 'delivery', 'rider'].includes(role)
+        && user?.isActive !== false && rider?.isActive !== false
+        && !['disabled', 'deactivated', 'rejected', 'revoked', 'deleted', 'suspended'].includes(accountStatus);
       const clock = localClock(now, normalizeTimezone(schedule.timezone));
       const continued = Boolean(schedule.continueUntil && Date.parse(schedule.continueUntil) > now.getTime());
       const insideWindow = Boolean(schedule.enabled && schedule.slots?.some((slot) =>
         isSlotActive(slot, clock.day, clock.minute)
       ));
-      const shouldBeOnline = Boolean(schedule.enabled && (insideWindow || continued));
+      const shouldBeOnline = Boolean(isAuthorizedRider && schedule.enabled && (insideWindow || continued));
       const wasOnline = schedule.lastAppliedOnline;
+
+      // Owner revocation/deactivation overrides a saved schedule immediately. Preserve the account role/status.
+      if (!isAuthorizedRider) {
+        await Promise.all([
+          adminDb.collection(USERS).doc(uid).set({
+            isOnline: false, onlineStatus: 'offline', availabilityStatus: 'offline',
+            shiftState: 'OFF_SHIFT', shiftTransitionReason: 'account_not_authorized',
+            shiftTransitionAt: now.toISOString()
+          }, { merge: true }).catch(() => {}),
+          adminDb.collection(RIDERS).doc(uid).set({
+            isOnline: false, onlineStatus: 'offline', availabilityStatus: 'offline',
+            shiftState: 'OFF_SHIFT', shiftTransitionReason: 'account_not_authorized',
+            shiftTransitionAt: now.toISOString()
+          }, { merge: true }).catch(() => {}),
+          adminDb.collection(SCHEDULES).doc(uid).set({
+            lastAppliedOnline: false, continueUntil: null
+          }, { merge: true }).catch(() => {})
+        ]);
+        continue;
+      }
 
       if (wasOnline === shouldBeOnline) continue;
       if (wasOnline == null && !shouldBeOnline) {
@@ -270,7 +301,6 @@ export class RiderWorkScheduleService {
       isOnline,
       onlineStatus: isOnline ? 'online' : 'offline',
       availabilityStatus: isOnline ? 'available' : 'offline',
-      status: isOnline ? 'APPROVED' : 'OFFLINE',
       shiftState: isOnline ? 'WORKING' : 'OFF_SHIFT',
       shiftTransitionReason: reason,
       shiftTransitionAt: now,
