@@ -98,8 +98,8 @@ export class RiderWorkScheduleService {
       if (slot.startTime === slot.endTime) {
         throw new Error(`Slot ${index + 1}: start and end times cannot be identical.`);
       }
-      const days = Array.isArray(slot.daysOfWeek)
-        ? [...new Set(slot.daysOfWeek.map(Number))]
+      const days: number[] = Array.isArray(slot.daysOfWeek)
+        ? Array.from(new Set<number>((slot.daysOfWeek as unknown[]).map((day: unknown) => Number(day))))
         : [];
       if (!days.length || days.some((day) => !Number.isInteger(day) || day < 0 || day > 6)) {
         throw new Error(`Slot ${index + 1}: choose at least one valid weekday.`);
