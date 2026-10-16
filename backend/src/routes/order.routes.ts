@@ -1838,7 +1838,7 @@ router.post('/:id/assign-rider', verifyToken, async (req: AuthRequest, res: Resp
         body: `Order #${id.slice(-6)} has been assigned to you.`,
       },
       data: { orderId: id, type: 'rider_assignment' }
-    }, { category: 'alarm_actionable', priority: 'critical', orderId: id });
+    }, { category: 'alarm_actionable', priority: 'critical', orderId: id, targetApp: 'delivery' });
 
     res.json({ success: true, orderId: id, status: 'partner_assigned', rider: { id: riderId, name: rData.name } });
   } catch (err: any) {
