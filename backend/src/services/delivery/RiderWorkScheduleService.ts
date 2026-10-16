@@ -299,7 +299,7 @@ export class RiderWorkScheduleService {
     const payload: any = {
       notification: { title, body },
       data: {
-        title, body, type, stage: type, category: 'delivery_schedule',
+        title, body, type, stage: type, category: 'delivery',
         role: 'delivery', appName: 'delivery', sound, channelId,
         eventId: `${type}:${uid}:${localDate}:${schedule.lastTransitionAt || Date.now()}`,
         riderUid: uid,
