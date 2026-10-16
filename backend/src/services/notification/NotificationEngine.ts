@@ -142,7 +142,7 @@ export class NotificationEngine {
       return { successCount: 0, failureCount: 0, tokensFound: 0, errors: [] };
     }
 
-    const isTargetedOperationalAlert = options.category === 'alarm_actionable'
+    const isTargetedOperationalAlert = (options.category === 'alarm_actionable' || payload.data?.category === 'alarm_actionable')
       && ['restaurant', 'delivery'].includes(String(options.targetApp || '').toLowerCase());
 
     // Native operational alerts carry the UID they were sent to. Use one recipient per
@@ -358,7 +358,7 @@ export class NotificationEngine {
         // builds the one-shot custom-sound notification and order action buttons itself. If we
         // also attach an FCM notification block, Android may display it without invoking that
         // native handler while the app is backgrounded or killed.
-        const isNativeManagedStaffAlarm = isUrgentStaffApp && options.category === 'alarm_actionable';
+        const isNativeManagedStaffAlarm = isUrgentStaffApp && (options.category === 'alarm_actionable' || payload.data?.category === 'alarm_actionable');
 
         if (isDataOnlyCategory && androidConfig && (!isUrgentStaffApp || isNativeManagedStaffAlarm)) {
           delete androidConfig.notification;
