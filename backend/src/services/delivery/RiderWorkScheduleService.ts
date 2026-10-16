@@ -395,7 +395,8 @@ export class RiderWorkScheduleService {
         payload: { aps: {
           alert: { title, body },
           sound: IOS_SOUND_FILES[sound] || (started ? 'new_order.wav' : 'order_delivered.wav'),
-          category: type
+          category: type,
+          contentAvailable: true
         } }
       },
       webpush: { notification: { title, body, tag: `work-shift-${uid}-${localDate}`, renotify: true } }
