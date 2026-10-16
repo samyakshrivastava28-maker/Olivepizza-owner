@@ -14,8 +14,8 @@ export interface RiderWorkSchedule {
   enabled: boolean;
   timezone: string;
   slots: RiderWorkSlot[];
-  startSound: 'order_alert' | 'system_alert' | 'delivery_chime';
-  endSound: 'order_delivered' | 'system_alert' | 'delivery_chime';
+  startSound: 'new_order' | 'order_alert';
+  endSound: 'order_delivered' | 'order_confirmed';
   continueUntil?: string | null;
   lastAppliedOnline?: boolean | null;
   updatedAt?: string;
@@ -136,6 +136,16 @@ export class RiderWorkScheduleService {
       continueUntil: null,
       updatedAt: new Date().toISOString()
     };
+  }
+
+  static isCurrentlyScheduled(schedule: RiderWorkSchedule, now: Date = new Date()): boolean {
+    if (!schedule.enabled) return false;
+    const clock = localClock(now, normalizeTimezone(schedule.timezone));
+    const continued = Boolean(schedule.continueUntil && Date.parse(schedule.continueUntil) > now.getTime());
+    const insideWindow = Array.isArray(schedule.slots) && schedule.slots.some((slot) =>
+      isSlotActive(slot, clock.day, clock.minute)
+    );
+    return insideWindow || continued;
   }
 
   static async getSchedule(uid: string): Promise<RiderWorkSchedule> {
