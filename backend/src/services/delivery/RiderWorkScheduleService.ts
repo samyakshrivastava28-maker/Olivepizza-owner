@@ -221,7 +221,7 @@ export class RiderWorkScheduleService {
 
     await adminDb.collection(SCHEDULES).doc(uid).set({
       continueUntil: until,
-      suppressNextStartAlert: true,
+      suppressNextStartAlert: false,
       updatedAt: new Date().toISOString()
     }, { merge: true });
     await this.applyOnlineState(uid, true, 'rider_extended_shift');
@@ -353,9 +353,17 @@ export class RiderWorkScheduleService {
   }
 
   private static async sendShiftNotification(uid: string, schedule: RiderWorkSchedule & Record<string, any>, started: boolean, localDate: string): Promise<void> {
-    const userSnap = await adminDb.collection(USERS).doc(uid).get();
+    const [userSnap, riderSnap] = await Promise.all([
+      adminDb.collection(USERS).doc(uid).get(),
+      adminDb.collection(RIDERS).doc(uid).get().catch(() => null)
+    ]);
     const user = userSnap.exists ? userSnap.data() : {};
-    if (!userSnap.exists || String(user?.role || '').toLowerCase() !== 'delivery_partner' || user?.isActive === false) {
+    const rider = riderSnap?.exists ? riderSnap.data() : {};
+    const role = String(user?.role || rider?.role || '').toLowerCase();
+    const accountState = String(user?.accountStatus || user?.status || rider?.accountStatus || rider?.status || '').toLowerCase();
+    if (!userSnap.exists || !['delivery_partner', 'delivery', 'rider'].includes(role)
+      || user?.isActive === false || rider?.isActive === false
+      || ['disabled', 'deactivated', 'rejected', 'revoked', 'deleted', 'suspended', 'blocked'].includes(accountState)) {
       console.warn('[RiderWorkScheduleService] Skipping shift notification for inactive/non-rider UID:', uid);
       return;
     }
@@ -373,8 +381,8 @@ export class RiderWorkScheduleService {
         role: 'delivery', appName: 'delivery', sound, channelId,
         eventId: `${type}:${uid}:${localDate}:${schedule.lastTransitionAt || Date.now()}`,
         riderUid: uid,
-        branchId: String(user?.branchId || ''),
-        franchiseId: String(user?.franchiseId || ''),
+        branchId: String(user?.branchId || rider?.branchId || ''),
+        franchiseId: String(user?.franchiseId || rider?.franchiseId || ''),
         url: started ? '/settings' : '/settings?continueWork=1',
         alert: 'single'
       },
