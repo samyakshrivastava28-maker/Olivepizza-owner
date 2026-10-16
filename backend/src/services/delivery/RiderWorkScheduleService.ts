@@ -203,6 +203,22 @@ export class RiderWorkScheduleService {
     const until = new Date(Date.now() + minutes * 60 * 1000).toISOString();
     const schedule = await this.getSchedule(uid);
     if (!schedule.enabled) throw new Error('Save and enable at least one work-time slot before extending work.');
+
+    // Re-check account authorization at the point of mutation; a disabled rider must never be
+    // brought online by an old notification action or a concurrent shift-end request.
+    const [userSnap, riderSnap] = await Promise.all([
+      adminDb.collection(USERS).doc(uid).get(),
+      adminDb.collection(RIDERS).doc(uid).get().catch(() => null)
+    ]);
+    const user = userSnap.exists ? userSnap.data() : {};
+    const rider = riderSnap?.exists ? riderSnap.data() : {};
+    const role = String(user?.role || rider?.role || '').toLowerCase();
+    const state = String(user?.accountStatus || user?.status || rider?.accountStatus || rider?.status || '').toLowerCase();
+    const active = userSnap.exists && user?.isActive !== false && rider?.isActive !== false
+      && ['delivery_partner', 'delivery', 'rider'].includes(role)
+      && !['disabled', 'deactivated', 'rejected', 'revoked', 'deleted', 'suspended', 'blocked'].includes(state);
+    if (!active) throw new Error('This delivery account is no longer authorized to continue work.');
+
     await adminDb.collection(SCHEDULES).doc(uid).set({
       continueUntil: until,
       suppressNextStartAlert: true,
@@ -281,7 +297,15 @@ export class RiderWorkScheduleService {
 
       if (wasOnline === shouldBeOnline) continue;
       if (wasOnline == null && !shouldBeOnline) {
-        await adminDb.collection(SCHEDULES).doc(uid).set({ lastAppliedOnline: false }, { merge: true }).catch(() => {});
+        // When a rider enables a recurring schedule while they were manually online,
+        // apply the schedule immediately even on its first scheduler reconciliation.
+        if (schedule.enabled && isAuthorizedRider) {
+          await this.applyOnlineState(uid, false, 'outside_work_schedule');
+        }
+        await adminDb.collection(SCHEDULES).doc(uid).set({
+          lastAppliedOnline: false,
+          ...(schedule.enabled ? { lastTransitionAt: now.toISOString(), lastTransitionLocalDate: clock.dateKey } : {})
+        }, { merge: true }).catch(() => {});
         continue;
       }
 
