@@ -450,7 +450,7 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
               totalAmount: Number(orderData.totalAmount || 0),
               paymentMethod: orderData.paymentMethod || 'COD',
             });
-            await notificationEngine.send(partnerId, assignPayload, { category: 'alarm_actionable', priority: 'critical', orderId });
+            await notificationEngine.send(partnerId, assignPayload, { category: 'alarm_actionable', priority: 'critical', orderId, targetApp: 'delivery' });
             
             // Also update customer tracker
             if (customerFirebaseUid) {
