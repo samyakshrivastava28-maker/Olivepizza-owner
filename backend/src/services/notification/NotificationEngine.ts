@@ -323,6 +323,11 @@ export class NotificationEngine {
           delete androidConfig.notification;
         }
 
+        const isShiftTransition = sanitizedData.type === 'WORK_SHIFT_STARTED' || sanitizedData.type === 'WORK_SHIFT_ENDED';
+        // Android must receive these as high-priority data-only pushes so the native app can
+        // create a single-sound alert with Continue Work / Done actions. APNs keeps its alert block.
+        if (isShiftTransition && androidConfig) delete androidConfig.notification;
+
         const message: admin.messaging.MulticastMessage = {
           tokens: chunk,
           data: sanitizedData,
@@ -332,7 +337,7 @@ export class NotificationEngine {
         };
 
         // Attach top-level notification for urgent staff apps, simple_informational, or whenever payload.notification exists
-        if ((!isDataOnlyCategory || isUrgentStaffApp) && (payload.notification || sanitizedData.title)) {
+        if (!isShiftTransition && (!isDataOnlyCategory || isUrgentStaffApp) && (payload.notification || sanitizedData.title)) {
           message.notification = payload.notification || {
             title: sanitizedData.title || 'Olive Pizza Alert',
             body: sanitizedData.body || 'Immediate action required'
