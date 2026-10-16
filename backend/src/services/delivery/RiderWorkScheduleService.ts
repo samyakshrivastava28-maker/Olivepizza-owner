@@ -27,6 +27,12 @@ const RIDERS = 'delivery_partners';
 const WEEK_MINUTES = 7 * 24 * 60;
 const SAFE_START_SOUNDS = new Set(['new_order', 'order_alert']);
 const SAFE_END_SOUNDS = new Set(['order_delivered', 'order_confirmed']);
+const IOS_SOUND_FILES: Record<string, string> = {
+  new_order: 'new_order.wav',
+  order_alert: 'order_alert.mp3',
+  order_delivered: 'order_delivered.wav',
+  order_confirmed: 'order_confirmed.mp3'
+};
 
 function isValidTime(value: unknown): value is string {
   return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
@@ -356,7 +362,7 @@ export class RiderWorkScheduleService {
         headers: { 'apns-priority': '10' },
         payload: { aps: {
           alert: { title, body },
-          sound: started ? 'new_order.wav' : 'order_delivered.wav',
+          sound: IOS_SOUND_FILES[sound] || (started ? 'new_order.wav' : 'order_delivered.wav'),
           category: type
         } }
       },
