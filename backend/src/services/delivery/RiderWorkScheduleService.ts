@@ -322,13 +322,13 @@ export class RiderWorkScheduleService {
 
       if (shouldBeOnline) {
         if (!schedule.suppressNextStartAlert) {
-          await this.sendShiftNotification(uid, schedule, true, clock.dateKey).catch((e) =>
+          await this.sendShiftNotification(uid, schedule, true, clock.dateKey, clock.minute).catch((e) =>
             console.warn('[RiderWorkScheduleService] Shift-start notification failed:', e?.message || e)
           );
         }
         await adminDb.collection(SCHEDULES).doc(uid).set({ suppressNextStartAlert: false }, { merge: true }).catch(() => {});
       } else {
-        await this.sendShiftNotification(uid, schedule, false, clock.dateKey).catch((e) =>
+        await this.sendShiftNotification(uid, schedule, false, clock.dateKey, clock.minute).catch((e) =>
           console.warn('[RiderWorkScheduleService] Shift-end notification failed:', e?.message || e)
         );
       }
@@ -352,7 +352,7 @@ export class RiderWorkScheduleService {
     ]);
   }
 
-  private static async sendShiftNotification(uid: string, schedule: RiderWorkSchedule & Record<string, any>, started: boolean, localDate: string): Promise<void> {
+  private static async sendShiftNotification(uid: string, schedule: RiderWorkSchedule & Record<string, any>, started: boolean, localDate: string, localMinute: number): Promise<void> {
     const [userSnap, riderSnap] = await Promise.all([
       adminDb.collection(USERS).doc(uid).get(),
       adminDb.collection(RIDERS).doc(uid).get().catch(() => null)
@@ -379,7 +379,7 @@ export class RiderWorkScheduleService {
       data: {
         title, body, type, stage: type, category: 'delivery',
         role: 'delivery', appName: 'delivery', sound, channelId,
-        eventId: `${type}:${uid}:${localDate}:${schedule.lastTransitionAt || Date.now()}`,
+        eventId: `${type}:${uid}:${localDate}:${String(Math.floor(localMinute / 60)).padStart(2, '0')}:${String(localMinute % 60).padStart(2, '0')}`,
         riderUid: uid,
         branchId: String(user?.branchId || rider?.branchId || ''),
         franchiseId: String(user?.franchiseId || rider?.franchiseId || ''),
