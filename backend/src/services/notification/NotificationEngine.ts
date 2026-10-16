@@ -12,17 +12,20 @@
  *         ↓
  *   Recipient Resolver (Postgres fcm_tokens → Firestore fallback)
  *         ↓
- *   Payload Builder (always hybrid: notification + data blocks)
+ *   Payload Builder (hybrid notification/data for ordinary pushes; data-only
+ *   Android messages for authenticated actionable staff alarms)
  *         ↓
  *   Firebase Admin sendEachForMulticast()
  *         ↓
  *   NotificationLogger + token deactivation + Postgres inbox
  *
- * Root cause fix for killed-app notification failure:
- *   ALL payloads now include a top-level `notification: { title, body }` block.
- *   This guarantees FCM system-tray auto-display even when the app process is
- *   dead. OliveMessagingService.onMessageReceived() still enhances delivery
- *   when the process is alive (alarm sound, action buttons, AlarmActivity).
+ * Background delivery policy:
+ *   Ordinary notifications use the OS tray block for reliable display when the
+ *   app is closed. Actionable restaurant/delivery alarms are sent data-only on
+ *   Android so their native messaging service can validate the recipient UID,
+ *   play the bundled sound once, and construct the correct native order UI.
+ *   APNs retains its native alert/sound payload because iOS does not support
+ *   custom app overlays over other applications.
  */
 
 import * as admin from 'firebase-admin';
