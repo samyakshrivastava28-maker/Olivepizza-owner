@@ -91,9 +91,9 @@ export class StoreBoundDeliveryFleetService {
     const riders: FleetRider[] = [];
 
     for (const [uid, data] of combinedCandidates.entries()) {
-      const riderBranchId = data.branchId || 'main_branch';
+      const riderBranchId = (data.branchId || '').trim();
       
-      if (riderBranchId !== branchId) {
+      if (!riderBranchId || riderBranchId !== branchId) {
         continue;
       }
 
@@ -158,20 +158,24 @@ export class StoreBoundDeliveryFleetService {
    */
   public static async assignOrderToFifoRider(
     orderId: string,
-    branchId: string = 'main_branch'
+    branchId?: string
   ): Promise<{ success: boolean; rider?: FleetRider; reason?: string }> {
+    if (!branchId || !branchId.trim()) {
+      return { success: false, reason: 'Branch ID is required for delivery fleet assignment' };
+    }
+    const cleanBranchId = branchId.trim();
     const orderRef = adminDb.collection('orders').doc(orderId);
 
-    const fifoQueue = await this.getStoreFifoQueue(branchId);
+    const fifoQueue = await this.getStoreFifoQueue(cleanBranchId);
     if (fifoQueue.length === 0) {
       if (!orderId.startsWith('test_') && process.env.NODE_ENV !== 'test') {
         await orderRef.set({
           riderAssignmentStatus: 'pending_rider_available',
-          riderAssignmentNote: `No available riders in FIFO queue for branch ${branchId}`,
+          riderAssignmentNote: `No available riders in FIFO queue for branch ${cleanBranchId}`,
           updatedAt: new Date(),
         }, { merge: true }).catch(() => {});
       }
-      return { success: false, reason: `No riders currently available in store FIFO queue (${branchId})` };
+      return { success: false, reason: `No riders currently available in store FIFO queue (${cleanBranchId})` };
     }
 
     let assignedRider: FleetRider | null = null;

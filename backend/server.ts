@@ -20,6 +20,7 @@ import { AIHeartbeatJob } from './src/jobs/AIHeartbeatJob.ts';
 import { AiHealthMonitorService } from './src/services/AiHealthMonitorService.ts';
 import { SheetsSyncWorker } from './src/services/reports/SheetsSyncWorker.ts';
 import { startGrpcServer } from './src/grpc/grpcServer.ts';
+import { OrderFulfillmentWorker } from './src/services/delivery/OrderFulfillmentWorker.ts';
 
 dotenv.config();
 
@@ -128,6 +129,7 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
     }
 
     FirestoreListener.init();
+    OrderFulfillmentWorker.start();
 
     // Archival safeguard & reconciliation worker (runs every 3 minutes)
     setInterval(() => {

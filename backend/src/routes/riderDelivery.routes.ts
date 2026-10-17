@@ -745,47 +745,23 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           }
         }
 
-        // Proximity Check: Resolve coordinates (payload vs PostgreSQL delivery_locations)
-        const destLat = orderData.deliveryAddress?.lat || orderData.deliveryAddressCoordinates?.lat || orderData.location?.lat;
-        const destLng = orderData.deliveryAddress?.lng || orderData.deliveryAddressCoordinates?.lng || orderData.location?.lng;
+        // Mandatory 50-metre Delivery Location Gate
+        const { GeofenceVerificationService } = await import('../services/delivery/GeofenceVerificationService.js');
+        const geofenceResult = await GeofenceVerificationService.verifyRiderProximity(
+          orderId,
+          uid,
+          orderData,
+          { lat: riderLat, lng: riderLng }
+        );
 
-        let effectiveRiderLat = riderLat;
-        let effectiveRiderLng = riderLng;
-
-        if ((effectiveRiderLat == null || effectiveRiderLng == null) && destLat && destLng) {
-          try {
-            const loc = await SupabaseGpsService.getLatestLocation(uid);
-            if (loc) {
-              effectiveRiderLat = loc.latitude;
-              effectiveRiderLng = loc.longitude;
-            }
-          } catch (gpsErr: any) {
-            console.warn('[RiderDelivery] Could not read Supabase rider location:', gpsErr.message);
-          }
-        }
-
-        if (destLat && destLng && effectiveRiderLat != null && effectiveRiderLng != null) {
-          const distanceMeters = calculateDistanceMeters(
-            Number(effectiveRiderLat),
-            Number(effectiveRiderLng),
-            Number(destLat),
-            Number(destLng)
-          );
-
-          const defaultRadius = process.env.NODE_ENV === 'production' ? 200 : 50000;
-          const requiredMeters = process.env.DELIVERY_COMPLETION_RADIUS_METERS
-            ? Number(process.env.DELIVERY_COMPLETION_RADIUS_METERS)
-            : defaultRadius;
-
-          if (distanceMeters > requiredMeters && !isMasterAccount) {
-            res.status(400).json({
-              success: false,
-              error: `You are too far from the customer delivery address (${Math.round(distanceMeters)}m away). Must be within ${requiredMeters} meters to complete.`,
-              distanceMeters: Math.round(distanceMeters),
-              requiredMeters
-            });
-            return;
-          }
+        if (!geofenceResult.allowed && !isMasterAccount) {
+          res.status(400).json({
+            success: false,
+            error: `50-metre delivery gate violated: ${geofenceResult.reason || 'You are outside the 50m customer delivery radius.'}`,
+            distanceMeters: geofenceResult.distanceMeters,
+            requiredMeters: geofenceResult.requiredMeters
+          });
+          return;
         }
 
         const updates: any = {
@@ -793,19 +769,27 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           deliveredAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           lastActionIdempotencyKey: idempotencyKey,
+          clientCoordinates: {
+            lat: geofenceResult.riderLat || riderLat,
+            lng: geofenceResult.riderLng || riderLng,
+          },
           proofOfDelivery: {
             proofImageUrl: proofImageUrl || null,
             signatureUrl: signatureUrl || null,
             notes: notes || 'Delivered via notification action',
-            completedLat: effectiveRiderLat || null,
-            completedLng: effectiveRiderLng || null,
+            completedLat: geofenceResult.riderLat || riderLat || null,
+            completedLng: geofenceResult.riderLng || riderLng || null,
             completedAt: new Date().toISOString()
           }
         };
 
         const delResult = await OrderStateMachine.transition(orderId, 'delivered', { uid, role: 'delivery_partner', name }, updates);
         if (!delResult.success) {
-          await orderRef.set(updates, { merge: true });
+          res.status(400).json({
+            success: false,
+            error: delResult.error || 'Failed to complete delivery transition',
+          });
+          return;
         }
 
         try {

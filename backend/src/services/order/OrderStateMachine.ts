@@ -345,6 +345,14 @@ export class OrderStateMachine {
         case 'partner_assigned': {
           updates.partnerAssignedAt = nowIso;
           updates.riderAssignedAt = nowIso;
+          // Recalculate delivery ETA upon rider assignment
+          import('../delivery/DeliveryEtaService.js').then(({ DeliveryEtaService }) => {
+            DeliveryEtaService.calculateDeliveryEta({
+              orderId,
+              orderData: { ...orderData, ...updates },
+              riderUid: metadata.deliveryPartnerId || orderData.deliveryPartnerId,
+            }).catch(() => {});
+          }).catch(() => {});
           break;
         }
 
@@ -365,16 +373,51 @@ export class OrderStateMachine {
 
         case 'picked_up': {
           updates.pickedUpAt = nowIso;
+          import('../delivery/DeliveryEtaService.js').then(({ DeliveryEtaService }) => {
+            DeliveryEtaService.calculateDeliveryEta({
+              orderId,
+              orderData: { ...orderData, ...updates },
+            }).catch(() => {});
+          }).catch(() => {});
           break;
         }
 
         case 'out_for_delivery': {
           updates.outForDeliveryAt = nowIso;
+          import('../delivery/DeliveryEtaService.js').then(({ DeliveryEtaService }) => {
+            DeliveryEtaService.calculateDeliveryEta({
+              orderId,
+              orderData: { ...orderData, ...updates },
+            }).catch(() => {});
+          }).catch(() => {});
           break;
         }
 
         case 'delivered': {
-          // Delivery Completion Gate: Enforce that COD orders must have verified payment collection before transition succeeds
+          // 1. Mandatory 50-metre Delivery Location Gate
+          const fulfillment = (orderData.fulfillmentType || orderData.deliveryType || 'delivery').toLowerCase();
+          if (fulfillment === 'delivery' && normalizedActorRole === 'delivery_partner') {
+            const { GeofenceVerificationService } = await import('../delivery/GeofenceVerificationService.js');
+            const geofenceResult = await GeofenceVerificationService.verifyRiderProximity(
+              orderId,
+              actor.uid,
+              orderData,
+              metadata.clientCoordinates
+            );
+            if (!geofenceResult.allowed) {
+              if (client) await client.query('ROLLBACK').catch(() => {});
+              return {
+                success: false,
+                orderId,
+                previousStatus: fromState,
+                currentStatus: fromState,
+                version: orderData.notification_version || 1,
+                error: `50-metre delivery gate violated: ${geofenceResult.reason || 'Rider is outside the 50m customer delivery radius.'}`,
+              };
+            }
+          }
+
+          // 2. COD Payment Collection Gate: Enforce that COD orders must have verified payment collection before transition succeeds
           const paymentMethod = (orderData.paymentMethod || '').toLowerCase();
           const isCod = paymentMethod === 'cod' || orderData.isCod === true;
           if (isCod) {
