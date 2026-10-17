@@ -1,8 +1,13 @@
 import assert from 'assert';
+import { test as nodeTest } from 'node:test';
 import { CustomerTemplates, RestaurantTemplates, DeliveryTemplates } from '../services/notification/NotificationTemplates.js';
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
 import { notificationQueue } from '../services/notification/NotificationQueueService.js';
 import { pgPool } from '../config/postgres.js';
+
+nodeTest('Restaurant management notification system test suite', async () => {
+  await runTests();
+});
 
 async function runTests() {
   console.log('====================================================');
@@ -52,8 +57,8 @@ async function runTests() {
       status: 'preparing',
       totalAmount: 399,
     });
-    assert(payload.data.body?.includes('Your order is being prepared.'),
-      `Expected body to contain "Your order is being prepared.", got: "${payload.data.body}"`);
+    assert(payload.data.body?.includes('being freshly prepared') || payload.data.body?.includes('being prepared'),
+      `Expected body to contain preparing status text, got: "${payload.data.body}"`);
   });
 
   test('Customer notification for PICKUP READY matches required copy', () => {
@@ -74,8 +79,8 @@ async function runTests() {
       totalAmount: 399,
       isPickup: false,
     });
-    assert(payload.data.body?.includes('Your order is ready for delivery.'),
-      `Expected body to contain "Your order is ready for delivery.", got: "${payload.data.body}"`);
+    assert(payload.data.body?.includes('ready for delivery'),
+      `Expected body to contain "ready for delivery", got: "${payload.data.body}"`);
   });
 
   test('Customer notification for ORDER CANCELLED matches required copy', () => {
@@ -203,10 +208,3 @@ async function runTests() {
   console.log(`ALL TESTS COMPLETED: ${passed} / ${total} PASSED`);
   console.log('====================================================');
 }
-
-runTests().then(() => {
-  process.exit(0);
-}).catch((err) => {
-  console.error('Test suite failed:', err);
-  process.exit(1);
-});

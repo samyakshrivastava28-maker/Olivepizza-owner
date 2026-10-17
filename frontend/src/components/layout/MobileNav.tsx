@@ -17,7 +17,7 @@ export const MobileNav: React.FC<MobileNavProps> = ({ onOpenDrawer }) => {
   );
 
   const items = isMasterOwner ? [
-    { label: 'Analytics', path: '/analytics', icon: BarChart3 },
+    { label: 'Command', path: '/home', icon: BarChart3 },
     { label: 'Orders', path: '/orders', icon: Clock },
     { label: 'Restaurant', path: '/restaurant', icon: Store },
     { label: 'Menu', path: '/products', icon: Pizza },

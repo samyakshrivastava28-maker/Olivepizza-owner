@@ -5,8 +5,10 @@ import { DailySheetsSyncJob } from '../jobs/DailySheetsSyncJob.js';
 import { AbandonedCartJob } from '../jobs/AbandonedCartJob.js';
 import { MonthlyReportJob } from '../jobs/MonthlyReportJob.js';
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
+import { RiderWorkScheduleService } from '../services/delivery/RiderWorkScheduleService.js';
 
 export function initScheduler() {
+  RiderWorkScheduleService.init();
   // Initialize 10-minute unaccepted order auto-cancellation worker
   OrderTimeoutWorker.init();
 

@@ -160,20 +160,30 @@ export class FirebasePhoneVerificationProvider implements PhoneVerificationProvi
    * Syncs verified phone identity to Firestore collections
    */
   public async syncVerifiedPhone(uid: string, phone: string): Promise<void> {
+    if (!uid || uid.startsWith('anon_') || uid.startsWith('test_') || process.env.NODE_ENV === 'test') {
+      return;
+    }
     try {
       const now = Date.now();
-      await adminDb.collection('users').doc(uid).set({
-        phone,
-        phoneVerified: true,
-        verificationMethod: 'firebase',
-        verifiedAt: now,
-        phoneSetupCompleted: true
-      }, { merge: true });
+      const syncPromise = Promise.all([
+        adminDb.collection('users').doc(uid).set({
+          phone,
+          phoneVerified: true,
+          verificationMethod: 'firebase',
+          verifiedAt: now,
+          phoneSetupCompleted: true
+        }, { merge: true }),
+        adminDb.collection('customer_identities').doc(phone).set({
+          primaryUid: uid,
+          verifiedAt: now
+        }, { merge: true })
+      ]);
 
-      await adminDb.collection('customer_identities').doc(phone).set({
-        primaryUid: uid,
-        verifiedAt: now
-      }, { merge: true });
+      // Protect against hanging Firestore network calls (timeout after 3s)
+      await Promise.race([
+        syncPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore sync timeout')), 3000))
+      ]);
     } catch (e: any) {
       console.warn('[FirebasePhoneProvider] Firestore sync notice:', e.message);
     }

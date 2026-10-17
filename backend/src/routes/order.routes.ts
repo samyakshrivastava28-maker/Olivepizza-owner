@@ -1587,6 +1587,123 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
   }
 });
 
+// Restaurant Manager / Staff Confirm or Adjust Prep Time (Bounded 5 - 90 min)
+router.post('/:id/confirm-prep-time', verifyToken, async (req: AuthRequest, res: Response) => {
+  const requestId = `req_prep_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  try {
+    const { id } = req.params;
+    const userRole = (req.user?.role || '').toLowerCase();
+    const emailLower = (req.user?.email || '').toLowerCase();
+    const uid = req.user?.uid;
+    const appTarget = ((req.headers['x-app-target'] || req.headers['x-app-source'] || '') as string).toUpperCase();
+
+    // Owner Portal Read-Only Enforcement
+    if (appTarget === 'OWNER') {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden: Owner portal has read-only operational authority. Kitchen prep duration adjustment must be executed by restaurant managers.',
+        requestId
+      });
+    }
+
+    const isMasterAccount = emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com';
+    let effectiveRole = userRole;
+    if (userRole === 'owner' || userRole === 'admin' || isMasterAccount) {
+      effectiveRole = 'restaurant_manager';
+    } else if (userRole === 'manager' || userRole === 'kitchen_manager' || userRole === 'chef') {
+      effectiveRole = 'restaurant_manager';
+    }
+
+    const isAuthorizedStaff = ['restaurant_manager', 'cashier'].includes(effectiveRole);
+    if (!isAuthorizedStaff || !uid) {
+      return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
+    }
+
+    const rawMinutes = Number(req.body?.prepMinutes ?? req.body?.estimatedPreparationMinutes);
+    if (isNaN(rawMinutes) || rawMinutes <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid preparation minutes. Must be a numeric value between 5 and 90.',
+        requestId
+      });
+    }
+
+    // Bounded between 5 and 90 minutes
+    const prepMinutes = Math.min(90, Math.max(5, Math.round(rawMinutes)));
+
+    const orderRef = adminDb.collection('orders').doc(id);
+    const orderDoc = await orderRef.get();
+    if (!orderDoc.exists) {
+      return res.status(404).json({ success: false, error: `Order #${id} not found`, requestId });
+    }
+
+    const orderData = orderDoc.data()!;
+    const currentStatus = orderData.status;
+    if (!['pending', 'pending_acceptance', 'accepted', 'preparing'].includes(currentStatus)) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot adjust preparation duration for order #${orderData.orderNumber || id} in state '${currentStatus}'.`,
+        requestId
+      });
+    }
+
+    // Derive authoritative deadline from preparingAt / acceptedAt
+    const startTimeStr = orderData.preparingAt || orderData.acceptedAt || new Date().toISOString();
+    const startTimeMs = new Date(startTimeStr).getTime();
+    const newExpectedReadyAt = new Date(startTimeMs + prepMinutes * 60 * 1000).toISOString();
+
+    const updates: Record<string, any> = {
+      estimatedPreparationMinutes: prepMinutes,
+      expectedReadyAt: newExpectedReadyAt,
+      estimatedReadyAt: newExpectedReadyAt,
+      updatedAt: new Date()
+    };
+
+    await orderRef.update(updates);
+
+    // Sync to PostgreSQL canonical_orders
+    try {
+      await query(
+        `UPDATE canonical_orders 
+         SET estimated_preparation_minutes = $1, expected_ready_at = $2, updated_at = NOW() 
+         WHERE order_id = $3 OR firestore_id = $3`,
+        [prepMinutes, newExpectedReadyAt, id]
+      );
+    } catch (e: any) {
+      console.warn('[Orders] PostgreSQL sync notice on prep adjustment:', e.message);
+    }
+
+    // Recalculate server-authoritative Delivery ETA dynamically
+    let deliveryEta = null;
+    let deliveryEtaMinutes = null;
+    try {
+      const { DeliveryEtaService } = await import('../services/delivery/DeliveryEtaService.js');
+      const etaResult = await DeliveryEtaService.calculateDeliveryEta({
+        orderId: id,
+        orderData: { ...orderData, ...updates }
+      });
+      deliveryEta = etaResult?.deliveryEta || null;
+      deliveryEtaMinutes = etaResult?.estimatedRemainingMinutes || null;
+    } catch (e: any) {
+      console.warn('[Orders] Delivery ETA calculation notice:', e.message);
+    }
+
+    res.json({
+      success: true,
+      orderId: id,
+      estimatedPreparationMinutes: prepMinutes,
+      expectedReadyAt: newExpectedReadyAt,
+      deliveryEta,
+      deliveryEtaMinutes,
+      message: `Preparation time updated to ${prepMinutes} minutes. Expected ready at ${newExpectedReadyAt}.`,
+      requestId
+    });
+  } catch (error: any) {
+    console.error('[Orders] Confirm prep-time failed:', error);
+    res.status(500).json({ success: false, error: error.message || 'Failed to update preparation time', requestId });
+  }
+});
+
 // Restaurant Manager / Staff Reject Order Action (From App or Notification Action)
 router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) => {
   const requestId = `req_rej_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -1838,7 +1955,7 @@ router.post('/:id/assign-rider', verifyToken, async (req: AuthRequest, res: Resp
         body: `Order #${id.slice(-6)} has been assigned to you.`,
       },
       data: { orderId: id, type: 'rider_assignment' }
-    }, { category: 'alarm_actionable', priority: 'critical', orderId: id });
+    }, { category: 'alarm_actionable', priority: 'critical', orderId: id, targetApp: 'delivery' });
 
     res.json({ success: true, orderId: id, status: 'partner_assigned', rider: { id: riderId, name: rData.name } });
   } catch (err: any) {

@@ -154,9 +154,11 @@ async function runLifecycleTests() {
 
 if (process.argv[1] && process.argv[1].includes('firestore_first_lifecycle')) {
   runLifecycleTests()
-    .then(() => process.exit(0))
+    .then(() => {
+      console.log('✅ firestore_first_lifecycle tests completed.');
+    })
     .catch((err) => {
       console.error('❌ Test failed with error:', err);
-      process.exit(1);
+      throw err;
     });
 }

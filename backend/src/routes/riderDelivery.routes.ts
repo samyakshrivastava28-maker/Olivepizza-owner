@@ -12,6 +12,7 @@ import { notificationEngine } from '../services/notification/NotificationEngine.
 import { RiderDispatchEngine } from '../services/delivery/RiderDispatchEngine.js';
 import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
+import { RiderWorkScheduleService } from '../services/delivery/RiderWorkScheduleService.js';
 
 const router = Router();
 
@@ -744,47 +745,23 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           }
         }
 
-        // Proximity Check: Resolve coordinates (payload vs PostgreSQL delivery_locations)
-        const destLat = orderData.deliveryAddress?.lat || orderData.deliveryAddressCoordinates?.lat || orderData.location?.lat;
-        const destLng = orderData.deliveryAddress?.lng || orderData.deliveryAddressCoordinates?.lng || orderData.location?.lng;
+        // Mandatory 50-metre Delivery Location Gate
+        const { GeofenceVerificationService } = await import('../services/delivery/GeofenceVerificationService.js');
+        const geofenceResult = await GeofenceVerificationService.verifyRiderProximity(
+          orderId,
+          uid,
+          orderData,
+          { lat: riderLat, lng: riderLng }
+        );
 
-        let effectiveRiderLat = riderLat;
-        let effectiveRiderLng = riderLng;
-
-        if ((effectiveRiderLat == null || effectiveRiderLng == null) && destLat && destLng) {
-          try {
-            const loc = await SupabaseGpsService.getLatestLocation(uid);
-            if (loc) {
-              effectiveRiderLat = loc.latitude;
-              effectiveRiderLng = loc.longitude;
-            }
-          } catch (gpsErr: any) {
-            console.warn('[RiderDelivery] Could not read Supabase rider location:', gpsErr.message);
-          }
-        }
-
-        if (destLat && destLng && effectiveRiderLat != null && effectiveRiderLng != null) {
-          const distanceMeters = calculateDistanceMeters(
-            Number(effectiveRiderLat),
-            Number(effectiveRiderLng),
-            Number(destLat),
-            Number(destLng)
-          );
-
-          const defaultRadius = process.env.NODE_ENV === 'production' ? 200 : 50000;
-          const requiredMeters = process.env.DELIVERY_COMPLETION_RADIUS_METERS
-            ? Number(process.env.DELIVERY_COMPLETION_RADIUS_METERS)
-            : defaultRadius;
-
-          if (distanceMeters > requiredMeters && !isMasterAccount) {
-            res.status(400).json({
-              success: false,
-              error: `You are too far from the customer delivery address (${Math.round(distanceMeters)}m away). Must be within ${requiredMeters} meters to complete.`,
-              distanceMeters: Math.round(distanceMeters),
-              requiredMeters
-            });
-            return;
-          }
+        if (!geofenceResult.allowed && !isMasterAccount) {
+          res.status(400).json({
+            success: false,
+            error: `50-metre delivery gate violated: ${geofenceResult.reason || 'You are outside the 50m customer delivery radius.'}`,
+            distanceMeters: geofenceResult.distanceMeters,
+            requiredMeters: geofenceResult.requiredMeters
+          });
+          return;
         }
 
         const updates: any = {
@@ -792,19 +769,27 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           deliveredAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
           lastActionIdempotencyKey: idempotencyKey,
+          clientCoordinates: {
+            lat: geofenceResult.riderLat || riderLat,
+            lng: geofenceResult.riderLng || riderLng,
+          },
           proofOfDelivery: {
             proofImageUrl: proofImageUrl || null,
             signatureUrl: signatureUrl || null,
             notes: notes || 'Delivered via notification action',
-            completedLat: effectiveRiderLat || null,
-            completedLng: effectiveRiderLng || null,
+            completedLat: geofenceResult.riderLat || riderLat || null,
+            completedLng: geofenceResult.riderLng || riderLng || null,
             completedAt: new Date().toISOString()
           }
         };
 
         const delResult = await OrderStateMachine.transition(orderId, 'delivered', { uid, role: 'delivery_partner', name }, updates);
         if (!delResult.success) {
-          await orderRef.set(updates, { merge: true });
+          res.status(400).json({
+            success: false,
+            error: delResult.error || 'Failed to complete delivery transition',
+          });
+          return;
         }
 
         try {
@@ -940,6 +925,72 @@ router.post('/status', async (req: AuthRequest, res: Response): Promise<void> =>
     }
 
     const targetOnline = Boolean(isOnline);
+    const userRef = adminDb.collection('users').doc(uid);
+    const riderRef = adminDb.collection('delivery_partners').doc(uid);
+    const [statusUserSnap, statusRiderSnap] = await Promise.all([
+      userRef.get(),
+      riderRef.get().catch(() => null)
+    ]);
+    const statusUser = statusUserSnap.exists ? statusUserSnap.data() || {} : {};
+    const statusRider = statusRiderSnap?.exists ? statusRiderSnap.data() || {} : {};
+    const role = String(statusUser.role || statusRider.role || req.user?.role || '').toLowerCase();
+    const accountState = String(statusUser.accountStatus || statusUser.status || statusRider.accountStatus || statusRider.status || '').toLowerCase();
+    const isActive = statusUser.isActive !== false && statusRider.isActive !== false
+      && !['disabled', 'deactivated', 'rejected', 'revoked', 'deleted', 'suspended', 'blocked'].includes(accountState);
+
+    if (!isActive || (!statusUserSnap.exists && !statusRiderSnap?.exists)) {
+      res.status(403).json({ success: false, code: 'RIDER_ACCOUNT_INACTIVE', error: 'This delivery account is not active. Ask the owner to review your access.' });
+      return;
+    }
+
+    // Native background tracking is a location heartbeat only. It can never re-enable a rider
+    // after the scheduler has set them offline or after an owner disables the account.
+    if (req.body?.backgroundService === true) {
+      if (!['delivery_partner', 'delivery', 'rider'].includes(role)) {
+        res.status(403).json({ success: false, code: 'DELIVERY_PARTNER_REQUIRED', error: 'A delivery partner account is required for background tracking.' });
+        return;
+      }
+      if (!targetOnline || (statusUser.isOnline !== true && statusRider.isOnline !== true)) {
+        res.status(409).json({ success: false, code: 'RIDER_OFFLINE', error: 'Background location cannot change an offline rider back to online.' });
+        return;
+      }
+      const rawLat = req.body?.lat ?? req.body?.latitude;
+      const rawLng = req.body?.lng ?? req.body?.longitude;
+      const lat = Number(rawLat);
+      const lng = Number(rawLng);
+      if (rawLat === undefined || rawLng === undefined || !Number.isFinite(lat) || !Number.isFinite(lng)
+        || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        res.status(400).json({ success: false, code: 'INVALID_LOCATION', error: 'Valid latitude and longitude are required.' });
+        return;
+      }
+      const locationUpdate = {
+        lat, lng, latitude: lat, longitude: lng,
+        accuracy: Number.isFinite(Number(req.body?.accuracy)) ? Number(req.body.accuracy) : null,
+        lastLocationUpdate: new Date().toISOString(),
+        lastBackgroundLocationUpdate: new Date().toISOString()
+      };
+      await Promise.all([
+        userRef.set(locationUpdate, { merge: true }),
+        riderRef.set(locationUpdate, { merge: true })
+      ]);
+      res.json({ success: true, backgroundLocationUpdated: true, isOnline: true });
+      return;
+    }
+
+    if (targetOnline && ['delivery_partner', 'delivery', 'rider'].includes(role)) {
+      const scheduleSnap = await adminDb.collection('rider_work_schedules').doc(uid).get();
+      if (scheduleSnap.exists) {
+        const schedule = scheduleSnap.data() as any;
+        if (schedule?.enabled && !RiderWorkScheduleService.isCurrentlyScheduled({ uid, ...schedule })) {
+          res.status(403).json({
+            success: false,
+            code: 'OUTSIDE_WORK_SCHEDULE',
+            error: 'Your saved work time is not active. Use Continue Work or wait for your next scheduled start.'
+          });
+          return;
+        }
+      }
+    }
 
     // If going Online, GPS fix is strictly mandatory
     if (targetOnline) {

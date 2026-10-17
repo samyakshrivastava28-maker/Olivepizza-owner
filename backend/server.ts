@@ -20,6 +20,7 @@ import { AIHeartbeatJob } from './src/jobs/AIHeartbeatJob.ts';
 import { AiHealthMonitorService } from './src/services/AiHealthMonitorService.ts';
 import { SheetsSyncWorker } from './src/services/reports/SheetsSyncWorker.ts';
 import { startGrpcServer } from './src/grpc/grpcServer.ts';
+import { OrderFulfillmentWorker } from './src/services/delivery/OrderFulfillmentWorker.ts';
 
 dotenv.config();
 
@@ -99,6 +100,51 @@ app.get('/keep-alive', (req, res) => {
   });
 });
 
+import { executeGraphQL } from './src/graphql/index.ts';
+import { adminAuth } from './src/config/firebase.ts';
+import { AUTHORIZED_INTERNAL_EMAILS } from './src/security/SecurityContext.ts';
+
+// GraphQL Endpoint mounting
+app.use(['/graphql', '/api/graphql'], express.json(), async (req, res) => {
+  const authHeader = req.headers.authorization;
+  let user: any = null;
+  let isOwner = false;
+
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split('Bearer ')[1].trim();
+    try {
+      const decoded = await adminAuth.verifyIdToken(token);
+      if (decoded) {
+        const email = (decoded.email || '').toLowerCase().trim();
+        isOwner = AUTHORIZED_INTERNAL_EMAILS.includes(email) || decoded.role === 'owner' || decoded.role === 'platform_owner' || decoded.role === 'admin' || decoded.role === 'developer';
+        user = {
+          uid: decoded.uid,
+          email,
+          role: decoded.role || 'customer',
+          franchiseId: decoded.franchiseId || null,
+          branchId: decoded.branchId || null
+        };
+      }
+    } catch {
+      // Unauthenticated / public query attempt
+    }
+  }
+
+  const { query: gqlQuery, variables } = req.body || {};
+  if (!gqlQuery) {
+    res.status(400).json({ errors: [{ message: 'GraphQL query is required in request body.' }] });
+    return;
+  }
+
+  try {
+    const result = await executeGraphQL(gqlQuery, variables, { user, isOwner });
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ errors: [{ message: err.message || 'Internal GraphQL execution error' }] });
+  }
+});
+console.log('[GraphQL] Unified GraphQL API mounted on /graphql and /api/graphql');
+
 app.use('/api', apiApp);
 app.use(apiApp);
 
@@ -128,6 +174,7 @@ const server = app.listen(Number(PORT), '0.0.0.0', () => {
     }
 
     FirestoreListener.init();
+    OrderFulfillmentWorker.start();
 
     // Archival safeguard & reconciliation worker (runs every 3 minutes)
     setInterval(() => {

@@ -9,9 +9,7 @@ import { sanitizeEmailHtml } from '../utils/htmlSanitizer.ts';
 import { verifyReportCapabilityToken } from '../routes/report.routes.ts';
 
 describe('POST-COMMIT SECURITY & REMEDIATION ADVERSARIAL SUITE', () => {
-  after(() => {
-    setTimeout(() => process.exit(0), 100);
-  });
+
 
   describe('1. Timing-Safe Buffer Comparison Invariants', () => {
     it('Safely rejects mismatched length buffers without throwing RangeError', () => {

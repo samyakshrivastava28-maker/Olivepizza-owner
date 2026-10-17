@@ -8,6 +8,7 @@ export interface PosAccountData {
   name: string;
   email: string;
   franchiseId: string;
+  branchId?: string;
   status: PosAccountStatus;
   createdAt: string;
   approvedAt?: string;
@@ -45,12 +46,13 @@ export class PosAccountService {
    */
   public static async createPosAccount(params: {
     franchiseId: string;
+    branchId?: string;
     name: string;
     email: string;
     password?: string;
     createdBy: string;
   }): Promise<{ success: boolean; message: string; posAccount?: PosAccountData }> {
-    const { franchiseId, name, email, password, createdBy } = params;
+    const { franchiseId, branchId, name, email, password, createdBy } = params;
 
     if (!franchiseId || !email || !name) {
       return { success: false, message: 'Franchise ID, terminal name, and email are required.' };
@@ -89,10 +91,11 @@ export class PosAccountService {
         uid = newUser.uid;
       }
 
-      // Set custom claims: role 'pos_operator', franchiseId, approved false
+      // Set custom claims: role 'pos_operator', franchiseId, branchId, approved false
       await adminAuth.setCustomUserClaims(uid, {
         role: 'pos_operator',
         franchiseId,
+        branchId: branchId || franchiseId,
         posApproved: false,
       });
     } catch (err: any) {
@@ -101,11 +104,13 @@ export class PosAccountService {
     }
 
     // 3. Store record in pos_accounts collection with status PENDING_OWNER_APPROVAL
+    const resolvedBranch = branchId || franchiseId;
     const posAccount: PosAccountData = {
       id: uid,
       name,
       email: cleanEmail,
       franchiseId,
+      branchId: resolvedBranch,
       status: 'PENDING_OWNER_APPROVAL',
       createdAt: new Date().toISOString(),
       pinConfigured: false,
@@ -124,6 +129,7 @@ export class PosAccountService {
       displayName: name,
       role: 'pos_operator',
       franchiseId,
+      branchId: resolvedBranch,
       status: 'PENDING_OWNER_APPROVAL',
       emailVerified: true, // Internal operational user created by manager
       createdAt: new Date().toISOString(),
@@ -162,10 +168,13 @@ export class PosAccountService {
     const data = snap.data()!;
     const franchiseId = data.franchiseId;
 
+    const resolvedBranchId = data.branchId || franchiseId;
+
     // Update status to APPROVED / ACTIVE
     const now = new Date().toISOString();
     await ref.update({
       status: 'APPROVED',
+      branchId: resolvedBranchId,
       approvedAt: now,
       approvedBy: ownerEmail,
       updatedAt: now,
@@ -174,6 +183,7 @@ export class PosAccountService {
     // Update users collection
     await adminDb.collection('users').doc(posId).set({
       status: 'ACTIVE',
+      branchId: resolvedBranchId,
       posApproved: true,
       approvedAt: now,
       approvedBy: ownerEmail,
@@ -197,6 +207,7 @@ export class PosAccountService {
       await adminAuth.setCustomUserClaims(posId, {
         role: 'pos_operator',
         franchiseId,
+        branchId: resolvedBranchId,
         posApproved: true,
       });
     } catch (err) {

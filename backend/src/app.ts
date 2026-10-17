@@ -414,6 +414,10 @@ import privacyRoutes from './routes/privacy.routes.js';
 app.use('/privacy', privacyRoutes);
 app.use('/api/privacy', privacyRoutes);
 
+import financeRoutes from './routes/finance.routes.js';
+app.use('/finance', financeRoutes);
+app.use('/api/finance', financeRoutes);
+
 app.use('/location', locationRoutes);
 app.use('/api/location', locationRoutes);
 
@@ -447,6 +451,9 @@ import restaurantRoutes from './routes/restaurant.routes.js';
 import restaurantManagerRoutes from './routes/restaurantManager.routes.js';
 import franchiseRoutes from './routes/franchise.routes.js';
 import riderDeliveryRoutes from './routes/riderDelivery.routes.js';
+import riderWorkScheduleRoutes from './routes/riderWorkSchedule.routes.js';
+app.use('/delivery/rider/schedule', riderWorkScheduleRoutes);
+app.use('/api/delivery/rider/schedule', riderWorkScheduleRoutes);
 app.use('/delivery/rider', riderDeliveryRoutes);
 app.use('/api/delivery/rider', riderDeliveryRoutes);
 app.use('/api/rider-delivery', riderDeliveryRoutes);

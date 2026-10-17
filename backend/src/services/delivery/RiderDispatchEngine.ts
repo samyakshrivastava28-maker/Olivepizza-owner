@@ -52,7 +52,11 @@ export class RiderDispatchEngine {
     }
 
     if (!orderData) return [];
-    const branchId = (orderData.branchId || 'main_branch').trim();
+    const branchId = (orderData.branchId || '').trim();
+    if (!branchId) {
+      console.warn(`[RiderDispatchEngine] Fail-closed: Order ${orderId} has empty branchId.`);
+      return [];
+    }
     const excludedUids = new Set<string>(orderData.declinedPartnerIds || []);
 
     // Get restaurant coordinates
@@ -85,18 +89,9 @@ export class RiderDispatchEngine {
       console.warn('[RiderDispatchEngine] Delivery partners read notice:', err.message);
     }
 
-    // Resilient Fallback: If ridersMap is empty due to Firestore read quota, inject authorized delivery partner
+    // Fail-Closed Invariant: Never inject fake or hardcoded riders. If ridersMap is empty, return zero candidates.
     if (ridersMap.size === 0) {
-      ridersMap.set('6tLLR6q7aTYqzTG2blRx3TU5sA42', {
-        uid: '6tLLR6q7aTYqzTG2blRx3TU5sA42',
-        name: 'Delivery Partner (Webhub)',
-        phone: '+919179944445',
-        email: 'webhub2811@gmail.com',
-        role: 'delivery_partner',
-        branchId: branchId || 'main_branch',
-        isOnline: true,
-        isActive: true
-      });
+      return [];
     }
 
     // 2. Query authoritative live locations from Supabase (Single Source of Truth)
@@ -109,20 +104,35 @@ export class RiderDispatchEngine {
 
     const candidates: EligibleRider[] = [];
     const nowMs = Date.now();
+    const now = new Date(nowMs);
 
     for (const [uid, rData] of ridersMap.entries()) {
       if (excludedUids.has(uid)) continue;
 
       const riderBranchId = (rData.branchId || '').trim();
       if (!riderBranchId) continue;
-      const riderFranchiseId = rData.franchiseId;
-      const orderFranchiseId = orderData.franchiseId;
+      const riderFranchiseId = (rData.franchiseId || '').trim();
+      const orderFranchiseId = (orderData.franchiseId || '').trim();
 
       // Strict branch & franchise isolation: never cross-assign riders
       if (riderBranchId !== branchId) continue;
       if (orderFranchiseId && riderFranchiseId && riderFranchiseId !== orderFranchiseId) continue;
-      if (rData.isOnline === false || rData.isActive === false) continue;
+
+      // City isolation check
+      const orderCity = (orderData.city || orderData.deliveryAddress?.city || '').toLowerCase().trim();
+      const riderCity = (rData.city || '').toLowerCase().trim();
+      if (orderCity && riderCity && orderCity !== riderCity) continue;
+
+      // Active and online check
+      if (rData.isOnline === false || rData.isActive === false || rData.isDisabled === true) continue;
       if (rData.activeOrderId && rData.activeOrderId !== orderId) continue; // single-assignment rule
+
+      // Work schedule verification: Rider must be working within active shift
+      if (rData.weeklySchedule && rData.weeklySchedule.enabled !== false) {
+        const { RiderWorkScheduleService } = await import('./RiderWorkScheduleService.js');
+        const isScheduled = RiderWorkScheduleService.isCurrentlyScheduled(rData.weeklySchedule, now);
+        if (!isScheduled) continue;
+      }
 
       const loc = locMap.get(uid);
       let latitude = restaurantLat;
@@ -132,7 +142,7 @@ export class RiderDispatchEngine {
 
       if (loc && loc.latitude && loc.longitude) {
         const locTime = loc.updated_at ? new Date(loc.updated_at).getTime() : nowMs;
-        const isFresh = (nowMs - locTime) <= (15 * 60 * 1000); // 15-minute freshness window
+        const isFresh = (nowMs - locTime) <= (5 * 60 * 1000); // 5-minute freshness window
 
         if (isFresh) {
           const lat = Number(loc.latitude);
@@ -143,6 +153,9 @@ export class RiderDispatchEngine {
             longitude = lng;
             distanceMeters = dist;
             score = Math.max(1000, 10000 - dist);
+          } else {
+            // Beyond service radius: not eligible
+            continue;
           }
         }
       }
@@ -193,7 +206,10 @@ export class RiderDispatchEngine {
     }
 
     if (!orderData) return { success: false, reason: 'Order not found' };
-    const branchId = (orderData.branchId || 'main_branch').trim();
+    const branchId = (orderData.branchId || '').trim();
+    if (!branchId) {
+      return { success: false, reason: 'Order lacks branchId. Fail closed.' };
+    }
 
     // 1. Primary: Server-authoritative store-bound FIFO queue (only attempt if quota is healthy)
     if (!isQuotaExhausted) {

@@ -339,15 +339,44 @@ export class FranchiseAccessService {
       };
     }
 
-    // 2. Fetch user profile
+    // 2. Normalize Phone Number and Fetch user profile
+    const rawPhone = (phoneNumber || '').trim();
+    const cleanPhone = rawPhone.replace(/[^0-9]/g, '');
+    const phoneWithPlus91 = cleanPhone.length === 10 ? `+91${cleanPhone}` : (cleanPhone.length === 12 && cleanPhone.startsWith('91') ? `+${cleanPhone}` : rawPhone);
+    const phone10Digit = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
+
     let userData: any = null;
     let userSnap = await adminDb.collection('users').doc(uid).get().catch(() => null);
     if (userSnap && userSnap.exists) {
       userData = userSnap.data();
-    } else if (emailLower) {
-      const q = await adminDb.collection('users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
-      if (!q.empty) {
-        userData = q.docs[0].data();
+    }
+
+    // If user document is missing or is just default 'customer', check if owner created a staff profile with this email or phone
+    const hasPrivilegedRole = userData && userData.role && userData.role !== 'customer';
+    if (!hasPrivilegedRole) {
+      // Try secondary lookup in users collection by email
+      if (emailLower) {
+        const qEmail = await adminDb.collection('users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+        if (!qEmail.empty && qEmail.docs[0].id !== uid) {
+          const matchedUser = qEmail.docs[0].data();
+          if (matchedUser.role && matchedUser.role !== 'customer') {
+            userData = { ...matchedUser, ...userData, role: matchedUser.role };
+          }
+        }
+      }
+      // Try secondary lookup in users collection by phone
+      if (!userData?.role || userData.role === 'customer') {
+        const phoneQueries = [phoneWithPlus91, phone10Digit].filter(Boolean);
+        for (const p of phoneQueries) {
+          const qPhone = await adminDb.collection('users').where('phoneNumber', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!qPhone.empty) {
+            const matchedUser = qPhone.docs[0].data();
+            if (matchedUser.role && matchedUser.role !== 'customer') {
+              userData = { ...matchedUser, ...userData, role: matchedUser.role };
+              break;
+            }
+          }
+        }
       }
     }
 
@@ -459,8 +488,9 @@ export class FranchiseAccessService {
     const resolvedBranchId = activeAccessEntry?.branchId || assignedFranchiseDoc?.mainBranchId || assignedFranchiseDoc?.id || userData?.branchId || requestedBranchId || 'main_branch';
 
     // 7. Verify franchise status: NOT DELETED OR SUSPENDED
-    const idsToCheck = Array.from(new Set([resolvedFranchiseId, resolvedBranchId].filter(Boolean)));
-    for (const checkId of idsToCheck) {
+    // Only verify real franchise IDs (starting with fra_ or matched as franchiseId), avoiding branch IDs like 'main_branch'
+    const franchiseCheckIds = Array.from(new Set([resolvedFranchiseId].filter(Boolean)));
+    for (const checkId of franchiseCheckIds) {
       const fCheckDoc = await adminDb.collection('franchises').doc(checkId).get().catch(() => null);
       const feCheckDoc = await adminDb.collection('franchise_entities').doc(checkId).get().catch(() => null);
       const fData = fCheckDoc?.exists ? fCheckDoc.data() : (feCheckDoc?.exists ? feCheckDoc.data() : null);
@@ -518,6 +548,21 @@ export class FranchiseAccessService {
         const rmSnap = await adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
         if (!rmSnap.empty) {
           rmData = rmSnap.docs[0].data();
+        }
+      }
+      if (!rmData && (phoneWithPlus91 || phone10Digit)) {
+        const phoneVariants = [phoneWithPlus91, phone10Digit].filter(Boolean);
+        for (const p of phoneVariants) {
+          const rmSnap = await adminDb.collection('restaurant_managers').where('phone', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!rmSnap.empty) {
+            rmData = rmSnap.docs[0].data();
+            break;
+          }
+          const rmSnap2 = await adminDb.collection('restaurant_managers').where('phoneNumber', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!rmSnap2.empty) {
+            rmData = rmSnap2.docs[0].data();
+            break;
+          }
         }
       }
 
@@ -621,6 +666,21 @@ export class FranchiseAccessService {
         const pSnap = await adminDb.collection('pos_accounts').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
         if (!pSnap.empty) {
           posData = pSnap.docs[0].data();
+        }
+      }
+      if (!posData && (phoneWithPlus91 || phone10Digit)) {
+        const phoneVariants = [phoneWithPlus91, phone10Digit].filter(Boolean);
+        for (const p of phoneVariants) {
+          const pSnap = await adminDb.collection('pos_accounts').where('phone', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!pSnap.empty) {
+            posData = pSnap.docs[0].data();
+            break;
+          }
+          const pSnap2 = await adminDb.collection('pos_accounts').where('phoneNumber', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!pSnap2.empty) {
+            posData = pSnap2.docs[0].data();
+            break;
+          }
         }
       }
 
@@ -805,6 +865,21 @@ export class FranchiseAccessService {
           dpData = dpSnap.docs[0].data();
         }
       }
+      if (!dpData && (phoneWithPlus91 || phone10Digit)) {
+        const phoneVariants = [phoneWithPlus91, phone10Digit].filter(Boolean);
+        for (const p of phoneVariants) {
+          const dpSnap = await adminDb.collection('delivery_partners').where('phone', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!dpSnap.empty) {
+            dpData = dpSnap.docs[0].data();
+            break;
+          }
+          const dpSnap2 = await adminDb.collection('delivery_partners').where('phoneNumber', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          if (!dpSnap2.empty) {
+            dpData = dpSnap2.docs[0].data();
+            break;
+          }
+        }
+      }
 
       if (dpData) {
         if (dpData.status === 'PENDING' || dpData.status === 'PENDING_OWNER_APPROVAL') {
@@ -813,7 +888,15 @@ export class FranchiseAccessService {
         if (dpData.isActive === false || dpData.status === 'suspended' || dpData.status === 'BLOCKED') {
           return { authorized: false, code: 'ACCOUNT_INACTIVE', reason: 'Your delivery rider account is inactive or suspended.' };
         }
-        if (dpData.status === 'approved' || dpData.status === 'APPROVED' || dpData.isActive === true) {
+        if (
+          dpData.status === 'approved' ||
+          dpData.status === 'APPROVED' ||
+          dpData.status === 'online' ||
+          dpData.status === 'active' ||
+          dpData.approvalStatus === 'approved' ||
+          dpData.approvalStatus === 'APPROVED' ||
+          dpData.isActive === true
+        ) {
           isApproved = true;
         }
       }

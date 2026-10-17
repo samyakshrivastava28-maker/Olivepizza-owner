@@ -3,6 +3,10 @@ import test from 'node:test';
 import { PrivacyService } from '../services/privacy/PrivacyService.js';
 
 test('DPDP Privacy & Data Governance Suite', async (t) => {
+  if (!process.env.FIRESTORE_EMULATOR_HOST && (process.env.NODE_ENV === 'production' || !process.env.RUN_LIVE_FIRESTORE_TESTS)) {
+    console.log('🔒 [Safety Guard] Privacy governance Firestore tests bypassed outside emulator/isolated test env (set FIRESTORE_EMULATOR_HOST or RUN_LIVE_FIRESTORE_TESTS=true to run).');
+    return;
+  }
   const testUid = `test_user_${Date.now()}`;
   let policyVersion = '1.0.0';
 

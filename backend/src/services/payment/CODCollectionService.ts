@@ -13,6 +13,7 @@ export interface CollectCashParams {
   clientAmount?: number;
   notes?: string;
   ipAddress?: string;
+  clientCoordinates?: { lat?: number; lng?: number; accuracy?: number };
 }
 
 export interface CreateUpiAttemptParams {
@@ -21,6 +22,7 @@ export interface CreateUpiAttemptParams {
   actorRole: string;
   actorName?: string;
   actorBranchId?: string;
+  clientCoordinates?: { lat?: number; lng?: number; accuracy?: number };
 }
 
 export class CODCollectionService {
@@ -105,17 +107,34 @@ export class CODCollectionService {
       );
     }
 
+    // 5.5 Mandatory 50-metre Delivery Location Gate
+    const fulfillment = (order.fulfillmentType || order.deliveryType || 'delivery').toLowerCase();
+    if (!isSuperRole && fulfillment === 'delivery') {
+      const { GeofenceVerificationService } = await import('../delivery/GeofenceVerificationService.js');
+      const geofenceResult = await GeofenceVerificationService.verifyRiderProximity(
+        orderId,
+        actorUid,
+        order,
+        params.clientCoordinates
+      );
+      if (!geofenceResult.allowed) {
+        throw new Error(`50-metre delivery gate violated: ${geofenceResult.reason || 'Rider is outside the 50m customer delivery radius.'}`);
+      }
+    }
+
     // 6. Server Authoritative Amount Due (Tamper-Proof)
     const amountDue = Number(order.totalAmount || 0);
     if (amountDue <= 0) {
       throw new Error(`Invalid order amount: ₹${amountDue}`);
     }
 
+    // Exact financial equality check using integer paise to eliminate floating-point imprecision
+    const authoritativePaise = Math.round(amountDue * 100);
     if (clientAmount !== undefined && clientAmount !== null) {
-      const clientNum = Number(clientAmount);
-      if (Math.abs(clientNum - amountDue) > 0.01) {
+      const clientPaise = Math.round(Number(clientAmount) * 100);
+      if (clientPaise !== authoritativePaise) {
         throw new Error(
-          `Amount tampering detected: Client provided ₹${clientNum} but authoritative order total is ₹${amountDue}.`
+          `Amount tampering detected: Client provided ₹${(clientPaise / 100).toFixed(2)} but authoritative order total is ₹${(authoritativePaise / 100).toFixed(2)}.`
         );
       }
     }
@@ -267,10 +286,34 @@ export class CODCollectionService {
       throw new Error(`Branch mismatch: Staff belongs to '${actorBranchId}' but order is '${order.branchId}'.`);
     }
 
+    // 5.5 Mandatory 50-metre Delivery Location Gate
+    const fulfillment = (order.fulfillmentType || order.deliveryType || 'delivery').toLowerCase();
+    if (!isSuperRole && fulfillment === 'delivery') {
+      const { GeofenceVerificationService } = await import('../delivery/GeofenceVerificationService.js');
+      const geofenceResult = await GeofenceVerificationService.verifyRiderProximity(
+        orderId,
+        actorUid,
+        order,
+        params.clientCoordinates
+      );
+      if (!geofenceResult.allowed) {
+        throw new Error(`50-metre delivery gate violated: ${geofenceResult.reason || 'Rider is outside the 50m customer delivery radius.'}`);
+      }
+    }
+
     // 6. Authoritative Server Amount Due
     const amountDue = Number(order.totalAmount || 0);
     if (amountDue <= 0) {
       throw new Error(`Invalid order amount: ₹${amountDue}`);
+    }
+
+    const config = getPaymentConfig();
+    const razorpayKeyId = process.env.RAZORPAY_KEY_ID || config.razorpayKeyId;
+    const isRazorpayConfigured = !!razorpayKeyId && razorpayKeyId.startsWith('rzp_');
+
+    // Fail closed if Razorpay is selected as active provider but unconfigured
+    if (config.activeProvider === 'razorpay' && !isRazorpayConfigured) {
+      throw new Error('Razorpay UPI payment gateway is not configured on this server. Please collect payment via Cash.');
     }
 
     // 7. Dynamic Attempt Generation
@@ -278,7 +321,6 @@ export class CODCollectionService {
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minute expiry
     const nowIso = new Date().toISOString();
 
-    const config = getPaymentConfig();
     const merchantVpa = config.merchantUpiId || 'olivepizza@upi';
     const businessName = config.businessName || 'Olive Pizza';
     const shortOrderNumber = order.dailyOrderNumber ? `#${order.dailyOrderNumber}` : orderId.slice(-6).toUpperCase();

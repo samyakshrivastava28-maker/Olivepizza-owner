@@ -450,7 +450,7 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
               totalAmount: Number(orderData.totalAmount || 0),
               paymentMethod: orderData.paymentMethod || 'COD',
             });
-            await notificationEngine.send(partnerId, assignPayload, { category: 'alarm_actionable', priority: 'critical', orderId });
+            await notificationEngine.send(partnerId, assignPayload, { category: 'alarm_actionable', priority: 'critical', orderId, targetApp: 'delivery' });
             
             // Also update customer tracker
             if (customerFirebaseUid) {
@@ -478,7 +478,7 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
             const branchStaff = await notificationEngine.resolveBranchStaff(branchId);
             if (branchStaff.length > 0) {
               const stopPayload = { data: { action: 'stop_alert', orderId } } as any;
-              await notificationEngine.sendBulk(branchStaff, stopPayload, { priority: 'high', orderId, tag: `order_restaurant_${orderId}` });
+              await notificationEngine.sendBulk(branchStaff, stopPayload, { category: 'alarm_actionable', priority: 'high', orderId, tag: `order_restaurant_${orderId}`, targetApp: 'restaurant' });
             }
             if (customerFirebaseUid) {
               const cPayload = CustomerTemplates.orderUpdate(orderId, {
@@ -507,7 +507,7 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
             const branchStaff = await notificationEngine.resolveBranchStaff(branchId);
             if (branchStaff.length > 0) {
               const stopPayload = { data: { action: 'stop_alert', orderId } } as any;
-              await notificationEngine.sendBulk(branchStaff, stopPayload, { priority: 'high', orderId, tag: `order_restaurant_${orderId}` });
+              await notificationEngine.sendBulk(branchStaff, stopPayload, { category: 'alarm_actionable', priority: 'high', orderId, tag: `order_restaurant_${orderId}`, targetApp: 'restaurant' });
             }
             if (customerFirebaseUid) {
               const cPayload = CustomerTemplates.orderUpdate(orderId, {
@@ -713,7 +713,7 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
           const branchStaff = await notificationEngine.resolveBranchStaff(branchId, franchiseId);
           if (branchStaff.length > 0) {
             const stopPayload = { data: { action: 'stop_alert', orderId } };
-            await notificationEngine.sendBulk(branchStaff, stopPayload as any, { priority: 'high', tag: `order_restaurant_stop_${orderId}`, orderId });
+            await notificationEngine.sendBulk(branchStaff, stopPayload as any, { category: 'alarm_actionable', priority: 'high', tag: `order_restaurant_stop_${orderId}`, orderId, targetApp: 'restaurant' });
           }
         }
       } catch (e: any) {
@@ -784,6 +784,31 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
         } catch (e: any) {
           console.warn(`[Action] emitStatusChange email trigger warning for ${orderId}:`, e.message);
         }
+      });
+    }
+
+    // Stop the assigned rider's looping assignment alarm whenever this order status is updated
+    // by restaurant/owner staff. The push is bound to the exact rider UID and DELIVERY app.
+    const assignedRiderUid = String(orderData?.deliveryPartnerId || orderData?.delivery_partner_id || '').trim();
+    if (firestoreWriteRequired && assignedRiderUid && action !== 'stop_alert') {
+      backgroundTasks.push(async () => {
+        const { notificationEngine } = await import('../services/notification/NotificationEngine.js');
+        await notificationEngine.send(assignedRiderUid, {
+          data: {
+            action: 'stop_alert',
+            orderId,
+            recipientUid: assignedRiderUid,
+            reason: 'order_status_updated',
+            resultingStatus: String(newStatus || action || '')
+          }
+        } as any, {
+          category: 'alarm_actionable',
+          priority: 'high',
+          orderId,
+          tag: `order_delivery_stop_${orderId}`,
+          targetApp: 'delivery',
+          eventId: `ORDER_ALERT_STOPPED:${orderId}:${String(newStatus || action || 'updated')}`
+        });
       });
     }
 

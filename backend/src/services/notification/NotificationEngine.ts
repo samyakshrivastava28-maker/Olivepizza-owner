@@ -12,17 +12,20 @@
  *         ↓
  *   Recipient Resolver (Postgres fcm_tokens → Firestore fallback)
  *         ↓
- *   Payload Builder (always hybrid: notification + data blocks)
+ *   Payload Builder (hybrid notification/data for ordinary pushes; data-only
+ *   Android messages for authenticated actionable staff alarms)
  *         ↓
  *   Firebase Admin sendEachForMulticast()
  *         ↓
  *   NotificationLogger + token deactivation + Postgres inbox
  *
- * Root cause fix for killed-app notification failure:
- *   ALL payloads now include a top-level `notification: { title, body }` block.
- *   This guarantees FCM system-tray auto-display even when the app process is
- *   dead. OliveMessagingService.onMessageReceived() still enhances delivery
- *   when the process is alive (alarm sound, action buttons, AlarmActivity).
+ * Background delivery policy:
+ *   Ordinary notifications use the OS tray block for reliable display when the
+ *   app is closed. Actionable restaurant/delivery alarms are sent data-only on
+ *   Android so their native messaging service can validate the recipient UID,
+ *   play the bundled sound once, and construct the correct native order UI.
+ *   APNs retains its native alert/sound payload because iOS does not support
+ *   custom app overlays over other applications.
  */
 
 import * as admin from 'firebase-admin';
@@ -140,6 +143,41 @@ export class NotificationEngine {
   ): Promise<SendResult> {
     if (!firebaseUserIds || firebaseUserIds.length === 0) {
       return { successCount: 0, failureCount: 0, tokensFound: 0, errors: [] };
+    }
+
+    const isTargetedOperationalAlert = (options.category === 'alarm_actionable' || payload.data?.category === 'alarm_actionable')
+      && ['restaurant', 'delivery'].includes(String(options.targetApp || '').toLowerCase());
+
+    // Native operational alerts carry the UID they were sent to. Use one recipient per
+    // Firebase message so the device can discard stale alerts after logout/account switching.
+    if (isTargetedOperationalAlert) {
+      const recipientUids = [...new Set(firebaseUserIds.filter((uid) => typeof uid === 'string' && uid.trim()))];
+      if (recipientUids.length > 1) {
+        const baseEventId = options.eventId || payload.data?.eventId;
+        const results = await Promise.all(recipientUids.map((uid) => {
+          const recipientEventId = baseEventId ? `${baseEventId}:${uid}` : undefined;
+          const recipientPayload: NotificationPayload = {
+            ...payload,
+            data: { ...(payload.data || {}), recipientUid: uid, ...(recipientEventId ? { eventId: recipientEventId } : {}) }
+          };
+          return this.sendBulk([uid], recipientPayload, {
+            ...options,
+            ...(recipientEventId ? { eventId: recipientEventId } : {})
+          });
+        }));
+        return results.reduce<SendResult>((total, result) => ({
+          successCount: total.successCount + result.successCount,
+          failureCount: total.failureCount + result.failureCount,
+          tokensFound: total.tokensFound + result.tokensFound,
+          errors: [...total.errors, ...result.errors]
+        }), { successCount: 0, failureCount: 0, tokensFound: 0, errors: [] });
+      }
+      if (recipientUids.length === 1) {
+        payload = {
+          ...payload,
+          data: { ...(payload.data || {}), recipientUid: recipientUids[0] }
+        };
+      }
     }
 
     // ── 0a. Server-Side Idempotency Guard ────────────────────────────────────
@@ -318,10 +356,18 @@ export class NotificationEngine {
           || sanitizedData.type === 'DELIVERY_ASSIGNED'
           || sanitizedData.stage === 'delivery_assigned';
 
-        // Do not strip notification block for restaurant/delivery apps or when OS tray banner is required
-        if (isDataOnlyCategory && androidConfig && !isUrgentStaffApp) {
+        const isShiftTransition = sanitizedData.type === 'WORK_SHIFT_STARTED' || sanitizedData.type === 'WORK_SHIFT_ENDED';
+        // Actionable staff alarms are handled by the native Android messaging service, which
+        // builds the one-shot custom-sound notification and order action buttons itself. If we
+        // also attach an FCM notification block, Android may display it without invoking that
+        // native handler while the app is backgrounded or killed.
+        const isNativeManagedStaffAlarm = isUrgentStaffApp && (options.category === 'alarm_actionable' || payload.data?.category === 'alarm_actionable');
+
+        if (isDataOnlyCategory && androidConfig && (!isUrgentStaffApp || isNativeManagedStaffAlarm)) {
           delete androidConfig.notification;
         }
+        // Shift transitions are always native-managed on Android, including their action buttons.
+        if ((isShiftTransition || isNativeManagedStaffAlarm) && androidConfig) delete androidConfig.notification;
 
         const message: admin.messaging.MulticastMessage = {
           tokens: chunk,
@@ -331,8 +377,8 @@ export class NotificationEngine {
           webpush: payload.webpush,
         };
 
-        // Attach top-level notification for urgent staff apps, simple_informational, or whenever payload.notification exists
-        if ((!isDataOnlyCategory || isUrgentStaffApp) && (payload.notification || sanitizedData.title)) {
+        // Keep the visible APNs alert while Android receives data-only pushes for native operational UI.
+        if (!isShiftTransition && !isNativeManagedStaffAlarm && (!isDataOnlyCategory || isUrgentStaffApp) && (payload.notification || sanitizedData.title)) {
           message.notification = payload.notification || {
             title: sanitizedData.title || 'Olive Pizza Alert',
             body: sanitizedData.body || 'Immediate action required'

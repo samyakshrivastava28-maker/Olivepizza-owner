@@ -1,5 +1,10 @@
+import { test } from 'node:test';
 import { POSService } from '../services/pos/POSService.js';
 import { adminDb } from '../config/firebase.js';
+
+test('POS business intelligence and server-authoritative calculations', async () => {
+  await runPOSAnalyticsVerification();
+});
 
 async function runPOSAnalyticsVerification() {
   console.log('=== STARTING POS BUSINESS INTELLIGENCE VERIFICATION ===\n');
@@ -37,6 +42,11 @@ async function runPOSAnalyticsVerification() {
     console.log(`✅ Passed: Subtotal ₹${calc.subtotal}, 5% GST ₹${calc.taxes}, Final Total ₹${calc.finalTotal}`);
   } else {
     console.error('❌ Failed bill calculation:', calc);
+  }
+
+  if (!process.env.FIRESTORE_EMULATOR_HOST && (process.env.NODE_ENV === 'production' || !process.env.RUN_LIVE_FIRESTORE_TESTS)) {
+    console.log('🔒 [Safety Guard] POS live Firestore integration tests bypassed outside emulator/isolated test env (set FIRESTORE_EMULATOR_HOST or RUN_LIVE_FIRESTORE_TESTS=true to run).');
+    return;
   }
 
   console.log('\n[TEST 2] Testing Shift Opening & Drawer Reconciliation...');
@@ -114,10 +124,4 @@ async function runPOSAnalyticsVerification() {
 
   await adminDb.collection('pos_shifts').doc(testShift.id).delete().catch(() => {});
   console.log('\n=== ALL POS BUSINESS INTELLIGENCE VERIFICATION TESTS PASSED (7/7) ===');
-  process.exit(0);
 }
-
-runPOSAnalyticsVerification().catch((err) => {
-  console.error('Test Suite Failed:', err);
-  process.exit(1);
-});

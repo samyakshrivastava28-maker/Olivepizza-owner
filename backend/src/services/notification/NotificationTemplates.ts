@@ -1044,6 +1044,24 @@ export class CustomerTemplates {
   }
 
   /**
+   * Honest customer delay update notification
+   */
+  static orderDelay(orderId: string, orderNumber: string, delayMinutes: number = 10): NotificationPayload {
+    return buildPayload(
+      `Delivery Update • Order ${orderNumber}`,
+      `Your order is experiencing a slight delay of approximately ${delayMinutes} minutes due to kitchen workload or transit. We are preparing it fresh and hot!`,
+      {
+        orderId,
+        priority: 'high',
+        url: `/orders/${orderId}`,
+        sound: 'default',
+        tag: `order_${orderId}`,
+        channelId: ANDROID_CHANNELS.ORDER_TRACKING
+      }
+    );
+  }
+
+  /**
    * Live order tracker — ONE notification per order, updated in-place.
    * Uses `ongoing: true` for Android pinned notification and channel `olive_order_tracking`.
    */
