@@ -414,6 +414,10 @@ import privacyRoutes from './routes/privacy.routes.js';
 app.use('/privacy', privacyRoutes);
 app.use('/api/privacy', privacyRoutes);
 
+import financeRoutes from './routes/finance.routes.js';
+app.use('/finance', financeRoutes);
+app.use('/api/finance', financeRoutes);
+
 app.use('/location', locationRoutes);
 app.use('/api/location', locationRoutes);
 

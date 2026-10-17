@@ -145,7 +145,8 @@ export class PreparationTimeEngine {
    */
   public static calculateEstimatedPreparationMinutes(
     items: Array<{ category?: string; quantity?: number; isCombo?: boolean }>,
-    workloadPendingOrders: number = 0
+    workloadPendingOrders: number = 0,
+    options?: { isPeakHour?: boolean }
   ): number {
     if (!items || items.length === 0) return this.config.defaultBaseMinutes;
 
@@ -184,7 +185,9 @@ export class PreparationTimeEngine {
 
     const now = new Date();
     const currentHour = now.getHours();
-    const isPeakHour = (currentHour >= 19 && currentHour <= 22) || (currentHour >= 13 && currentHour <= 14);
+    const isPeakHour = options?.isPeakHour !== undefined 
+      ? options.isPeakHour 
+      : ((currentHour >= 19 && currentHour <= 22) || (currentHour >= 13 && currentHour <= 14));
     const peakBuffer = isPeakHour ? this.config.peakHourBufferMinutes : 0;
 
     const totalMinutes = maxBaseMinutes + additionalItemBuffer + comboBuffer + quantityBuffer + workloadBuffer + peakBuffer;

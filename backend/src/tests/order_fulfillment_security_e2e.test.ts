@@ -120,11 +120,11 @@ describe('Authoritative Order Fulfillment, Timing & Tenant Isolation Security Te
   // 9. Intelligent Preparation Time Engine: single item baseline
   it('9. PreparationTimeEngine computes correct category baseline duration', () => {
     const pizzaItem = [{ category: 'pizza', quantity: 1 }];
-    const prepMinutes = PreparationTimeEngine.calculateEstimatedPreparationMinutes(pizzaItem);
+    const prepMinutes = PreparationTimeEngine.calculateEstimatedPreparationMinutes(pizzaItem, 0, { isPeakHour: false });
     assert.strictEqual(prepMinutes, 12, 'Single pizza item base duration should be 12 minutes');
 
     const beverageItem = [{ category: 'beverages', quantity: 1 }];
-    const bevMinutes = PreparationTimeEngine.calculateEstimatedPreparationMinutes(beverageItem);
+    const bevMinutes = PreparationTimeEngine.calculateEstimatedPreparationMinutes(beverageItem, 0, { isPeakHour: false });
     assert.strictEqual(bevMinutes, 5, 'Beverage item duration is clamped to minimum 5 minutes');
   });
 
@@ -136,11 +136,11 @@ describe('Authoritative Order Fulfillment, Timing & Tenant Isolation Security Te
       { category: 'desserts', quantity: 1 }
     ];
     // Baseline: pizza (12) + (3 items - 1) * 2 = 12 + 4 = 16 min
-    const withoutWorkload = PreparationTimeEngine.calculateEstimatedPreparationMinutes(multiItems, 0);
+    const withoutWorkload = PreparationTimeEngine.calculateEstimatedPreparationMinutes(multiItems, 0, { isPeakHour: false });
     assert.strictEqual(withoutWorkload, 16);
 
     // With 6 pending orders in kitchen queue: floor(6/2)*2 = 6 min buffer
-    const withWorkload = PreparationTimeEngine.calculateEstimatedPreparationMinutes(multiItems, 6);
+    const withWorkload = PreparationTimeEngine.calculateEstimatedPreparationMinutes(multiItems, 6, { isPeakHour: false });
     assert.strictEqual(withWorkload, 22, 'Multi-item with active workload must include buffer');
   });
 
