@@ -231,7 +231,7 @@ export default function CommandCenter() {
       const res = await fetchApi('/graphql', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mutation, variables: { id } })
+        body: JSON.stringify({ query: mutation, variables: { id } })
       });
       const json = await res.json();
       if (json.errors) throw new Error(json.errors[0].message);

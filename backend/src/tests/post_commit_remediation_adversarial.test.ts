@@ -129,14 +129,29 @@ describe('POST-COMMIT SECURITY & REMEDIATION ADVERSARIAL SUITE', () => {
   });
 
   describe('6. CI/CD Workflow & Android Signing Fail-Closed Static Analysis', () => {
-    const repos = [
-      'c:/Users/RYZEN/Downloads/olive-pizza',
-      'c:/Users/RYZEN/Downloads/olive-pizza-owner',
-      'c:/Users/RYZEN/Downloads/Olive Pizza restaurant manager',
-      'c:/Users/RYZEN/Downloads/olive-pizza-delivery',
-      'c:/Users/RYZEN/Downloads/olive-pizza-pos',
-      'c:/Users/RYZEN/Downloads/olive-pizza-franchise'
+    // In olive-pizza-owner/backend, root repo is '..' and sibling repos are '../..'
+    const currentRepoRoot = fs.existsSync(path.resolve(process.cwd(), '.gitignore'))
+      ? path.resolve(process.cwd())
+      : path.resolve(process.cwd(), '..');
+    const siblingBaseDir = path.resolve(currentRepoRoot, '..');
+
+    const repoNames = [
+      'olive-pizza',
+      'olive-pizza-owner',
+      'Olive Pizza restaurant manager',
+      'olive-pizza-delivery',
+      'olive-pizza-pos',
+      'olive-pizza-franchise'
     ];
+    // Filter to repositories that actually exist in the local workspace or environment
+    const repos = repoNames
+      .map(name => path.join(siblingBaseDir, name))
+      .filter(repoPath => fs.existsSync(repoPath) && fs.existsSync(path.join(repoPath, 'android', 'app')));
+
+    // If running in isolated CI, test current repository if it has android/app
+    if (repos.length === 0 && fs.existsSync(path.join(currentRepoRoot, 'android', 'app'))) {
+      repos.push(currentRepoRoot);
+    }
 
     it('Verifies NO repository has tracked release.keystore in git or on disk in android/app', () => {
       for (const repo of repos) {

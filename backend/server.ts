@@ -1,4 +1,5 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -104,8 +105,17 @@ import { executeGraphQL } from './src/graphql/index.ts';
 import { adminAuth } from './src/config/firebase.ts';
 import { AUTHORIZED_INTERNAL_EMAILS } from './src/security/SecurityContext.ts';
 
-// GraphQL Endpoint mounting
-app.use(['/graphql', '/api/graphql'], express.json(), async (req, res) => {
+// GraphQL Rate Limiter (Max 120 queries per minute per IP)
+const graphqlRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  message: { errors: [{ message: 'Too many GraphQL requests. Please try again later.' }] },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// GraphQL Endpoint mounting with 100kb body limit, rate limiting and query validation
+app.use(['/graphql', '/api/graphql'], graphqlRateLimiter, express.json({ limit: '100kb' }), async (req, res) => {
   const authHeader = req.headers.authorization;
   let user: any = null;
   let isOwner = false;
@@ -131,8 +141,13 @@ app.use(['/graphql', '/api/graphql'], express.json(), async (req, res) => {
   }
 
   const { query: gqlQuery, variables } = req.body || {};
-  if (!gqlQuery) {
+  if (!gqlQuery || typeof gqlQuery !== 'string' || gqlQuery.trim().length === 0) {
     res.status(400).json({ errors: [{ message: 'GraphQL query is required in request body.' }] });
+    return;
+  }
+
+  if (gqlQuery.length > 10000) {
+    res.status(400).json({ errors: [{ message: 'GraphQL query exceeds maximum allowed query length.' }] });
     return;
   }
 
@@ -143,7 +158,7 @@ app.use(['/graphql', '/api/graphql'], express.json(), async (req, res) => {
     res.status(500).json({ errors: [{ message: err.message || 'Internal GraphQL execution error' }] });
   }
 });
-console.log('[GraphQL] Unified GraphQL API mounted on /graphql and /api/graphql');
+console.log('[GraphQL] Unified GraphQL API mounted on /graphql and /api/graphql with rate limiting');
 
 app.use('/api', apiApp);
 app.use(apiApp);

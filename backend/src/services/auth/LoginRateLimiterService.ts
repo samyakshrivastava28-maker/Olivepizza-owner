@@ -60,17 +60,6 @@ export class LoginRateLimiterService {
       };
     }
 
-    const cleanIdentifier = (identifier || '').toLowerCase().trim();
-    const isInternalAuthorized = cleanIdentifier === 'webhub2811@gmail.com' || cleanIdentifier === 'olivepizzarjn@gmail.com';
-    if (isInternalAuthorized) {
-      return {
-        allowed: true,
-        attempts: 0,
-        remainingAttempts: this.MAX_DEVICE_ATTEMPTS,
-        retryAfterSeconds: 0,
-        deviceId
-      };
-    }
 
     const now = Date.now();
     const devDocRef = adminDb.collection(this.COLLECTION).doc(`dev_${deviceId}`);
