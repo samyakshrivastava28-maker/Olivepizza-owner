@@ -109,11 +109,11 @@ async function runDeliveryActionTests() {
 
   console.log(`\nResults: ${passed}/${total} tests passed.`);
   if (passed !== total) {
-    process.exit(1);
+    throw new Error(`Failed tests: ${total - passed}`);
   }
 }
 
 runDeliveryActionTests().catch(err => {
   console.error('Fatal test error:', err);
-  process.exit(1);
+  throw err;
 });

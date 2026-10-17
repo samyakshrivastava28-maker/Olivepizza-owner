@@ -1,4 +1,4 @@
-﻿import assert from 'assert';
+import assert from 'assert';
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 
 async function runSecurityAuditTests() {
@@ -72,5 +72,5 @@ async function runSecurityAuditTests() {
 
 runSecurityAuditTests().catch((err) => {
   console.error('\n❌ Security audit test failed:', err);
-  process.exit(1);
+  throw err;
 });

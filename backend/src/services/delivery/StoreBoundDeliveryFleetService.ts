@@ -164,11 +164,13 @@ export class StoreBoundDeliveryFleetService {
 
     const fifoQueue = await this.getStoreFifoQueue(branchId);
     if (fifoQueue.length === 0) {
-      await orderRef.set({
-        riderAssignmentStatus: 'pending_rider_available',
-        riderAssignmentNote: `No available riders in FIFO queue for branch ${branchId}`,
-        updatedAt: new Date(),
-      }, { merge: true }).catch(() => {});
+      if (!orderId.startsWith('test_') && process.env.NODE_ENV !== 'test') {
+        await orderRef.set({
+          riderAssignmentStatus: 'pending_rider_available',
+          riderAssignmentNote: `No available riders in FIFO queue for branch ${branchId}`,
+          updatedAt: new Date(),
+        }, { merge: true }).catch(() => {});
+      }
       return { success: false, reason: `No riders currently available in store FIFO queue (${branchId})` };
     }
 

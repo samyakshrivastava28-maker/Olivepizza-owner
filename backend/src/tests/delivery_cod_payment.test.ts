@@ -98,7 +98,5 @@ describe('Delivery COD Collection & Dynamic UPI QR Security Suite', () => {
     );
   });
 
-  after(() => {
-    setTimeout(() => process.exit(0), 100);
-  });
 });
+

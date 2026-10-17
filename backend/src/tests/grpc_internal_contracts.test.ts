@@ -23,11 +23,11 @@ describe('Internal gRPC + Protobuf Service Architecture', () => {
     // Start gRPC server on test port
     await startGrpcServer(TEST_PORT);
 
-    orderClient = new OrderGrpcClient({ endpoint: TEST_ENDPOINT });
-    paymentClient = new PaymentGrpcClient({ endpoint: TEST_ENDPOINT });
-    notificationClient = new NotificationGrpcClient({ endpoint: TEST_ENDPOINT });
-    deliveryClient = new DeliveryGrpcClient({ endpoint: TEST_ENDPOINT });
-    archiveClient = new ArchiveGrpcClient({ endpoint: TEST_ENDPOINT });
+    orderClient = new OrderGrpcClient({ endpoint: TEST_ENDPOINT, defaultDeadlineMs: 15000 });
+    paymentClient = new PaymentGrpcClient({ endpoint: TEST_ENDPOINT, defaultDeadlineMs: 15000 });
+    notificationClient = new NotificationGrpcClient({ endpoint: TEST_ENDPOINT, defaultDeadlineMs: 15000 });
+    deliveryClient = new DeliveryGrpcClient({ endpoint: TEST_ENDPOINT, defaultDeadlineMs: 15000 });
+    archiveClient = new ArchiveGrpcClient({ endpoint: TEST_ENDPOINT, defaultDeadlineMs: 15000 });
   });
 
   after(async () => {

@@ -186,9 +186,11 @@ async function runIdempotencyAndPaymentSafetyTests() {
 
 if (process.argv[1] && process.argv[1].includes('order_archive_idempotency_and_payment_safety')) {
   runIdempotencyAndPaymentSafetyTests()
-    .then(() => process.exit(0))
+    .then(() => {
+      console.log('✅ order_archive_idempotency_and_payment_safety tests completed.');
+    })
     .catch((err) => {
       console.error('❌ Test failed with error:', err);
-      process.exit(1);
+      throw err;
     });
 }
