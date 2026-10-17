@@ -13,6 +13,7 @@
     "node": ">=20 <=25"
   },
   "dependencies": {
+    "@apollo/server": "^5.5.1",
     "@aws-sdk/client-s3": "^3.1104.0",
     "@aws-sdk/s3-request-presigner": "^3.1104.0",
     "@google-cloud/recaptcha-enterprise": "^6.4.2",
@@ -37,6 +38,7 @@
     "express-rate-limit": "^7.5.0",
     "firebase-admin": "^13.10.0",
     "googleapis": "^173.0.0",
+    "graphql": "^16.14.2",
     "helmet": "^8.0.0",
     "ioredis": "^6.0.0",
     "jspdf": "^4.2.1",

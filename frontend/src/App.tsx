@@ -27,6 +27,7 @@ function lazyWithRetry<T extends React.ComponentType<any>>(
 }
 
 // Canonical Modules
+const CommandCenter = lazyWithRetry(() => import('./pages/CommandCenter'));
 const Login = lazyWithRetry(() => import('./pages/Login'));
 const Analytics = lazyWithRetry(() => import('./pages/Analytics'));
 const OrderManagement = lazyWithRetry(() => import('./pages/OrderManagement'));
@@ -58,7 +59,7 @@ function WorkspaceRedirect() {
   );
 
   if (isMasterOwner) {
-    return <Navigate to="/analytics" replace />;
+    return <Navigate to="/home" replace />;
   }
 
   if (role === 'restaurant_manager' || user?.applicationAccess?.app_restaurant_management) {
@@ -123,6 +124,22 @@ export default function App() {
                   {/* 1. Analytics & Root Router */}
                   <Route index element={<WorkspaceRedirect />} />
                   <Route path="/dashboard" element={<WorkspaceRedirect />} />
+                  <Route
+                    path="/home"
+                    element={
+                      <RouteErrorBoundary>
+                        <CommandCenter />
+                      </RouteErrorBoundary>
+                    }
+                  />
+                  <Route
+                    path="/command-center"
+                    element={
+                      <RouteErrorBoundary>
+                        <CommandCenter />
+                      </RouteErrorBoundary>
+                    }
+                  />
                   <Route
                     path="/analytics"
                     element={

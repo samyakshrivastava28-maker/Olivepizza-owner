@@ -66,6 +66,7 @@ export const OwnerLayout: React.FC = () => {
 
   // Core Canonical Navigation Items including Restaurant Operations & Managers
   const allNavItems = [
+    { label: 'Command Center', path: '/home', icon: LayoutTemplate, show: isMasterOwner },
     { label: 'Analytics', path: '/analytics', icon: BarChart3, show: isMasterOwner },
     { label: 'Orders', path: '/orders', icon: Clock, show: true },
     { label: 'Restaurant Operations', path: '/restaurant', icon: Store, show: hasRestaurantAccess },
