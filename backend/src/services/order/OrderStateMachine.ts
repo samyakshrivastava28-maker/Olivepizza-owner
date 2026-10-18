@@ -113,6 +113,11 @@ export class OrderStateMachine {
     return 'pending';
   }
 
+  public static isValidTransition(from: CanonicalOrderStatus, to: CanonicalOrderStatus): boolean {
+    const allowed = ALLOWED_TRANSITIONS[from];
+    return Array.isArray(allowed) && allowed.includes(to);
+  }
+
   public static async transition(
     orderId: string,
     toStateInput: CanonicalOrderStatus,

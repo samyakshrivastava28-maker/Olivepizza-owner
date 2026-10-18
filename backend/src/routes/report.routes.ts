@@ -10,6 +10,7 @@ import { MonthlyPdfReportService } from '../services/reports/MonthlyPdfReportSer
 import { GoogleSheetsMonthlyReportService } from '../services/reports/GoogleSheetsMonthlyReportService.js';
 import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngine.js';
 import { pgPool, query } from '../config/postgres.js';
+import { redisService } from '../services/redis/RedisService.js';
 import crypto from 'crypto';
 
 const router = Router();
@@ -639,6 +640,142 @@ router.get('/config', requireReportCapabilityOrAdmin, async (_req: AuthRequest, 
     const config = await GoogleSheetsReportService.getLookerStudioConfig();
     res.json({ success: true, ...config });
   } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/reports/quota?branchId=...
+ * Returns hourly custom PDF generation quota for the requesting restaurant manager.
+ * Owner has unlimited quota (remaining: 9999).
+ */
+router.get('/quota', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+      return;
+    }
+
+    const callerRole = (user.role || 'customer').toLowerCase();
+    const isOwner = [
+      'owner', 'admin', 'developer', 'platform_owner'
+    ].includes(callerRole) ||
+      user.email === 'olivepizzarjn@gmail.com' ||
+      user.email === 'webhub2811@gmail.com';
+
+    if (isOwner) {
+      res.json({ success: true, unlimited: true, remaining: 9999, limit: 9999, resetInSeconds: 0 });
+      return;
+    }
+
+    const branchId = (req.query.branchId as string) || user.branchId || 'main_branch';
+    const rateLimitKey = `pdf:custom:branch:${branchId}`;
+    
+    let remaining = 2;
+    let resetInSeconds = 3600;
+
+    if (redisService.isAvailable()) {
+      const client = redisService.getClient();
+      if (client) {
+        const namespacedKey = `olive:rate:${rateLimitKey}`;
+        const val = await client.get(namespacedKey);
+        const count = val ? parseInt(val, 10) : 0;
+        remaining = Math.max(0, 2 - count);
+        const ttl = await client.ttl(namespacedKey);
+        if (ttl > 0) resetInSeconds = ttl;
+      }
+    }
+
+    res.json({
+      success: true,
+      branchId,
+      remaining,
+      limit: 2,
+      resetInSeconds
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/reports/custom
+ * Compiles a custom PDF report dynamically in memory and streams it over HTTP.
+ * Strictly NEVER stores custom reports in Cloudflare R2!
+ * Rate limited to 2 PDFs per hour for Restaurant Managers via Layerbase Redis.
+ * Unlimited for Store Owners.
+ */
+router.post('/custom', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Unauthorized: Authentication required.' });
+      return;
+    }
+
+    const callerRole = (user.role || 'customer').toLowerCase();
+    const isOwner = [
+      'owner', 'admin', 'developer', 'platform_owner'
+    ].includes(callerRole) ||
+      user.email === 'olivepizzarjn@gmail.com' ||
+      user.email === 'webhub2811@gmail.com';
+
+    const isFranchiseManager = ['franchise_owner', 'franchise_manager'].includes(callerRole);
+    const isRestaurantManager = ['restaurant_manager', 'manager', 'kitchen_manager'].includes(callerRole);
+
+    if (!isOwner && !isFranchiseManager && !isRestaurantManager) {
+      res.status(403).json({ error: 'Forbidden: Insufficient privileges to generate custom reports.' });
+      return;
+    }
+
+    const branchId = (req.body.branchId as string) || user.branchId || 'main_branch';
+    const franchiseId = (req.body.franchiseId as string) || user.franchiseId || 'fra_primary';
+    const timeRange = (req.body.timeRange as string) || 'ongoing_month';
+    const channel = (req.body.channel as 'ALL' | 'ONLINE' | 'POS') || 'ALL';
+
+    // Rate-limiting check for restaurant managers (2 PDFs/hour)
+    if (!isOwner) {
+      const rateLimitKey = `pdf:custom:branch:${branchId}`;
+      const { allowed, remaining } = await redisService.checkRateLimit(rateLimitKey, 2, 3600);
+      if (!allowed) {
+        let resetMinutes = 60;
+        const client = redisService.getClient();
+        if (client) {
+          const ttl = await client.ttl(`olive:rate:${rateLimitKey}`);
+          if (ttl > 0) resetMinutes = Math.ceil(ttl / 60);
+        }
+        res.status(429).json({
+          error: `Hourly custom PDF limit reached (2 PDFs/hr). Next PDF download available in ${resetMinutes} minutes.`,
+          remaining: 0,
+          limit: 2
+        });
+        return;
+      }
+    }
+
+    // Determine Month and Year based on current date
+    const now = new Date();
+    const monthName = req.body.monthName || now.toLocaleString('en-US', { month: 'long' });
+    const year = Number(req.body.year) || now.getFullYear();
+
+    // Compile in memory
+    const pdfBuffer = await MonthlyPdfReportService.generateMonthlyReportBuffer({
+      monthName,
+      year,
+      branchId,
+      franchiseId,
+      channel
+    });
+
+    const filename = `OlivePizza-Report-${branchId}-${timeRange}-${Date.now()}.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.send(pdfBuffer);
+  } catch (err: any) {
+    console.error('[Custom Report Error]:', err);
     res.status(500).json({ error: err.message });
   }
 });
