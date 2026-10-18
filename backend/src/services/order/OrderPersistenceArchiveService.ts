@@ -483,6 +483,17 @@ export class OrderPersistenceArchiveService {
         };
       }
 
+      // Short-circuit if order is already COMPLETED/FINALIZED to avoid redundant sync and duplicate audit logs
+      if ((orderData.lifecycle === 'COMPLETED' || orderData.lifecycle === 'FINALIZED') && orderData.permanentBillNo) {
+        return {
+          success: true,
+          orderId,
+          alreadyArchived: true,
+          deletedFromFirestore: false,
+          permanentBillNo: Number(orderData.permanentBillNo)
+        };
+      }
+
       // Requirement (PHASES 32-36): Payment status whitelist validation before archiving
       const VALID_PAYMENT_STATUSES = ['paid', 'pending', 'failed', 'refunded', 'cod_pending', 'cod_collected', 'waived', 'free'];
       const rawPaymentStatusLower = orderData.paymentStatus ? String(orderData.paymentStatus).toLowerCase() : null;
@@ -790,18 +801,19 @@ export class OrderPersistenceArchiveService {
     let errors = 0;
 
     try {
-      // 1. Check for terminal orders that are still present in Firestore
-      const terminalSnap = await adminDb.collection('orders')
+      // 1. Check for terminal orders that are still unfinalized (lifecycle in ['ACTIVE', 'PENDING'])
+      const unfinalizedSnap = await adminDb.collection('orders')
         .where('status', 'in', ['delivered', 'cancelled'])
-        .limit(25)
+        .where('lifecycle', 'in', ['ACTIVE', 'PENDING'])
+        .limit(50)
         .get();
 
-      for (const doc of terminalSnap.docs) {
+      for (const doc of unfinalizedSnap.docs) {
         try {
           const res = await this.finalizeAndArchiveTerminalOrder(doc.id);
-          if (res.success && res.deletedFromFirestore) {
+          if (res.success) {
             archived++;
-          } else if (!res.success) {
+          } else {
             errors++;
           }
         } catch {
@@ -812,19 +824,43 @@ export class OrderPersistenceArchiveService {
       // 2. Check for orders stuck in transitional/failed archival lifecycle states
       const finalizingSnap = await adminDb.collection('orders')
         .where('lifecycle', 'in', ['FINALIZING', 'ARCHIVE_SYNC_FAILED', 'ARCHIVE_VERIFICATION_FAILED'])
-        .limit(25)
+        .limit(50)
         .get();
 
       for (const doc of finalizingSnap.docs) {
         try {
           const res = await this.finalizeAndArchiveTerminalOrder(doc.id);
-          if (res.success && res.deletedFromFirestore) {
+          if (res.success) {
             archived++;
-          } else if (!res.success) {
+          } else {
             errors++;
           }
         } catch {
           errors++;
+        }
+      }
+
+      // 3. Fallback for legacy terminal orders where lifecycle property might be undefined
+      const legacySnap = await adminDb.collection('orders')
+        .where('status', 'in', ['delivered', 'cancelled'])
+        .orderBy('createdAt', 'desc')
+        .limit(25)
+        .get()
+        .catch(() => ({ docs: [] }));
+
+      for (const doc of legacySnap.docs) {
+        const data = doc.data();
+        if (data.lifecycle !== 'COMPLETED' && data.lifecycle !== 'FINALIZED') {
+          try {
+            const res = await this.finalizeAndArchiveTerminalOrder(doc.id);
+            if (res.success) {
+              archived++;
+            } else {
+              errors++;
+            }
+          } catch {
+            errors++;
+          }
         }
       }
 
