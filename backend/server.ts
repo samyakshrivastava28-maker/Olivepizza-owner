@@ -123,20 +123,42 @@ app.use(['/graphql', '/api/graphql'], graphqlRateLimiter, express.json({ limit: 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split('Bearer ')[1].trim();
     try {
-      const decoded = await adminAuth.verifyIdToken(token);
+      const decoded = await adminAuth.verifyIdToken(token, true);
       if (decoded) {
         const email = (decoded.email || '').toLowerCase().trim();
-        isOwner = AUTHORIZED_INTERNAL_EMAILS.includes(email) || decoded.role === 'owner' || decoded.role === 'platform_owner' || decoded.role === 'admin' || decoded.role === 'developer';
-        user = {
-          uid: decoded.uid,
-          email,
-          role: decoded.role || 'customer',
-          franchiseId: decoded.franchiseId || null,
-          branchId: decoded.branchId || null
-        };
+        let isActive = true;
+        let role = decoded.role || 'customer';
+        let franchiseId = decoded.franchiseId || null;
+        let branchId = decoded.branchId || null;
+
+        try {
+          const userDoc = await adminDb.collection('users').doc(decoded.uid).get();
+          if (userDoc.exists) {
+            const uData = userDoc.data() || {};
+            if (uData.isActive === false || uData.status === 'REVOKED' || uData.status === 'suspended' || uData.status === 'disabled' || uData.isBlocked === true) {
+              isActive = false;
+            }
+            if (uData.role) role = uData.role;
+            if (uData.franchiseId) franchiseId = uData.franchiseId;
+            if (uData.branchId) branchId = uData.branchId;
+          }
+        } catch {
+          // If Firestore is temporarily unreachable, fallback to verified token claims
+        }
+
+        if (isActive) {
+          isOwner = AUTHORIZED_INTERNAL_EMAILS.includes(email) || role === 'owner' || role === 'platform_owner' || role === 'admin' || role === 'developer';
+          user = {
+            uid: decoded.uid,
+            email,
+            role,
+            franchiseId,
+            branchId
+          };
+        }
       }
     } catch {
-      // Unauthenticated / public query attempt
+      // Unauthenticated or revoked token attempt
     }
   }
 

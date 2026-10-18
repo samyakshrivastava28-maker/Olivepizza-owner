@@ -97,8 +97,6 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           const q = await adminDb.collection('users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
           if (!q.empty) {
             userData = q.docs[0].data();
-            // Auto link UID for future instant lookups
-            adminDb.collection('users').doc(uid).set({ ...userData, uid }, { merge: true }).catch(() => {});
           }
         }
 
@@ -131,7 +129,6 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
             const rmSnap = await adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
             if (!rmSnap.empty) {
               rmData = rmSnap.docs[0].data();
-              adminDb.collection('restaurant_managers').doc(uid).set({ ...rmData, id: uid }, { merge: true }).catch(() => {});
             }
           }
 
@@ -158,7 +155,6 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
               const dpSnap = await adminDb.collection('delivery_partners').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
               if (!dpSnap.empty) {
                 dpData = dpSnap.docs[0].data();
-                adminDb.collection('delivery_partners').doc(uid).set({ ...dpData, id: uid }, { merge: true }).catch(() => {});
               }
             }
 
@@ -185,7 +181,6 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
               const fuSnap = await adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
               if (!fuSnap.empty) {
                 fuData = fuSnap.docs[0].data();
-                adminDb.collection('franchise_users').doc(uid).set({ ...fuData, id: uid }, { merge: true }).catch(() => {});
               }
             }
 
@@ -212,7 +207,6 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
               const posSnap = await adminDb.collection('pos_accounts').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
               if (!posSnap.empty) {
                 posData = posSnap.docs[0].data();
-                adminDb.collection('pos_accounts').doc(uid).set({ ...posData, id: uid }, { merge: true }).catch(() => {});
               }
             }
 

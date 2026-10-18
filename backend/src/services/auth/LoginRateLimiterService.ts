@@ -35,8 +35,8 @@ export class LoginRateLimiterService {
 
   /**
    * Atomic check-and-consume for device authentication attempts.
-   * Primary key: Device ID (2 attempts per 15 min).
-   * Secondary key: IP address (20 attempts per 15 min).
+   * Primary key: Device ID (5 attempts per 15 min).
+   * Secondary key: IP address (30 attempts per 15 min).
    * Uses Firestore transactions for concurrency safety.
    */
   public static async consumeAttempt(
@@ -108,7 +108,7 @@ export class LoginRateLimiterService {
           firstAttemptAt = now;
         }
 
-        // If device has already reached MAX_DEVICE_ATTEMPTS (2), block the 3rd attempt
+        // If device has already reached MAX_DEVICE_ATTEMPTS, block subsequent attempts
         if (devAttempts >= this.MAX_DEVICE_ATTEMPTS) {
           const retryAfterSeconds = Math.max(1, Math.ceil((firstAttemptAt + this.WINDOW_MS - now) / 1000));
           

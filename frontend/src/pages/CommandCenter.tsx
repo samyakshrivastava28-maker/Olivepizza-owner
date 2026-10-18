@@ -233,12 +233,49 @@ export default function CommandCenter() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: mutation, variables: { id } })
       });
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status}`);
+      }
       const json = await res.json();
-      if (json.errors) throw new Error(json.errors[0].message);
+      if (json.errors && json.errors.length > 0) throw new Error(json.errors[0].message);
+      if (json.data?.acknowledgeIncident?.status !== 'ACKNOWLEDGED') {
+        throw new Error('Incident status update could not be verified');
+      }
       toast.success('Incident acknowledged');
       loadCommandCenterData(true);
     } catch (err: any) {
       toast.error(err.message || 'Failed to acknowledge incident');
+    }
+  };
+
+  // Handle Incident Resolution
+  const handleResolveIncident = async (id: string, note?: string) => {
+    const mutation = `
+      mutation ResolveIncident($id: ID!, $resolutionNote: String) {
+        resolveIncident(id: $id, resolutionNote: $resolutionNote) {
+          id
+          status
+        }
+      }
+    `;
+    try {
+      const res = await fetchApi('/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: mutation, variables: { id, resolutionNote: note || 'Resolved via Command Center' } })
+      });
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status}`);
+      }
+      const json = await res.json();
+      if (json.errors && json.errors.length > 0) throw new Error(json.errors[0].message);
+      if (json.data?.resolveIncident?.status !== 'RESOLVED') {
+        throw new Error('Incident resolution could not be verified');
+      }
+      toast.success('Incident resolved successfully');
+      loadCommandCenterData(true);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to resolve incident');
     }
   };
 
@@ -544,15 +581,23 @@ export default function CommandCenter() {
                       {incident.status === 'OPEN' && (
                         <button
                           onClick={() => handleAcknowledgeIncident(incident.id)}
-                          className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition"
+                          className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition cursor-pointer"
                         >
                           Ack
+                        </button>
+                      )}
+                      {(incident.status === 'OPEN' || incident.status === 'ACKNOWLEDGED') && (
+                        <button
+                          onClick={() => handleResolveIncident(incident.id)}
+                          className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30 text-[11px] font-semibold transition cursor-pointer"
+                        >
+                          Resolve
                         </button>
                       )}
                       {incident.actionUrl && (
                         <button
                           onClick={() => navigate(incident.actionUrl!)}
-                          className="px-2.5 py-1 rounded-lg bg-orange-500 hover:bg-orange-600 text-slate-950 text-[11px] font-bold transition flex items-center gap-1"
+                          className="px-2.5 py-1 rounded-lg bg-orange-500 hover:bg-orange-600 text-slate-950 text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
                         >
                           Fix <ArrowRight className="w-3 h-3" />
                         </button>

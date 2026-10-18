@@ -1,6 +1,7 @@
 import assert from 'assert';
 import { describe, it } from 'node:test';
 import { executeGraphQL } from '../graphql/index.ts';
+import { adminDb } from '../config/firebase.ts';
 
 describe('GraphQL CTE Aggregation, Currency & Security Invariants', () => {
   const mockOwnerContext = {
@@ -111,23 +112,75 @@ describe('GraphQL CTE Aggregation, Currency & Security Invariants', () => {
   });
 
   it('6. Rejects incident acknowledgment for non-owners', async () => {
-    const mutation = `
-      mutation {
-        acknowledgeIncident(id: "inc_nonexistent_test") {
-          id
-        }
-      }
-    `;
+    const testIncRef = adminDb.collection('system_incidents').doc('inc_test_platform_incident');
+    await testIncRef.set({
+      entityType: 'SYSTEM',
+      entityId: 'sys_core',
+      status: 'OPEN',
+      title: 'Core Engine Test Alert'
+    });
 
-    const result = await executeGraphQL(mutation, {}, mockFranchiseContext);
-    assert.ok(result.errors && result.errors.length > 0);
-    assert.match(result.errors[0].message, /Only platform owners can acknowledge incidents/i);
+    try {
+      const mutation = `
+        mutation {
+          acknowledgeIncident(id: "inc_test_platform_incident") {
+            id
+          }
+        }
+      `;
+
+      const result = await executeGraphQL(mutation, {}, mockFranchiseContext);
+      assert.ok(result.errors && result.errors.length > 0);
+      assert.match(result.errors[0].message, /Only platform owners can acknowledge platform-level incidents/i);
+    } finally {
+      await testIncRef.delete().catch(() => {});
+    }
   });
 
   it('7. Rejects incident acknowledgment if incident document does not exist', async () => {
     const mutation = `
       mutation {
         acknowledgeIncident(id: "inc_definitely_not_existing_12345") {
+          id
+        }
+      }
+    `;
+
+    const result = await executeGraphQL(mutation, {}, mockOwnerContext);
+    assert.ok(result.errors && result.errors.length > 0);
+    assert.match(result.errors[0].message, /not found/i);
+  });
+
+  it('8. Enforces query depth limit of 6', async () => {
+    const deepQuery = `
+      query DeepQuery {
+        franchisesList {
+          branches {
+            activeRiders {
+              assignedOrders {
+                items {
+                  product {
+                    category {
+                      id
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const result = await executeGraphQL(deepQuery, {}, mockOwnerContext);
+    assert.ok(result.errors && result.errors.length > 0);
+    assert.match(result.errors[0].message, /depth of \d+ exceeds maximum allowed depth of 6/i);
+  });
+
+  it('9. Rejects incident resolution if incident document does not exist', async () => {
+    const mutation = `
+      mutation {
+        resolveIncident(id: "inc_definitely_not_existing_12345", resolutionNote: "Test resolve") {
           id
         }
       }
