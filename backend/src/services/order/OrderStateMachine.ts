@@ -126,16 +126,7 @@ export class OrderStateMachine {
   ): Promise<TransitionResult> {
     const toState = OrderStateMachine.reconcileStatus(toStateInput);
     const normalizedActorRole = normalizeStateMachineRole(actor.role);
-    if ((normalizedActorRole === 'owner' || normalizedActorRole === 'admin') && toState !== 'cancelled') {
-      return {
-        success: false,
-        orderId,
-        previousStatus: 'pending',
-        currentStatus: 'pending',
-        version: 0,
-        error: `Owner has read-only authority. Operational stage transition '${toState}' must be performed by restaurant managers, kitchen staff, or delivery partners.`,
-      };
-    }
+
 
     const client = await pgPool.connect().catch(() => null);
     
@@ -219,20 +210,14 @@ export class OrderStateMachine {
       const authorizedRoles = ROLE_AUTHORITY[transitionKey] || ['system'];
       const normalizedActorRole = normalizeStateMachineRole(actor.role);
 
-      // Enforce Owner Read-Only Rule at Backend Level
-      if (normalizedActorRole === 'owner' || normalizedActorRole === 'admin') {
-        if (client) await client.query('ROLLBACK').catch(() => {});
-        return {
-          success: false,
-          orderId,
-          previousStatus: fromState,
-          currentStatus: fromState,
-          version: orderData.notification_version || 1,
-          error: `Owner has read-only authority. Operational stage transition '${transitionKey}' must be performed by restaurant managers, kitchen staff, or delivery partners.`,
-        };
-      }
+      // Owners and Admins possess administrative operational authority across stages
+      const isAuthorized =
+        authorizedRoles.includes(normalizedActorRole) ||
+        normalizedActorRole === 'system' ||
+        normalizedActorRole === 'owner' ||
+        normalizedActorRole === 'admin' ||
+        normalizedActorRole === 'platform_owner';
 
-      const isAuthorized = authorizedRoles.includes(normalizedActorRole) || normalizedActorRole === 'system';
       if (!isAuthorized) {
         if (client) await client.query('ROLLBACK').catch(() => {});
         return {

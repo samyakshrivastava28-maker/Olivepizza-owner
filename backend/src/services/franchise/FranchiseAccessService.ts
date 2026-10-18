@@ -1,5 +1,7 @@
 import { adminDb, adminAuth } from '../../config/firebase.js';
 import { FranchiseScopeService } from './FranchiseScopeService.js';
+import { query } from '../../config/postgres.js';
+
 
 export interface FranchiseAccessEntry {
   franchiseId: string;
@@ -312,38 +314,110 @@ export class FranchiseAccessService {
       return { authorized: false, reason: 'Database service unavailable' };
     }
 
-    // 1. Platform Owner Check
-    const isMasterOwner =
-      emailLower === 'olivepizzarjn@gmail.com' ||
-      emailLower === 'webhub2811@gmail.com';
-
-    // Platform Owners have full authorization for OWNER dashboard
-    if (isMasterOwner && targetApp === 'OWNER') {
-      const resolvedBranch = requestedBranchId || 'main_branch';
-      const resolvedFranchise = 'fra_rajnandgaon';
-
-      return {
-        authorized: true,
-        requiresPin: false,
-        isProfileComplete: true,
-        user: {
-          uid,
-          email: emailLower,
-          name: emailLower === 'webhub2811@gmail.com' ? 'Samyak Shrivastava' : 'Platform Owner',
-          role: 'owner',
-          phone: '+919179944445',
-          phoneNumber: '+919179944445',
-          branchId: resolvedBranch,
-          branchName: 'Olive Pizza Enterprise',
-          branchIds: ['all'],
-          franchiseId: resolvedFranchise,
-          terminalId: terminalId || 'Counter 1',
-          permissions: ['*'],
-          allowedApps: ['OWNER'],
-          applicationAccess: {}
-        }
-      };
+    // 1. Authoritative PostgreSQL Database Check (app_users & delivery_partners)
+    let pgUserData: any = null;
+    try {
+      const pgUserRes = await query(
+        `SELECT id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active 
+         FROM app_users 
+         WHERE (email IS NOT NULL AND LOWER(email) = $1) OR id = $2 
+         LIMIT 1`,
+        [emailLower, uid]
+      );
+      if (pgUserRes.rows.length > 0) {
+        pgUserData = pgUserRes.rows[0];
+      }
+    } catch (pgErr: any) {
+      console.warn('[FranchiseAccessService] PostgreSQL app_users lookup notice:', pgErr.message);
     }
+
+    if (pgUserData && pgUserData.is_active !== false) {
+      const userRole = (pgUserData.role || '').toLowerCase();
+      const allowedApps: string[] = Array.isArray(pgUserData.allowed_apps) ? pgUserData.allowed_apps : [];
+      const isOwner = userRole === 'owner' || userRole === 'platform_owner';
+      const hasAppAccess = isOwner || allowedApps.includes(targetApp);
+
+      if (hasAppAccess) {
+        const resolvedBranch = requestedBranchId || pgUserData.branch_id || 'main_branch';
+        const resolvedFranchise = pgUserData.franchise_id || 'fra_rajnandgaon';
+        const roleMap: Record<string, string> = {
+          OWNER: 'owner',
+          RESTAURANT_MANAGER: 'restaurant_manager',
+          DELIVERY: 'delivery_partner',
+          POS: 'pos_operator',
+          FRANCHISE_MANAGER: 'franchise_manager',
+          CUSTOMER: 'customer'
+        };
+
+        return {
+          authorized: true,
+          requiresPin: false,
+          isProfileComplete: true,
+          user: {
+            uid: pgUserData.id || uid,
+            email: pgUserData.email || emailLower,
+            name: pgUserData.name || 'Olive Pizza Staff',
+            role: isOwner ? (roleMap[targetApp] || 'owner') : (userRole || roleMap[targetApp] || 'staff'),
+            phone: pgUserData.phone || '+919179944445',
+            phoneNumber: pgUserData.phone || '+919179944445',
+            branchId: resolvedBranch,
+            branchName: 'Olive Pizza — Rajnandgaon HQ',
+            branchIds: ['all', resolvedBranch],
+            franchiseId: resolvedFranchise,
+            terminalId: terminalId || 'Counter 1',
+            permissions: ['*'],
+            allowedApps: isOwner ? ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'] : allowedApps,
+            applicationAccess: {
+              app_restaurant_management: true,
+              app_delivery: true,
+              app_pos: true,
+              app_franchise_management: true,
+              app_owner: isOwner
+            }
+          }
+        };
+      }
+    }
+
+    // Check delivery_partners table in PostgreSQL for DELIVERY app
+    if (targetApp === 'DELIVERY') {
+      try {
+        const riderRes = await query(
+          `SELECT id, name, phone, email, status, is_online, branch_id, franchise_id, vehicle_type, vehicle_number 
+           FROM delivery_partners 
+           WHERE (email IS NOT NULL AND LOWER(email) = $1) OR id = $2 
+           LIMIT 1`,
+          [emailLower, uid]
+        );
+        if (riderRes.rows.length > 0) {
+          const dp = riderRes.rows[0];
+          if (dp.status === 'APPROVED' || dp.is_online === true) {
+            return {
+              authorized: true,
+              requiresPin: false,
+              isProfileComplete: Boolean(dp.name && dp.phone),
+              user: {
+                uid: dp.id || uid,
+                email: dp.email || emailLower,
+                name: dp.name || 'Delivery Partner',
+                role: 'delivery_partner',
+                branchId: dp.branch_id || 'main_branch',
+                branchName: 'Olive Pizza — Rajnandgaon HQ',
+                branchIds: [dp.branch_id || 'main_branch'],
+                franchiseId: dp.franchise_id || 'fra_rajnandgaon',
+                permissions: ['delivery.orders', 'delivery.location'],
+                allowedApps: ['DELIVERY'],
+                applicationAccess: { app_delivery: true }
+              }
+            };
+          }
+        }
+      } catch (riderErr: any) {
+        console.warn('[FranchiseAccessService] PostgreSQL delivery_partners lookup notice:', riderErr.message);
+      }
+    }
+
+
 
     // 2. Normalize Phone Number and Fetch user profile
     const rawPhone = (phoneNumber || '').trim();

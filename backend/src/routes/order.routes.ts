@@ -94,21 +94,27 @@ router.get('/', verifyToken, async (req: AuthRequest, res: Response): Promise<vo
     }
 
     // Normal customer: fetch both active Firestore orders and archived PostgreSQL orders
-    const [snapshot, pgHistorical] = await Promise.all([
-      adminDb.collection('orders')
+    let snapshotDocs: any[] = [];
+    try {
+      const snap = await adminDb.collection('orders')
         .where('userId', '==', user.uid)
         .orderBy('createdAt', 'desc')
         .limit(50)
         .get()
         .catch(async () => {
-          return await adminDb.collection('orders').where('userId', '==', user.uid).limit(50).get();
-        }),
-      OrderPersistenceArchiveService.getCustomerHistoricalOrders(user.uid, (user as any).phone || (user as any).phone_number)
-    ]);
+          return await adminDb.collection('orders').where('userId', '==', user.uid).limit(50).get().catch(() => ({ docs: [] }));
+        });
+      snapshotDocs = snap?.docs || [];
+    } catch (fsErr: any) {
+      console.warn('[Orders] Firestore read notice for customer orders, falling back to PostgreSQL:', fsErr.message);
+    }
+
+    const pgHistorical = await OrderPersistenceArchiveService.getCustomerHistoricalOrders(user.uid, (user as any).phone || (user as any).phone_number).catch(() => []);
       
-    const activeOrders = snapshot.docs
+    const activeOrders = snapshotDocs
       .map((doc: any) => OrderProjectionService.projectForCustomer(doc.data(), user.uid, doc.id))
       .filter(Boolean);
+
 
     const activeIds = new Set(activeOrders.map((o: any) => o.id));
     const pastOrders = (pgHistorical || [])
@@ -144,19 +150,59 @@ router.get('/live', verifyToken, requireRole(['restaurant_manager', 'owner', 'ki
       q = q.where('branchId', '==', effectiveBranchId);
     }
 
-    const snapshot = await q.orderBy('createdAt', 'desc').limit(50).get().catch(async () => {
-      let fallbackQ: any = adminDb.collection('orders');
-      if (effectiveBranchId !== 'all') {
-        fallbackQ = fallbackQ.where('branchId', '==', effectiveBranchId);
-      }
-      return await fallbackQ.limit(50).get();
-    });
+    let activeOrders: any[] = [];
+    try {
+      const snapshot = await q.orderBy('createdAt', 'desc').limit(50).get().catch(async () => {
+        let fallbackQ: any = adminDb.collection('orders');
+        if (effectiveBranchId !== 'all') {
+          fallbackQ = fallbackQ.where('branchId', '==', effectiveBranchId);
+        }
+        return await fallbackQ.limit(50).get().catch(() => ({ docs: [] }));
+      });
 
-    const activeOrders = snapshot.docs
-      .map((doc: any) => OrderProjectionService.projectForRestaurantManager(doc.data(), doc.id))
-      .filter((o: any) => activeStatuses.includes(o.status));
+      activeOrders = (snapshot?.docs || [])
+        .map((doc: any) => OrderProjectionService.projectForRestaurantManager(doc.data(), doc.id))
+        .filter((o: any) => activeStatuses.includes(o.status));
+    } catch (fsErr: any) {
+      console.warn('[Orders] Firestore read notice for /live, querying PostgreSQL:', fsErr.message);
+    }
+
+    // Authoritative fallback: Query PostgreSQL canonical_orders directly
+    if (activeOrders.length === 0) {
+      try {
+        const { query: pgQuery } = await import('../config/postgres.js');
+        const pgParams: any[] = [];
+        let branchClause = '';
+        if (effectiveBranchId !== 'all') {
+          pgParams.push(effectiveBranchId);
+          branchClause = `AND branch_id = $${pgParams.length}`;
+        }
+        const pgRes = await pgQuery(
+          `SELECT * FROM canonical_orders 
+           WHERE order_status NOT IN ('DELIVERED', 'CANCELLED') ${branchClause} 
+           ORDER BY created_at DESC LIMIT 50`,
+          pgParams
+        );
+        activeOrders = pgRes.rows.map((r: any) => ({
+          id: r.id,
+          orderNumber: r.daily_order_no ? `#${r.daily_order_no}` : r.id?.slice(0, 6),
+          status: (r.order_status || 'pending').toLowerCase(),
+          customerName: r.customer_name,
+          customerPhone: r.customer_phone,
+          deliveryAddress: typeof r.delivery_address === 'string' ? { addressLine: r.delivery_address } : r.delivery_address,
+          totalAmount: Number(r.total_amount || 0),
+          paymentMethod: r.payment_method,
+          paymentStatus: r.payment_status,
+          createdAt: r.created_at,
+          branchId: r.branch_id
+        }));
+      } catch (pgErr: any) {
+        console.warn('[Orders] PostgreSQL /live query notice:', pgErr.message);
+      }
+    }
 
     res.json({ success: true, count: activeOrders.length, orders: activeOrders });
+
   } catch (error: any) {
     console.error("[Orders] Failed to fetch live orders:", error);
     res.status(500).json({ error: error?.message || 'Failed to fetch live orders' });
@@ -390,13 +436,20 @@ router.get('/:id', verifyToken, async (req: AuthRequest, res: Response): Promise
     }
 
     let data: any = null;
-    const docSnap = await adminDb.collection('orders').doc(id).get();
-    if (docSnap.exists) {
-      data = { id: docSnap.id, ...docSnap.data() };
-    } else {
+    try {
+      const docSnap = await adminDb.collection('orders').doc(id).get();
+      if (docSnap.exists) {
+        data = { id: docSnap.id, ...docSnap.data() };
+      }
+    } catch (fsErr: any) {
+      console.warn('[Orders] Firestore single order read notice, falling back to PostgreSQL:', fsErr.message);
+    }
+
+    if (!data) {
       // Fallback: check PostgreSQL canonical archive for completed/archived order
       data = await OrderPersistenceArchiveService.getHistoricalOrder(id);
     }
+
 
     if (!data) {
       res.status(404).json({ error: 'Order not found' });
@@ -543,14 +596,37 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
 
       if (activeOrderDoc) {
         const activeData = activeOrderDoc.data();
-        const orderNum = activeData.dailyOrderNumber ? `#${activeData.dailyOrderNumber}` : `#${activeOrderDoc.id.slice(0, 6)}`;
-        res.status(400).json({ 
-          error: `You already have an active order in progress (${orderNum}). Please wait until your current order is delivered before placing another order.`,
-          code: 'ACTIVE_ORDER_EXISTS',
-          activeOrderId: activeOrderDoc.id,
-          activeOrderStatus: activeData.status
-        });
-        return;
+        // Cross-verify with PostgreSQL canonical table to ensure this order wasn't already delivered
+        let isActuallyDeliveredInPg = false;
+        try {
+          const pgCheck = await pgQuery(
+            `SELECT order_status FROM canonical_orders WHERE id = $1 LIMIT 1`,
+            [activeOrderDoc.id]
+          );
+          if (pgCheck.rows.length > 0) {
+            const pgStatus = (pgCheck.rows[0].order_status || '').toUpperCase();
+            if (pgStatus === 'DELIVERED' || pgStatus === 'CANCELLED') {
+              isActuallyDeliveredInPg = true;
+              // Clean up Firestore doc state
+              await adminDb.collection('orders').doc(activeOrderDoc.id).update({
+                status: pgStatus.toLowerCase(),
+                order_status: pgStatus,
+                live_lifecycle: 'TERMINAL'
+              }).catch(() => {});
+            }
+          }
+        } catch {}
+
+        if (!isActuallyDeliveredInPg) {
+          const orderNum = activeData.dailyOrderNumber ? `#${activeData.dailyOrderNumber}` : `#${activeOrderDoc.id.slice(0, 6)}`;
+          res.status(400).json({ 
+            error: `You already have an active order in progress (${orderNum}). Please wait until your current order is delivered before placing another order.`,
+            code: 'ACTIVE_ORDER_EXISTS',
+            activeOrderId: activeOrderDoc.id,
+            activeOrderStatus: activeData.status
+          });
+          return;
+        }
       }
     } catch (activeOrderErr: any) {
       console.warn('[Orders] Active order check notice:', activeOrderErr.message);
@@ -1432,14 +1508,37 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
     }
 
     // Pre-check order existence and branch scoping
-    const orderDoc = await adminDb.collection('orders').doc(id).get();
-    if (!orderDoc.exists) {
+    let orderBranchId = '';
+    let orderExists = false;
+
+    try {
+      const orderDoc = await adminDb.collection('orders').doc(id).get();
+      if (orderDoc.exists) {
+        orderExists = true;
+        orderBranchId = orderDoc.data()?.branchId || '';
+      }
+    } catch (fsErr: any) {
+      console.warn('[Orders] Firestore read notice for /:id/status pre-check:', fsErr.message);
+    }
+
+    if (!orderExists) {
+      try {
+        const { query: pgQuery } = await import('../config/postgres.js');
+        const pgRes = await pgQuery('SELECT branch_id FROM canonical_orders WHERE id = $1', [id]);
+        if (pgRes.rows.length > 0) {
+          orderExists = true;
+          orderBranchId = pgRes.rows[0].branch_id || '';
+        }
+      } catch (pgErr: any) {
+        console.warn('[Orders] PostgreSQL fallback order check notice:', pgErr.message);
+      }
+    }
+
+    if (!orderExists) {
       res.status(404).json({ error: 'Order not found' });
       return;
     }
 
-    const orderData = orderDoc.data()!;
-    const orderBranchId = orderData.branchId || '';
     const userBranchId = req.user?.branchId;
 
     if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && role !== 'owner' && role !== 'admin') {
@@ -1448,6 +1547,7 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
       });
       return;
     }
+
 
     const metadata: Record<string, any> = {};
     if (cancellationReason) metadata.cancellationReason = cancellationReason;
