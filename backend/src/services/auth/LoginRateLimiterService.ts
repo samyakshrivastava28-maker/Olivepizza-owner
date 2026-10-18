@@ -196,41 +196,46 @@ export class LoginRateLimiterService {
       return { allowed: true, attempts: 0, remainingAttempts: this.MAX_DEVICE_ATTEMPTS, retryAfterSeconds: 0, deviceId };
     }
 
-    const docRef = adminDb.collection(this.COLLECTION).doc(`dev_${deviceId}`);
-    const snap = await docRef.get();
-    if (!snap.exists) {
-      return { allowed: true, attempts: 0, remainingAttempts: this.MAX_DEVICE_ATTEMPTS, retryAfterSeconds: 0, deviceId };
-    }
+    try {
+      const docRef = adminDb.collection(this.COLLECTION).doc(`dev_${deviceId}`);
+      const snap = await docRef.get();
+      if (!snap.exists) {
+        return { allowed: true, attempts: 0, remainingAttempts: this.MAX_DEVICE_ATTEMPTS, retryAfterSeconds: 0, deviceId };
+      }
 
-    const data = snap.data() || {};
-    const now = Date.now();
-    const firstAttemptAt = data.firstAttemptAt || 0;
-    const attempts = data.attempts || 0;
+      const data = snap.data() || {};
+      const now = Date.now();
+      const firstAttemptAt = data.firstAttemptAt || 0;
+      const attempts = data.attempts || 0;
 
-    if (now - firstAttemptAt > this.WINDOW_MS) {
-      return { allowed: true, attempts: 0, remainingAttempts: this.MAX_DEVICE_ATTEMPTS, retryAfterSeconds: 0, deviceId };
-    }
+      if (now - firstAttemptAt > this.WINDOW_MS) {
+        return { allowed: true, attempts: 0, remainingAttempts: this.MAX_DEVICE_ATTEMPTS, retryAfterSeconds: 0, deviceId };
+      }
 
-    if (attempts >= this.MAX_DEVICE_ATTEMPTS) {
-      const retryAfterSeconds = Math.max(1, Math.ceil((firstAttemptAt + this.WINDOW_MS - now) / 1000));
+      if (attempts >= this.MAX_DEVICE_ATTEMPTS) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((firstAttemptAt + this.WINDOW_MS - now) / 1000));
+        return {
+          allowed: false,
+          attempts,
+          remainingAttempts: 0,
+          retryAfterSeconds,
+          code: 'AUTH_RATE_LIMITED',
+          message: `Too many login attempts from this device. Please try again in ${Math.ceil(retryAfterSeconds / 60)} minute(s).`,
+          deviceId
+        };
+      }
+
       return {
-        allowed: false,
+        allowed: true,
         attempts,
-        remainingAttempts: 0,
-        retryAfterSeconds,
-        code: 'AUTH_RATE_LIMITED',
-        message: `Too many login attempts from this device. Please try again in ${Math.ceil(retryAfterSeconds / 60)} minute(s).`,
+        remainingAttempts: Math.max(0, this.MAX_DEVICE_ATTEMPTS - attempts),
+        retryAfterSeconds: 0,
         deviceId
       };
+    } catch (err: any) {
+      console.warn('[LoginRateLimiterService] checkLimit graceful fallback on Firestore notice:', err.message);
+      return { allowed: true, attempts: 0, remainingAttempts: this.MAX_DEVICE_ATTEMPTS, retryAfterSeconds: 0, deviceId };
     }
-
-    return {
-      allowed: true,
-      attempts,
-      remainingAttempts: Math.max(0, this.MAX_DEVICE_ATTEMPTS - attempts),
-      retryAfterSeconds: 0,
-      deviceId
-    };
   }
 
   /**

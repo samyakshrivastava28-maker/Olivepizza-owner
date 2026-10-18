@@ -65,9 +65,12 @@ export class AuthAuditService {
         timestamp: entry.timestamp || Date.now(),
       };
 
-      await adminDb.collection(this.COLLECTION).add(record);
+      await Promise.race([
+        adminDb.collection(this.COLLECTION).add(record),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Audit write timeout')), 1000))
+      ]);
     } catch (err) {
-      console.error('[AuthAuditService] ⚠️ Failed to record audit log:', err);
+      console.warn('[AuthAuditService] ⚠️ Audit log write skipped (timeout or quota):', (err as any)?.message || err);
     }
   }
 

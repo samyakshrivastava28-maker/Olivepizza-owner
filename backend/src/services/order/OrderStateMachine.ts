@@ -27,6 +27,7 @@ export type StateMachineActorRole =
   | 'cashier'
   | 'franchise_owner'
   | 'owner'
+  | 'platform_owner'
   | 'admin'
   | 'developer'
   | 'system';

@@ -599,7 +599,7 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         // Cross-verify with PostgreSQL canonical table to ensure this order wasn't already delivered
         let isActuallyDeliveredInPg = false;
         try {
-          const pgCheck = await pgQuery(
+          const pgCheck = await query(
             `SELECT order_status FROM canonical_orders WHERE id = $1 LIMIT 1`,
             [activeOrderDoc.id]
           );

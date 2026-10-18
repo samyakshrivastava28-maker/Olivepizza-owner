@@ -376,6 +376,12 @@ export class FranchiseAccessService {
             }
           }
         };
+      } else {
+        return {
+          authorized: false,
+          code: 'APP_NOT_PERMITTED',
+          reason: `Your account (${pgUserData.role}) is not authorized to use the ${targetApp} application.`
+        };
       }
     }
 
@@ -410,11 +416,48 @@ export class FranchiseAccessService {
                 applicationAccess: { app_delivery: true }
               }
             };
+          } else {
+            return {
+              authorized: false,
+              code: 'NOT_APPROVED',
+              reason: 'Your delivery partner account is not active or approved.'
+            };
           }
         }
       } catch (riderErr: any) {
         console.warn('[FranchiseAccessService] PostgreSQL delivery_partners lookup notice:', riderErr.message);
       }
+    }
+
+    // Customer app check: accessible to any valid user
+    if (targetApp === 'CUSTOMER') {
+      return {
+        authorized: true,
+        requiresPin: false,
+        isProfileComplete: true,
+        user: {
+          uid,
+          email: emailLower,
+          name: emailLower ? emailLower.split('@')[0] : 'Customer',
+          role: 'customer',
+          branchId: requestedBranchId || 'main_branch',
+          branchName: 'Olive Pizza',
+          branchIds: ['main_branch'],
+          franchiseId: 'fra_rajnandgaon',
+          permissions: ['customer.order'],
+          allowedApps: ['CUSTOMER'],
+          applicationAccess: {}
+        }
+      };
+    }
+
+    // Owner app check: If not resolved as owner in PostgreSQL, reject immediately
+    if (targetApp === 'OWNER') {
+      return {
+        authorized: false,
+        code: 'ACCESS_DENIED',
+        reason: 'This account is not authorized to access the Olive Pizza Owner Command Center.'
+      };
     }
 
 
@@ -460,57 +503,7 @@ export class FranchiseAccessService {
       }
     }
 
-    const isOwnerRole = userData?.role === 'owner' || userData?.role === 'platform_owner';
 
-    // Platform Owners from DB have access to OWNER app
-    if (isOwnerRole && targetApp === 'OWNER') {
-      const resolvedBranch = requestedBranchId || userData?.branchId || 'main_branch';
-      const resolvedFranchise = userData?.franchiseId || 'fra_rajnandgaon';
-
-      return {
-        authorized: true,
-        requiresPin: false,
-        isProfileComplete: true,
-        user: {
-          uid,
-          email: emailLower || 'owner@olivepizza.in',
-          name: userData?.name || 'Olive Pizza Administrator',
-          role: 'owner',
-          phone: userData?.phone || userData?.phoneNumber || '',
-          phoneNumber: userData?.phone || userData?.phoneNumber || '',
-          branchId: resolvedBranch,
-          branchName: 'Olive Pizza Enterprise',
-          branchIds: ['all'],
-          franchiseId: resolvedFranchise,
-          terminalId: terminalId || 'Counter 1',
-          permissions: ['*'],
-          allowedApps: ['OWNER'],
-          applicationAccess: {}
-        }
-      };
-    }
-
-    // 3. Customer application check
-    if (targetApp === 'CUSTOMER') {
-      return {
-        authorized: true,
-        requiresPin: false,
-        isProfileComplete: true,
-        user: {
-          uid,
-          email: emailLower,
-          name: userData?.name || emailLower.split('@')[0] || 'Customer',
-          role: 'customer',
-          branchId: 'main_branch',
-          branchName: 'Olive Pizza',
-          branchIds: ['main_branch'],
-          franchiseId: 'fra_rajnandgaon',
-          permissions: ['customer.order'],
-          allowedApps: ['CUSTOMER'],
-          applicationAccess: {}
-        }
-      };
-    }
 
     // 4. Check if account is suspended / deactivated
     if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended' || userData.status === 'SUSPENDED' || userData.status === 'REVOKED')) {

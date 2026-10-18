@@ -59,8 +59,8 @@ export class OrderPersistenceArchiveService {
    * If PostgreSQL persistence fails, records the pending status in Firestore without breaking live flow.
    */
   public static async syncLiveOrderToPostgres(orderId: string, preloadedData?: any): Promise<SyncResult> {
+    let orderData: any = preloadedData;
     try {
-      let orderData = preloadedData;
       if (!orderData) {
         const docSnap = await adminDb.collection('orders').doc(orderId).get();
         if (!docSnap.exists) {
@@ -215,9 +215,8 @@ export class OrderPersistenceArchiveService {
           customerName, customerPhone, userAddress, tableNumber,
           subtotal, discountAmount, couponCode, taxAmount, cgst, sgst,
           deliveryFee, totalAmount, franchiseId, branchId, orderData.cashierId || null,
-          cashierName, terminalId, notes, userId,
-          rawStatus === 'delivered' ? new Date() : null,
-          rawStatus === 'delivered' || rawStatus === 'cancelled' ? 'TERMINAL' : 'ACTIVE'
+          (rawStatus.toLowerCase() === 'delivered' || pgOrderStatus === 'DELIVERED') ? new Date() : null,
+          (rawStatus.toLowerCase() === 'delivered' || rawStatus.toLowerCase() === 'cancelled' || pgOrderStatus === 'DELIVERED' || pgOrderStatus === 'CANCELLED') ? 'TERMINAL' : 'ACTIVE'
         ]);
 
         // 2. Insert/Upsert line items deterministically (Requirement 1.A)

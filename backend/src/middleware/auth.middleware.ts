@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { adminAuth, adminDb } from '../config/firebase.js';
+import { query } from '../config/postgres.js';
 import { FranchiseScopeService, ScopeContext } from '../services/franchise/FranchiseScopeService.js';
 import { ApiSecurityMiddleware } from '../security/ApiSecurityMiddleware.js';
 import { sanitizeError, redactSensitiveData } from '../utils/logSanitizer.js';
@@ -83,17 +84,72 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
     // Resolve terminalId for POS cashier sessions
     let terminalId: string | undefined;
 
-    // Check system owner override
-    if (decodedToken.email?.toLowerCase() === 'olivepizzarjn@gmail.com' || decodedToken.email?.toLowerCase() === 'webhub2811@gmail.com') {
-      role = 'owner';
-    } else {
+    const emailLower = decodedToken.email ? decodedToken.email.toLowerCase().trim() : '';
+    let dbResolved = false;
+
+    // 1. Authoritative Database Indexed Lookup (PostgreSQL app_users & delivery_partners)
+    // Indexes: idx_app_users_lower_email, app_users_pkey, idx_delivery_partners_lower_email
+    try {
+      const pgUserRes = await query(
+        `SELECT id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active, metadata
+         FROM app_users 
+         WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) OR id = $2 
+         LIMIT 1`,
+        [emailLower, uid]
+      );
+      if (pgUserRes.rows.length > 0) {
+        const pgUser = pgUserRes.rows[0];
+        if (pgUser.is_active === false || pgUser.status === 'REVOKED' || pgUser.status === 'SUSPENDED') {
+          res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked in system database', code: 'ACCOUNT_REVOKED' });
+          return;
+        }
+        role = pgUser.role || role;
+        if (pgUser.franchise_id) franchiseId = pgUser.franchise_id;
+        if (pgUser.branch_id) branchId = pgUser.branch_id;
+        branchIds = branchId ? [branchId] : branchIds;
+        isActive = pgUser.is_active !== false;
+        dbResolved = true;
+      }
+    } catch (pgErr: any) {
+      console.warn('[verifyToken] PostgreSQL app_users indexed lookup notice:', pgErr.message);
+    }
+
+    // Check delivery_partners in database if not already resolved as staff or owner
+    if (!dbResolved || role === 'customer') {
+      try {
+        const dpRes = await query(
+          `SELECT id, name, phone, email, status, is_online, branch_id, franchise_id 
+           FROM delivery_partners 
+           WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) OR id = $2 
+           LIMIT 1`,
+          [emailLower, uid]
+        );
+        if (dpRes.rows.length > 0) {
+          const dp = dpRes.rows[0];
+          if (dp.status === 'REVOKED' || dp.status === 'TERMINATED') {
+            res.status(403).json({ error: 'Forbidden: Delivery partner account has been revoked', code: 'ACCOUNT_REVOKED' });
+            return;
+          }
+          if (dp.status === 'APPROVED' || dp.is_online === true) {
+            role = 'delivery_partner';
+            if (dp.branch_id) branchId = dp.branch_id;
+            if (dp.franchise_id) franchiseId = dp.franchise_id;
+            dbResolved = true;
+          }
+        }
+      } catch (dpErr: any) {
+        console.warn('[verifyToken] PostgreSQL delivery_partners lookup notice:', dpErr.message);
+      }
+    }
+
+    // Fallback to Firestore only if not found in PostgreSQL database
+    if (!dbResolved) {
       try {
         let userData: any = null;
-        const userDoc = await adminDb.collection('users').doc(uid).get();
-        if (userDoc.exists) {
+        const userDoc = await adminDb.collection('users').doc(uid).get().catch(() => null);
+        if (userDoc && userDoc.exists) {
           userData = userDoc.data()!;
-        } else if (decodedToken.email) {
-          const emailLower = decodedToken.email.toLowerCase().trim();
+        } else if (emailLower) {
           const q = await adminDb.collection('users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
           if (!q.empty) {
             userData = q.docs[0].data();
@@ -115,10 +171,15 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           // POS terminal binding — stored in Firestore user record for cashier role
           if (userData.terminalId) terminalId = userData.terminalId as string;
         }
+      } catch (fsErr: any) {
+        console.warn('[verifyToken] Firestore read fallback notice:', fsErr.message);
+      }
+    }
 
-        // Secondary fallback: if user role is still 'customer', check role-specific operational collections
-        if (role === 'customer' || !role) {
-          const emailLower = decodedToken.email ? decodedToken.email.toLowerCase().trim() : '';
+    // Secondary fallback: if user role is still 'customer' and not resolved in DB, check role-specific operational collections
+    if (!dbResolved && (role === 'customer' || !role)) {
+      try {
+        const emailLower = decodedToken.email ? decodedToken.email.toLowerCase().trim() : '';
 
           // Check restaurant_managers by UID and Email fallback
           let rmData: any = null;
@@ -223,7 +284,6 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
               }
             }
           }
-        }
       } catch (dbErr) {
         console.warn('[AuthMiddleware] Failed to read fallback role from Firestore:', dbErr);
       }

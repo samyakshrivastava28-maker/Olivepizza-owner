@@ -101,19 +101,23 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
 
     // ── 1. Server-Enforced Login Rate Limiter (Protection against brute-force) ──
     if (targetApp !== 'CUSTOMER') {
-      const rateStatus = await LoginRateLimiterService.checkLimit(userIdentifier, clientIp, rawDeviceId, userAgent);
-      if (!rateStatus.allowed) {
-        res.setHeader('Retry-After', String(rateStatus.retryAfterSeconds));
-        res.status(429).json({
-          success: false,
-          authorized: false,
-          code: 'AUTH_RATE_LIMITED',
-          message: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
-          reason: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
-          retryAfter: rateStatus.retryAfterSeconds,
-          retryAfterSeconds: rateStatus.retryAfterSeconds
-        });
-        return;
+      try {
+        const rateStatus = await LoginRateLimiterService.checkLimit(userIdentifier, clientIp, rawDeviceId, userAgent);
+        if (!rateStatus.allowed) {
+          res.setHeader('Retry-After', String(rateStatus.retryAfterSeconds));
+          res.status(429).json({
+            success: false,
+            authorized: false,
+            code: 'AUTH_RATE_LIMITED',
+            message: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
+            reason: rateStatus.message || 'Too many login attempts from this device. Please try again later.',
+            retryAfter: rateStatus.retryAfterSeconds,
+            retryAfterSeconds: rateStatus.retryAfterSeconds
+          });
+          return;
+        }
+      } catch (limiterErr: any) {
+        console.warn('[AuthorizeApp] Rate limiter check notice:', limiterErr.message);
       }
     }
 
@@ -129,16 +133,16 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
 
     if (!resolution.authorized) {
       if (targetApp !== 'CUSTOMER') {
-        await LoginRateLimiterService.recordAttempt(userIdentifier, clientIp, rawDeviceId, userAgent);
+        void LoginRateLimiterService.recordAttempt(userIdentifier, clientIp, rawDeviceId, userAgent).catch(() => 0);
       }
-      await AuthAuditService.logEvent({
+      void AuthAuditService.logEvent({
         eventType: 'APP_AUTHORIZE_DENIED',
         userId: user.uid,
         identifier: user.email,
         appTarget: targetApp,
         status: 'BLOCKED',
         metadata: { reason: resolution.reason, code: resolution.code }
-      });
+      }).catch(() => {});
 
       res.status(403).json({
         authorized: false,
@@ -151,15 +155,15 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     }
 
     if (targetApp !== 'CUSTOMER') {
-      await LoginRateLimiterService.recordSuccess(userIdentifier, clientIp, rawDeviceId, userAgent);
+      void LoginRateLimiterService.recordSuccess(userIdentifier, clientIp, rawDeviceId, userAgent).catch(() => {});
     }
-    await AuthAuditService.logEvent({
+    void AuthAuditService.logEvent({
       eventType: 'APP_AUTHORIZE_SUCCESS',
       userId: user.uid,
       identifier: user.email,
       appTarget: targetApp,
       status: 'SUCCESS'
-    });
+    }).catch(() => {});
 
     res.json({
       authorized: true,
