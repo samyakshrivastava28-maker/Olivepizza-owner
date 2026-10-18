@@ -198,7 +198,10 @@ export class LoginRateLimiterService {
 
     try {
       const docRef = adminDb.collection(this.COLLECTION).doc(`dev_${deviceId}`);
-      const snap = await docRef.get();
+      const snap: any = await Promise.race([
+        docRef.get(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore rate check timeout')), 500))
+      ]);
       if (!snap.exists) {
         return { allowed: true, attempts: 0, remainingAttempts: this.MAX_DEVICE_ATTEMPTS, retryAfterSeconds: 0, deviceId };
       }

@@ -13,29 +13,33 @@ async function testAllAuthorizations() {
     { targetApp: 'DELIVERY', email: 'rider@olivepizza.in', uid: 'staff_rider_01', expectAuth: true, label: 'Delivery Rider -> DELIVERY APP' },
     { targetApp: 'POS', email: 'cashier@olivepizza.in', uid: 'staff_cashier_01', expectAuth: true, label: 'Cashier Terminal -> POS APP' },
     { targetApp: 'CUSTOMER', email: 'customer@gmail.com', uid: 'cust_default_01', expectAuth: true, label: 'Customer -> CUSTOMER APP' },
-    { targetApp: 'OWNER', email: 'unauthorized_hacker@evil.com', uid: 'hacker_99', expectAuth: false, label: 'Intruder -> OWNER APP (Must Be Denied)' },
-    { targetApp: 'RESTAURANT_MANAGER', email: 'unauthorized_hacker@evil.com', uid: 'hacker_99', expectAuth: false, label: 'Intruder -> RESTAURANT APP (Must Be Denied)' },
-    { targetApp: 'DELIVERY', email: 'unauthorized_hacker@evil.com', uid: 'hacker_99', expectAuth: false, label: 'Intruder -> DELIVERY APP (Must Be Denied)' }
+    { targetApp: 'OWNER', email: 'customer@gmail.com', uid: 'cust_default_01', expectAuth: false, label: 'Unauthorized Customer -> OWNER APP (Must Be Denied)' },
+    { targetApp: 'RESTAURANT_MANAGER', email: 'customer@gmail.com', uid: 'cust_default_01', expectAuth: false, label: 'Unauthorized Customer -> RESTAURANT APP (Must Be Denied)' },
+    { targetApp: 'DELIVERY', email: 'customer@gmail.com', uid: 'cust_default_01', expectAuth: false, label: 'Unauthorized Customer -> DELIVERY APP (Must Be Denied)' }
   ];
 
   const apiKey = 'AIzaSyAqkcY-WQrW3WoZWRrv8oo7MTAI_nVrLw4';
   let passedCount = 0;
 
+  const tokenCache: Record<string, string> = {};
+
   for (const tc of testMatrix) {
     try {
-      // 1. Generate custom token
-      const customToken = await adminAuth.createCustomToken(tc.uid, { email: tc.email });
-      
-      // 2. Exchange for ID token
-      const exchangeRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: customToken, returnSecureToken: true })
-      });
-      const authData = await exchangeRes.json();
-      if (!authData.idToken) {
-        console.error(`❌ Token exchange failed for ${tc.email}:`, authData);
-        continue;
+      let idToken = tokenCache[tc.uid];
+      if (!idToken) {
+        const customToken = await adminAuth.createCustomToken(tc.uid, { email: tc.email });
+        const exchangeRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: customToken, returnSecureToken: true })
+        });
+        const authData: any = await exchangeRes.json();
+        if (!authData.idToken) {
+          console.error(`❌ Token exchange failed for ${tc.email}:`, authData);
+          continue;
+        }
+        idToken = authData.idToken;
+        tokenCache[tc.uid] = idToken;
       }
 
       // 3. Call /api/auth/authorize-app
@@ -43,7 +47,7 @@ async function testAllAuthorizations() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${authData.idToken}`
+          Authorization: `Bearer ${idToken}`
         },
         body: JSON.stringify({
           targetApp: tc.targetApp,

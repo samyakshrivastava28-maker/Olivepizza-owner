@@ -468,8 +468,15 @@ export class FranchiseAccessService {
     const phoneWithPlus91 = cleanPhone.length === 10 ? `+91${cleanPhone}` : (cleanPhone.length === 12 && cleanPhone.startsWith('91') ? `+${cleanPhone}` : rawPhone);
     const phone10Digit = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : '';
 
+    const fastFirestore = async <T>(promise: Promise<T>, fallback: T): Promise<T> => {
+      return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 400))
+      ]).catch(() => fallback);
+    };
+
     let userData: any = null;
-    let userSnap = await adminDb.collection('users').doc(uid).get().catch(() => null);
+    let userSnap = await fastFirestore(adminDb.collection('users').doc(uid).get(), null);
     if (userSnap && userSnap.exists) {
       userData = userSnap.data();
     }
@@ -479,7 +486,7 @@ export class FranchiseAccessService {
     if (!hasPrivilegedRole) {
       // Try secondary lookup in users collection by email
       if (emailLower) {
-        const qEmail = await adminDb.collection('users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+        const qEmail = await fastFirestore(adminDb.collection('users').where('email', '==', emailLower).limit(1).get(), { empty: true, docs: [] } as any);
         if (!qEmail.empty && qEmail.docs[0].id !== uid) {
           const matchedUser = qEmail.docs[0].data();
           if (matchedUser.role && matchedUser.role !== 'customer') {
@@ -491,7 +498,7 @@ export class FranchiseAccessService {
       if (!userData?.role || userData.role === 'customer') {
         const phoneQueries = [phoneWithPlus91, phone10Digit].filter(Boolean);
         for (const p of phoneQueries) {
-          const qPhone = await adminDb.collection('users').where('phoneNumber', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          const qPhone = await fastFirestore(adminDb.collection('users').where('phoneNumber', '==', p).limit(1).get(), { empty: true, docs: [] } as any);
           if (!qPhone.empty) {
             const matchedUser = qPhone.docs[0].data();
             if (matchedUser.role && matchedUser.role !== 'customer') {
@@ -503,8 +510,6 @@ export class FranchiseAccessService {
       }
     }
 
-
-
     // 4. Check if account is suspended / deactivated
     if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended' || userData.status === 'SUSPENDED' || userData.status === 'REVOKED')) {
       return {
@@ -515,12 +520,11 @@ export class FranchiseAccessService {
     }
 
     // 5. Look up franchise assignments from franchises collection directly
-    // This handles cases where an owner entered the manager's email in the franchise modal
     let assignedFranchiseDoc: any = null;
     let assignedRoleFromFranchise = '';
 
     if (emailLower) {
-      const bSnap = await adminDb.collection('franchises').get().catch(() => ({ docs: [] } as any));
+      const bSnap = await fastFirestore(adminDb.collection('franchises').get(), { docs: [] } as any);
       for (const d of bSnap.docs) {
         const b = d.data();
         if (b.restaurantManagerEmail && b.restaurantManagerEmail.toLowerCase().trim() === emailLower) {
@@ -536,7 +540,7 @@ export class FranchiseAccessService {
       }
 
       if (!assignedFranchiseDoc) {
-        const feSnap = await adminDb.collection('franchise_entities').get().catch(() => ({ docs: [] } as any));
+        const feSnap = await fastFirestore(adminDb.collection('franchise_entities').get(), { docs: [] } as any);
         for (const d of feSnap.docs) {
           const fe = d.data();
           if (fe.restaurantManagerEmail && fe.restaurantManagerEmail.toLowerCase().trim() === emailLower) {
