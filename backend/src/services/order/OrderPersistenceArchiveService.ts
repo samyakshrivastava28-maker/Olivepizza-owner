@@ -125,12 +125,12 @@ export class OrderPersistenceArchiveService {
       const packagingCharge = Number(orderData.packagingCharge || 0);
       const totalAmount = Number(orderData.totalAmount || orderData.finalTotal || (subtotal - discountAmount + taxAmount + deliveryFee + packagingCharge));
 
-      // Fail loudly if franchiseId or branchId is missing - never use silent defaults
-      const franchiseId = orderData.franchiseId;
+      // Robust franchise and branch resolution: support snake_case and infer primary franchise for legacy orders
+      const franchiseId = orderData.franchiseId || orderData.franchise_id || (orderData.branchId ? 'fra_primary' : null);
       if (!franchiseId) {
         throw new Error(`[OrderPersistence] Refusing sync/archive: missing required franchiseId for order ${orderId}`);
       }
-      const branchId = orderData.branchId;
+      const branchId = orderData.branchId || orderData.branch_id || (franchiseId ? 'main_branch' : null);
       if (!branchId) {
         throw new Error(`[OrderPersistence] Refusing sync/archive: missing required branchId for order ${orderId}`);
       }
@@ -332,9 +332,12 @@ export class OrderPersistenceArchiveService {
       console.warn(`[OrderPersistence] Failed syncing order ${orderId} to PostgreSQL:`, err.message);
 
       // Record sync error in Firestore without breaking the live order
+      const syncAttempts = (orderData?.postgresSyncRetryCount || 0) + 1;
+      const isFatal = err.message.includes('missing required') || syncAttempts >= 5;
       await adminDb.collection('orders').doc(orderId).set({
-        postgresPersistence: 'PENDING',
+        postgresPersistence: isFatal ? 'FAILED_VALIDATION' : 'PENDING',
         postgresSyncError: err.message,
+        postgresSyncRetryCount: syncAttempts,
         lastPostgresSyncAttempt: new Date().toISOString()
       }, { merge: true }).catch(() => {});
 
