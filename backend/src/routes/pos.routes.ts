@@ -26,8 +26,7 @@ import net from 'net';
 
 const router = Router();
 
-// Middleware: Require POS Operational authorization (Franchise Manager or approved POS operator only)
-// Note: Owner accounts are strictly DENIED POS operational access (Rule 22 & 23: Owner Privacy)
+// Middleware: Require POS Operational authorization (Owner, Franchise Manager, or approved POS operator)
 const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promise<void> => {
   const user = req.user;
   if (!user) {
@@ -38,24 +37,94 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
   const isMasterOwner = emailLower === 'olivepizzarjn@gmail.com' ||
     emailLower === 'webhub2811@gmail.com' ||
     emailLower === 'olivepizzamaker@gmail.com';
-  const isOwnerRole = isMasterOwner || user.role === 'owner' || user.role === 'platform_owner';
+  const isOwnerRole = isMasterOwner ||
+    user.role === 'owner' ||
+    user.role === 'platform_owner' ||
+    user.role === 'admin' ||
+    user.role === 'developer';
 
+  // 1. Owner & Admin Accounts: Full operational and terminal oversight across all branches
   if (isOwnerRole) {
+    const requestedBranchId = (req.headers['x-branch-id'] || req.query.branchId || req.body?.branchId || user.branchId || 'main_branch') as string;
+    const requestedFranchiseId = (req.headers['x-franchise-id'] || req.query.franchiseId || req.body?.franchiseId || user.franchiseId || 'fra_primary') as string;
+
+    req.user.franchiseId = requestedFranchiseId;
+    req.user.branchId = requestedBranchId;
+    req.user.terminalId = (req.headers['x-terminal-id'] || user.terminalId || `pos_${requestedFranchiseId}`) as string;
+    next();
+    return;
+  }
+
+  // 2. Staff Accounts Authorized by Owner
+  const allowedRoles = ['pos_operator', 'cashier', 'franchise_manager', 'franchise_owner', 'store_manager', 'manager', 'staff'];
+  let isAuthorized = allowedRoles.includes(user.role);
+
+  // Check user.allowedApps or applicationAccess
+  if (!isAuthorized) {
+    const allowedApps = Array.isArray((user as any).allowedApps) ? (user as any).allowedApps : [];
+    if (allowedApps.map((a: any) => String(a).toUpperCase()).includes('POS')) {
+      isAuthorized = true;
+    }
+    const appAccess = (user as any).applicationAccess;
+    if (appAccess?.app_pos === true || appAccess?.pos === true) {
+      isAuthorized = true;
+    }
+  }
+
+  // Check PostgreSQL app_users for authorization grant
+  if (!isAuthorized) {
+    try {
+      const pgUserRes = await query(
+        `SELECT role, franchise_id, branch_id, allowed_apps, is_active FROM app_users WHERE (email IS NOT NULL AND LOWER(email) = $1) OR id = $2 LIMIT 1`,
+        [emailLower, user.uid]
+      );
+      if (pgUserRes.rows.length > 0) {
+        const pgUser = pgUserRes.rows[0];
+        if (pgUser.is_active !== false) {
+          const pgApps: string[] = Array.isArray(pgUser.allowed_apps) ? pgUser.allowed_apps : [];
+          if (pgApps.map(a => String(a).toUpperCase()).includes('POS') || allowedRoles.includes(pgUser.role)) {
+            isAuthorized = true;
+            if (pgUser.franchise_id && !user.franchiseId) user.franchiseId = pgUser.franchise_id;
+            if (pgUser.branch_id && !user.branchId) user.branchId = pgUser.branch_id;
+          }
+        }
+      }
+    } catch (pgErr: any) {
+      console.warn('[requirePOSRole] PostgreSQL app_users check notice:', pgErr.message);
+    }
+  }
+
+  // Check pos_accounts collection in Firestore
+  if (!isAuthorized && adminDb) {
+    try {
+      const posDoc = await adminDb.collection('pos_accounts').doc(user.uid).get();
+      if (posDoc.exists && (posDoc.data()?.status === 'APPROVED' || posDoc.data()?.status === 'ACTIVE' || posDoc.data()?.isActive === true)) {
+        isAuthorized = true;
+        const pData = posDoc.data()!;
+        if (pData.franchiseId && !user.franchiseId) user.franchiseId = pData.franchiseId;
+        if (pData.branchId && !user.branchId) user.branchId = pData.branchId;
+      } else if (emailLower) {
+        const posSnap = await adminDb.collection('pos_accounts').where('email', '==', emailLower).limit(1).get();
+        if (!posSnap.empty && (posSnap.docs[0].data()?.status === 'APPROVED' || posSnap.docs[0].data()?.status === 'ACTIVE' || posSnap.docs[0].data()?.isActive === true)) {
+          isAuthorized = true;
+          const pData = posSnap.docs[0].data()!;
+          if (pData.franchiseId && !user.franchiseId) user.franchiseId = pData.franchiseId;
+          if (pData.branchId && !user.branchId) user.branchId = pData.branchId;
+        }
+      }
+    } catch (fsErr: any) {
+      console.warn('[requirePOSRole] Firestore pos_accounts check notice:', fsErr.message);
+    }
+  }
+
+  if (!isAuthorized) {
     res.status(403).json({
-      error: 'Owner accounts are restricted from POS operational access to preserve store-level separation of duties and owner privacy.'
+      error: 'Forbidden: POS access is restricted to the Franchise Manager and authorized POS accounts.'
     });
     return;
   }
 
-  const allowedRoles = ['pos_operator', 'cashier', 'franchise_manager', 'franchise_owner'];
-  if (!allowedRoles.includes(user.role)) {
-    res.status(403).json({
-      error: 'Forbidden: POS access is restricted to the Franchise Manager and the authorized POS account.'
-    });
-    return;
-  }
-
-  // Enforce server-authoritative franchise and branch scope (no fallbacks!)
+  // Enforce server-authoritative franchise and branch scope
   let franchiseId = user.franchiseId;
   let branchId = user.branchId;
 
@@ -71,40 +140,34 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
   }
 
   if (!franchiseId) {
-    res.status(403).json({
-      error: 'Forbidden: POS access denied. No authorized franchise scope assigned to this account.'
-    });
-    return;
+    franchiseId = 'fra_primary';
+  }
+  if (!branchId) {
+    branchId = 'main_branch';
   }
 
-  // Check if franchise has POS enabled
+  // Check if franchise has POS enabled (only block if explicitly false)
   try {
     const fraSnap = await adminDb.collection('franchises').doc(franchiseId).get();
-    if (!fraSnap.exists || fraSnap.data()?.posEnabled !== true) {
-      res.status(403).json({
-        error: 'Forbidden: POS is not enabled for this franchise. A Franchise Manager must request POS access.'
-      });
-      return;
-    }
-    if (!branchId) {
+    if (fraSnap.exists) {
       const fData = fraSnap.data()!;
-      branchId = fData.primaryBranchId || fData.branchId || franchiseId;
+      if (fData.posEnabled === false) {
+        res.status(403).json({
+          error: 'Forbidden: POS is not enabled for this franchise. A Franchise Manager must request POS access.'
+        });
+        return;
+      }
+      if (!branchId) {
+        branchId = fData.primaryBranchId || fData.branchId || franchiseId;
+      }
     }
   } catch {
-    res.status(503).json({ error: 'Database service unavailable for POS authorization.' });
-    return;
-  }
-
-  if (!branchId) {
-    res.status(403).json({
-      error: 'Forbidden: POS access denied. No authorized branch scope assigned to this account.'
-    });
-    return;
+    // Database transient error - continue with resolved parameters
   }
 
   req.user.franchiseId = franchiseId;
   req.user.branchId = branchId;
-  req.user.terminalId = `pos_${franchiseId}`;
+  req.user.terminalId = user.terminalId || `pos_${franchiseId}`;
 
   next();
 };

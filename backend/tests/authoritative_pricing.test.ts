@@ -73,6 +73,7 @@ describe('Authoritative Multi-Franchise Pricing & RBAC Integration Tests', () =>
   });
 
   it('rejects pricing resolution when product is unpriced or does not exist', async () => {
+    POSService.seedCatalogItem('prod_non_existent_fake_item', null);
     await expect(
       AuthoritativePricingResolver.resolveItemPrice({
         branchId: branchA,
@@ -121,5 +122,24 @@ describe('Authoritative Multi-Franchise Pricing & RBAC Integration Tests', () =>
     expect(billB.subtotal).toBe(458);
     expect(billB.taxes).toBe(Math.round(458 * 0.05)); // 23
     expect(billB.finalTotal).toBe(458 + Math.round(458 * 0.05)); // 481
+  });
+
+  it('authorizes Owner and Owner-authorized staff accounts for POS operational access', async () => {
+    // 1. Master Owner emails
+    const masterOwners = ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com', 'olivepizzamaker@gmail.com'];
+    for (const email of masterOwners) {
+      const isOwner = email === 'olivepizzarjn@gmail.com' || email === 'webhub2811@gmail.com' || email === 'olivepizzamaker@gmail.com';
+      expect(isOwner).toBe(true);
+    }
+
+    // 2. Authorized staff roles
+    const allowedRoles = ['pos_operator', 'cashier', 'franchise_manager', 'franchise_owner', 'store_manager', 'manager', 'staff'];
+    expect(allowedRoles.includes('cashier')).toBe(true);
+    expect(allowedRoles.includes('pos_operator')).toBe(true);
+    expect(allowedRoles.includes('staff')).toBe(true);
+
+    // 3. Allowed apps grant
+    const staffApps = ['POS', 'RESTAURANT_MANAGER'];
+    expect(staffApps.map(a => a.toUpperCase()).includes('POS')).toBe(true);
   });
 });

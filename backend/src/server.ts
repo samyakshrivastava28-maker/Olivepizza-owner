@@ -1,4 +1,5 @@
 import express from 'express';
+import cors from 'cors';
 import dotenv from 'dotenv';
 import apiApp from './app';
 import { DataRetentionJob } from './jobs/DataRetentionJob';
@@ -28,6 +29,8 @@ validateEnvironmentVariables();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+app.use(cors());
 
 // Enable trusted reverse proxy (NGINX / Cloudflare)
 app.set('trust proxy', 1);

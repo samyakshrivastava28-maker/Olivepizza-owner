@@ -54,12 +54,6 @@ export class AuthoritativePricingResolver {
     let masterItem: any = null;
     try {
       masterItem = await POSService.getCatalogItem(productId);
-      if (!masterItem) {
-        const pDoc = await adminDb.collection('products').doc(productId).get();
-        if (pDoc.exists) {
-          masterItem = pDoc.data();
-        }
-      }
     } catch (e: any) {
       console.warn(`[AuthoritativePricingResolver] Master catalog lookup notice for ${productId}:`, e.message);
     }
