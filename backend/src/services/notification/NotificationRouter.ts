@@ -80,14 +80,13 @@ export class NotificationRouter {
     const role = (recipient.role || '').toLowerCase().trim();
     const app = (recipient.appTarget || '').toUpperCase().trim();
     const email = (recipient.email || '').toLowerCase().trim();
-    const isOwnerEmail = ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com', 'olivepizzamaker@gmail.com'].includes(email);
 
-    // Rule 1: Master Owner accounts must NEVER receive operational kitchen ringing alarms
+    // Rule 1: Non-restaurant target apps (Owner Command Center, Customer, Franchise, Delivery) must NEVER receive operational kitchen ringing alarms
     if (eventType === 'RESTAURANT_NEW_ORDER_ALARM') {
-      if (isOwnerEmail || role === 'owner' || role === 'platform_owner' || app === 'OWNER') {
+      if (app === 'OWNER' || (role === 'owner' && app !== 'RESTAURANT' && app !== 'RESTAURANT_MANAGER')) {
         return {
           allowed: false,
-          reason: 'Owner accounts are strictly isolated from store-level operational kitchen alarms.'
+          reason: 'Owner Command Center app is isolated from store-level operational kitchen alarms.'
         };
       }
 
@@ -123,8 +122,8 @@ export class NotificationRouter {
         };
       }
 
-      // Rule 6: Target Role MUST be authorized restaurant operational staff
-      const permittedStaffRoles = ['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef'];
+      // Rule 6: Target Role MUST be authorized restaurant operational staff or administrator
+      const permittedStaffRoles = ['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef', 'owner', 'admin'];
       if (!permittedStaffRoles.includes(role)) {
         return {
           allowed: false,
@@ -208,6 +207,34 @@ export class NotificationRouter {
   }
 
   /**
+   * Helper to verify if the restaurant branch is currently open for business.
+   */
+  public static async checkBranchOperatingStatus(branchId: string): Promise<{ open: boolean; reason: string }> {
+    try {
+      const { adminDb: db } = await import('../../config/firebase.js');
+      const fetchPromise = (async () => {
+        const doc = await db.collection('restaurant_settings').doc(branchId).get();
+        if (!doc.exists) {
+          return { open: true, reason: 'Default open status' };
+        }
+        const data = doc.data() || {};
+        const { computeEffectiveStatus } = await import('../../routes/restaurant.routes.js');
+        const status = computeEffectiveStatus(data);
+        return { open: status.effectiveOpen, reason: status.effectiveReason };
+      })();
+
+      const timeoutPromise = new Promise<{ open: boolean; reason: string }>((resolve) =>
+        setTimeout(() => resolve({ open: true, reason: 'Timeout protection fallback' }), 2000)
+      );
+
+      return await Promise.race([fetchPromise, timeoutPromise]);
+    } catch (err: any) {
+      console.warn(`[NotificationRouter] Could not verify branch operating status for ${branchId}:`, err?.message);
+      return { open: true, reason: 'Operating status check bypassed due to lookup failure' };
+    }
+  }
+
+  /**
    * Authoritatively routes an order event across the ecosystem.
    */
   public static async routeOrderEvent(
@@ -221,6 +248,13 @@ export class NotificationRouter {
       if (!cleanBranchId) {
         console.warn(`[NotificationRouter] Cannot route RESTAURANT_NEW_ORDER_ALARM: order ${order.orderId} missing authoritative branchId.`);
         return { dispatchedCount: 0, targetUids: [], status: 'MISSING_BRANCH_ID' };
+      }
+
+      // 0. Check operational status: if CLOSED, suppress active kitchen alarm
+      const branchStatus = await this.checkBranchOperatingStatus(cleanBranchId);
+      if (!branchStatus.open) {
+        console.log(`[NotificationRouter] Branch "${cleanBranchId}" is currently CLOSED (${branchStatus.reason}). Suppressing active-order ringing alarm.`);
+        return { dispatchedCount: 0, targetUids: [], status: 'BRANCH_CLOSED' };
       }
 
       // 1. Resolve staff strictly bound to this franchise and branch
@@ -321,6 +355,26 @@ export class NotificationRouter {
     if (eventType === 'DELIVERY_ASSIGNED') {
       if (!order.deliveryPartnerId) {
         return { dispatchedCount: 0, targetUids: [], status: 'NO_ASSIGNED_RIDER' };
+      }
+
+      // Check rider online status from PostgreSQL delivery_partners
+      try {
+        const { pgPool } = await import('../../config/postgres.js');
+        const partnerRes = await pgPool.query(
+          `SELECT id, is_online, status FROM delivery_partners 
+           WHERE id = $1 OR email = $2 OR phone = $3 
+           LIMIT 1`,
+          [order.deliveryPartnerId, order.deliveryPartnerId, order.deliveryPartnerId]
+        );
+        if (partnerRes.rows.length > 0) {
+          const partner = partnerRes.rows[0];
+          if (partner.status !== 'APPROVED' || partner.is_online !== true) {
+            console.log(`[NotificationRouter] Delivery partner ${order.deliveryPartnerId} is OFFLINE or unapproved (status=${partner.status}, is_online=${partner.is_online}). Suppressing assignment alert.`);
+            return { dispatchedCount: 0, targetUids: [], status: 'PARTNER_OFFLINE' };
+          }
+        }
+      } catch (dpErr: any) {
+        console.warn(`[NotificationRouter] Error verifying delivery partner status:`, dpErr.message);
       }
 
       // Pre-validate delivery partner recipient permissions

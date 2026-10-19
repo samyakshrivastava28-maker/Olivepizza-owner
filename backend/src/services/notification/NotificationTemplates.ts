@@ -607,19 +607,8 @@ export class RestaurantTemplates {
       ? `💵 Payment: CASH ON DELIVERY (${paymentStatus}) • CASH TO COLLECT: ₹${cashToCollect}`
       : `💳 Payment: ${(payload.paymentMethod || 'ONLINE').toUpperCase()} (${paymentStatus}) • Amount: ₹${payload.totalAmount}`;
 
-    const bodyLines = [
-      `📦 Order Type: ${orderTypeLabel}${payload.permanentBillNo ? ` (Bill #${payload.permanentBillNo})` : ''}`,
-      customerLine,
-      `Items (${itemStrings.length}):\n${itemStrings.join('\n')}`,
-      finParts.length > 0 ? finParts.join(' | ') : '',
-      `Total: ₹${payload.totalAmount}`,
-      paymentLine,
-      payload.deliveryAddress ? `📍 Address:\n${payload.deliveryAddress}` : '',
-      payload.deliveryInstructions ? `📝 Instructions: "${payload.deliveryInstructions}"` : '',
-      payload.customerNotes ? `💬 Notes: "${payload.customerNotes}"` : '',
-    ].filter(Boolean);
-
-    const body = bodyLines.join('\n\n');
+    // Lock-screen safe notification body: customer phone number and home address are kept in the data payload
+    const safeBody = `${itemStrings.length} item(s) • ${orderTypeLabel}${payload.permanentBillNo ? ` • Bill #${payload.permanentBillNo}` : ''}. Tap to review and accept order.`;
 
     // Build complete serialized order entity for instant in-app modal rendering without network roundtrips
     const fullOrderData = {
@@ -655,7 +644,7 @@ export class RestaurantTemplates {
       status: 'pending'
     };
 
-    return buildPayload(title, body, {
+    return buildPayload(title, safeBody, {
       tag: `order_restaurant_${orderId}`,
       channelId: ANDROID_CHANNELS.ORDER_NEW,
       orderId,
@@ -922,17 +911,10 @@ export class DeliveryTemplates {
       ? payload.items.map(it => typeof it === 'string' ? `• ${it}` : `• ${it.quantity || 1}× ${it.name}`).join('\n')
       : '';
 
-    const body = [
-      `Customer: ${payload.customerName} (${payload.customerPhone})`,
-      itemsFormatted ? `Items:\n${itemsFormatted}` : '',
-      `Total: ₹${payload.totalAmount}`,
-      isCod ? `💵 Collect Cash: ₹${cashToCollect}` : `💳 Payment: ${(payload.paymentMethod || 'ONLINE').toUpperCase()} (${paymentStatus})`,
-      `📍 Delivery Address:\n${payload.deliveryAddress}`,
-      payload.deliveryInstructions ? `📝 Instructions: "${payload.deliveryInstructions}"` : '',
-      `⏱ Distance & ETA: ${payload.distance} • ${payload.eta}`,
-    ].filter(Boolean).join('\n\n');
+    // Lock-screen safe notification body: customer phone number and home address are kept in the data payload
+    const safeBody = `New delivery task #${payload.orderNumber} • ${payload.distance} • ${payload.eta}. Tap to view full customer and route details.`;
 
-    return buildPayload(title, body, {
+    return buildPayload(title, safeBody, {
       tag: `order_delivery_${orderId}`,
       channelId: ANDROID_CHANNELS.DELIVERY_ASSIGNMENT,
       orderId,

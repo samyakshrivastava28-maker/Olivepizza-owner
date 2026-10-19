@@ -847,6 +847,168 @@ router.post('/action', verifyToken, async (req: AuthRequest, res: Response): Pro
 
 // =============================================================================
 // POST /notifications/token
+/**
+ * Authoritatively determines the safe app name and role by querying PostgreSQL app_users
+ * using indexed lookup on user ID and email.
+ */
+async function resolveAuthorizedAppAndRole(
+  userId: string,
+  email: string | undefined,
+  requestedApp: string | undefined,
+  requestedRole: string | undefined
+): Promise<{
+  safeAppName: string;
+  effectiveRole: string;
+  branchId: string | null;
+  franchiseId: string | null;
+}> {
+  const rawApp = (requestedApp || '').toLowerCase().trim();
+  let candidateApp = rawApp;
+  if (candidateApp === 'restaurant_manager') candidateApp = 'restaurant';
+  if (candidateApp === 'delivery_partner') candidateApp = 'delivery';
+  if (candidateApp === 'franchise_manager') candidateApp = 'franchise';
+
+  const cleanEmail = (email || '').toLowerCase().trim();
+
+  try {
+    const userRes = await pgPool.query(
+      `SELECT id, email, role, allowed_apps, branch_id, franchise_id, is_active 
+       FROM app_users 
+       WHERE id = $1 OR (email IS NOT NULL AND email = $2)
+       LIMIT 1`,
+      [userId, cleanEmail]
+    );
+
+    if (userRes.rows.length > 0) {
+      const dbUser = userRes.rows[0];
+      if (dbUser.is_active === false) {
+        return { safeAppName: 'customer', effectiveRole: 'customer', branchId: null, franchiseId: null };
+      }
+
+      const allowedApps: string[] = Array.isArray(dbUser.allowed_apps)
+        ? dbUser.allowed_apps.map((a: string) => String(a).toUpperCase().trim())
+        : [];
+      const dbRole = (dbUser.role || '').toLowerCase().trim();
+      const isOwner = dbRole === 'owner' || dbRole === 'platform_owner' || allowedApps.includes('OWNER');
+
+      // 1. Restaurant Manager
+      if (candidateApp === 'restaurant') {
+        const isAllowedRestaurant = isOwner ||
+          allowedApps.includes('RESTAURANT_MANAGER') ||
+          allowedApps.includes('RESTAURANT') ||
+          ['restaurant_manager', 'manager', 'kitchen_staff', 'chef', 'cashier'].includes(dbRole);
+
+        if (isAllowedRestaurant) {
+          return {
+            safeAppName: 'restaurant',
+            effectiveRole: requestedRole || (dbRole === 'restaurant_manager' ? dbRole : 'restaurant_manager'),
+            branchId: dbUser.branch_id || 'main_branch',
+            franchiseId: dbUser.franchise_id || 'fra_rajnandgaon'
+          };
+        }
+      }
+
+      // 2. POS
+      if (candidateApp === 'pos') {
+        const isAllowedPos = isOwner ||
+          allowedApps.includes('POS') ||
+          ['cashier', 'pos_operator', 'restaurant_manager', 'manager'].includes(dbRole);
+
+        if (isAllowedPos) {
+          return {
+            safeAppName: 'pos',
+            effectiveRole: requestedRole || 'cashier',
+            branchId: dbUser.branch_id || 'main_branch',
+            franchiseId: dbUser.franchise_id || 'fra_rajnandgaon'
+          };
+        }
+      }
+
+      // 3. Delivery
+      if (candidateApp === 'delivery') {
+        const isAllowedDelivery = isOwner ||
+          allowedApps.includes('DELIVERY') ||
+          dbRole === 'delivery_partner' || dbRole === 'rider';
+
+        if (isAllowedDelivery) {
+          return {
+            safeAppName: 'delivery',
+            effectiveRole: 'delivery_partner',
+            branchId: dbUser.branch_id || 'main_branch',
+            franchiseId: dbUser.franchise_id || 'fra_rajnandgaon'
+          };
+        }
+
+        // Also check delivery_partners table
+        const dpCheck = await pgPool.query(
+          `SELECT id, branch_id, franchise_id, status FROM delivery_partners 
+           WHERE id = $1 OR (email IS NOT NULL AND email = $2) 
+           LIMIT 1`,
+          [userId, cleanEmail]
+        );
+        if (dpCheck.rows.length > 0 && dpCheck.rows[0].status === 'APPROVED') {
+          return {
+            safeAppName: 'delivery',
+            effectiveRole: 'delivery_partner',
+            branchId: dpCheck.rows[0].branch_id || 'main_branch',
+            franchiseId: dpCheck.rows[0].franchise_id || 'fra_rajnandgaon'
+          };
+        }
+      }
+
+      // 4. Franchise
+      if (candidateApp === 'franchise') {
+        const isAllowedFranchise = isOwner ||
+          allowedApps.includes('FRANCHISE_MANAGER') ||
+          allowedApps.includes('FRANCHISE') ||
+          ['franchise_manager', 'franchise_owner'].includes(dbRole);
+
+        if (isAllowedFranchise) {
+          return {
+            safeAppName: 'franchise',
+            effectiveRole: requestedRole || (dbRole === 'franchise_manager' ? dbRole : 'franchise_manager'),
+            branchId: dbUser.branch_id || null,
+            franchiseId: dbUser.franchise_id || 'fra_rajnandgaon'
+          };
+        }
+      }
+
+      // 5. Owner
+      if (candidateApp === 'owner') {
+        if (isOwner) {
+          return {
+            safeAppName: 'owner',
+            effectiveRole: 'owner',
+            branchId: null,
+            franchiseId: null
+          };
+        }
+      }
+
+      // If user is owner running an unspecified app
+      if (isOwner && !candidateApp) {
+        return {
+          safeAppName: 'owner',
+          effectiveRole: 'owner',
+          branchId: null,
+          franchiseId: null
+        };
+      }
+    }
+  } catch (err: any) {
+    console.warn('[NotificationRoutes] Database user resolution error:', err?.message);
+  }
+
+  return {
+    safeAppName: 'customer',
+    effectiveRole: 'customer',
+    branchId: null,
+    franchiseId: null
+  };
+}
+
+// =============================================================================
+// POST /notifications/token — Register FCM Token (Role & App Bound)
 // =============================================================================
 router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -859,45 +1021,15 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       return;
     }
 
-    const OWNER_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
-    const OWNER_ROLES = new Set(['owner', 'platform_owner']);
-    const userEmail = (user.email || '').toLowerCase().trim();
-    const userRole = (user.role || '').toLowerCase().trim();
-    const isOwnerIdentity = OWNER_ROLES.has(userRole) || OWNER_EMAILS.has(userEmail);
+    const resolved = await resolveAuthorizedAppAndRole(
+      userId,
+      user.email,
+      appName,
+      req.body.role || user.role
+    );
 
-    const rawApp = (appName || '').toLowerCase().trim();
-    let safeAppName = rawApp;
-    if (safeAppName === 'restaurant_manager') safeAppName = 'restaurant';
-    if (safeAppName === 'delivery_partner') safeAppName = 'delivery';
-    if (safeAppName === 'franchise_manager') safeAppName = 'franchise';
-
-    let effectiveRole: string;
-
-    if (isOwnerIdentity && safeAppName !== 'delivery' && safeAppName !== 'customer') {
-      // 🚨 HARD ISOLATION: Owner devices using Owner app register as 'owner'
-      safeAppName = 'owner';
-      effectiveRole = 'owner';
-    } else {
-      const operationalApps = ['pos', 'restaurant', 'franchise', 'delivery'];
-      if (!safeAppName) {
-        safeAppName = 'customer';
-      }
-      if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer') && !req.body.role) {
-        if (safeAppName !== 'delivery' || !isOwnerIdentity) {
-          safeAppName = 'customer';
-        }
-      }
-
-      effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || (safeAppName === 'delivery' && isOwnerIdentity ? 'delivery_partner' : user.role) || 'customer');
-      const RESTAURANT_STAFF_ROLES = new Set(['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef']);
-      if ((safeAppName === 'restaurant' || RESTAURANT_STAFF_ROLES.has(effectiveRole)) && !RESTAURANT_STAFF_ROLES.has(user.role)) {
-        safeAppName = 'customer';
-        effectiveRole = 'customer';
-      }
-    }
-
-    const effectiveBranchId = user.branchId || (isOwnerIdentity ? null : req.body.branchId) || null;
-    const effectiveFranchiseId = user.franchiseId || (isOwnerIdentity ? null : req.body.franchiseId) || null;
+    const effectiveBranchId = user.branchId || req.body.branchId || resolved.branchId;
+    const effectiveFranchiseId = user.franchiseId || req.body.franchiseId || resolved.franchiseId;
 
     await notificationQueue.registerToken(userId, token, {
       oldToken,
@@ -906,13 +1038,13 @@ router.post('/token', verifyToken, async (req: AuthRequest, res: Response): Prom
       platform,
       browser,
       appVersion,
-      appName: safeAppName,
-      role: effectiveRole,
-      franchiseId: effectiveFranchiseId,
-      branchId: effectiveBranchId,
+      appName: resolved.safeAppName,
+      role: resolved.effectiveRole,
+      franchiseId: effectiveFranchiseId || undefined,
+      branchId: effectiveBranchId || undefined,
       terminalId: user.terminalId || req.body.terminalId
     });
-    res.json({ success: true });
+    res.json({ success: true, appName: resolved.safeAppName, role: resolved.effectiveRole });
   } catch (error: any) {
     console.error('[NotificationRoutes] Token registration error:', error);
     res.status(500).json({ error: error.message });
@@ -931,43 +1063,15 @@ router.post('/register-token', verifyToken, async (req: AuthRequest, res: Respon
       return;
     }
 
-    const OWNER_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
-    const OWNER_ROLES = new Set(['owner', 'platform_owner']);
-    const userEmail = (user.email || '').toLowerCase().trim();
-    const userRole = (user.role || '').toLowerCase().trim();
-    const isOwnerIdentity = OWNER_ROLES.has(userRole) || OWNER_EMAILS.has(userEmail);
+    const resolved = await resolveAuthorizedAppAndRole(
+      userId,
+      user.email,
+      appName,
+      req.body.role || user.role
+    );
 
-    const rawApp = (appName || '').toLowerCase().trim();
-    let safeAppName = rawApp;
-    if (safeAppName === 'restaurant_manager') safeAppName = 'restaurant';
-    if (safeAppName === 'delivery_partner') safeAppName = 'delivery';
-    if (safeAppName === 'franchise_manager') safeAppName = 'franchise';
-
-    let effectiveRole: string;
-
-    if (isOwnerIdentity) {
-      // 🚨 HARD ISOLATION: Owner devices must ONLY ever register as 'owner'
-      safeAppName = 'owner';
-      effectiveRole = 'owner';
-    } else {
-      const operationalApps = ['pos', 'restaurant', 'franchise', 'delivery'];
-      if (!safeAppName) {
-        safeAppName = 'customer';
-      }
-      if (operationalApps.includes(safeAppName) && (!user.role || user.role === 'customer') && !req.body.role) {
-        safeAppName = 'customer';
-      }
-
-      effectiveRole = (user.role && user.role !== 'customer') ? user.role : (req.body.role || user.role || 'customer');
-      const RESTAURANT_STAFF_ROLES = new Set(['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef']);
-      if ((safeAppName === 'restaurant' || RESTAURANT_STAFF_ROLES.has(effectiveRole)) && !RESTAURANT_STAFF_ROLES.has(user.role)) {
-        safeAppName = 'customer';
-        effectiveRole = 'customer';
-      }
-    }
-
-    const effectiveBranchId = user.branchId || (isOwnerIdentity ? null : req.body.branchId) || null;
-    const effectiveFranchiseId = user.franchiseId || (isOwnerIdentity ? null : req.body.franchiseId) || null;
+    const effectiveBranchId = user.branchId || req.body.branchId || resolved.branchId;
+    const effectiveFranchiseId = user.franchiseId || req.body.franchiseId || resolved.franchiseId;
 
     await notificationQueue.registerToken(userId, token, {
       oldToken,
@@ -976,18 +1080,19 @@ router.post('/register-token', verifyToken, async (req: AuthRequest, res: Respon
       platform,
       browser,
       appVersion,
-      appName: safeAppName,
-      role: effectiveRole,
-      franchiseId: effectiveFranchiseId,
-      branchId: effectiveBranchId,
+      appName: resolved.safeAppName,
+      role: resolved.effectiveRole,
+      franchiseId: effectiveFranchiseId || undefined,
+      branchId: effectiveBranchId || undefined,
       terminalId: user.terminalId || req.body.terminalId
     });
-    res.json({ success: true });
+    res.json({ success: true, appName: resolved.safeAppName, role: resolved.effectiveRole });
   } catch (error: any) {
-    console.error('[NotificationRoutes] Register-token error:', error);
+    console.error('[NotificationRoutes] Register token error:', error);
     res.status(500).json({ error: error.message });
   }
 });
+
 
 // =============================================================================
 // POST /notifications/token/deregister

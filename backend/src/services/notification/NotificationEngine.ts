@@ -635,9 +635,7 @@ export class NotificationEngine {
         });
       });
 
-      const OWNER_EMAILS = new Set(['webhub2811@gmail.com', 'olivepizzarjn@gmail.com', 'olivepizzamaker@gmail.com']);
-      const OWNER_ROLES = new Set(['owner', 'platform_owner']);
-      const ALLOWED_STAFF_ROLES = new Set(['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef']);
+      const ALLOWED_STAFF_ROLES = new Set(['restaurant_manager', 'kitchen_staff', 'manager', 'cashier', 'chef', 'owner', 'platform_owner', 'admin']);
 
       let filteredRows = result.rows;
       if (targetApp) {
@@ -647,11 +645,10 @@ export class NotificationEngine {
           const target = (targetApp || '').toLowerCase().trim();
           const tokenRole = (r.role || '').toLowerCase().trim();
 
-          // CRITICAL SERVER-SIDE OWNER HARD-BLOCK (§3 & §4):
-          // For restaurant operational targetApp, NO owner token or owner-role token is EVER allowed!
+          // CRITICAL APP TARGET ISOLATION:
+          // For restaurant operational targetApp, only tokens registered from restaurant app are allowed.
           if (target === 'restaurant' || target === 'restaurant_manager') {
-            if (OWNER_ROLES.has(tokenRole) || app === 'owner') {
-              console.warn(`[NotificationEngine] 🚨 SECURITY BLOCK: Dropped owner token for UID ${r.firebase_uid} from restaurant delivery`);
+            if (app === 'owner' || app === 'customer' || app === 'delivery') {
               return false;
             }
           }
@@ -688,7 +685,7 @@ export class NotificationEngine {
         });
       }
 
-      // SECOND PASS: Authoritative Identity Verification for Restaurant Target (§3 & §4)
+      // SECOND PASS: Authoritative Identity Verification for Restaurant Target
       if (targetApp && (targetApp.toLowerCase().trim() === 'restaurant' || targetApp.toLowerCase().trim() === 'restaurant_manager')) {
         const verifiedRows: any[] = [];
         for (const row of filteredRows) {
@@ -696,41 +693,57 @@ export class NotificationEngine {
             const uid = row.firebase_uid;
             let isVerifiedStaff = false;
 
-            // 1. Check users collection
-            const uDoc = await db.collection('users').doc(uid).get().catch(() => null);
-            if (uDoc && uDoc.exists) {
-              const ud = uDoc.data() || {};
-              const email = (ud.email || '').toLowerCase().trim();
-              const role = (ud.role || '').toLowerCase().trim();
+            // 1. Authoritative PostgreSQL app_users check
+            const pgUser = await pgPool.query(
+              `SELECT id, email, role, allowed_apps, is_active FROM app_users 
+               WHERE id = $1 LIMIT 1`,
+              [uid]
+            ).catch(() => ({ rows: [] }));
 
-              if (OWNER_EMAILS.has(email) || OWNER_ROLES.has(role)) {
-                console.warn(`[NotificationEngine] 🚨 SECURITY BLOCK: Rejected owner token (UID ${uid}, email ${email}) from restaurant targetApp`);
-                continue;
-              }
-
-              if (ALLOWED_STAFF_ROLES.has(role) && ud.isActive !== false) {
+            if (pgUser.rows.length > 0) {
+              const u = pgUser.rows[0];
+              const allowedApps = Array.isArray(u.allowed_apps) ? u.allowed_apps.map((a: string) => String(a).toUpperCase().trim()) : [];
+              const uRole = (u.role || '').toLowerCase().trim();
+              if (u.is_active !== false && (
+                uRole === 'owner' || 
+                uRole === 'platform_owner' ||
+                allowedApps.includes('RESTAURANT_MANAGER') || 
+                allowedApps.includes('RESTAURANT') ||
+                ALLOWED_STAFF_ROLES.has(uRole)
+              )) {
                 isVerifiedStaff = true;
               }
             }
 
-            // 2. Check restaurant_managers collection if not verified in users
+            // 2. Fallback to Firestore users collection
             if (!isVerifiedStaff) {
-              const rmDoc = await db.collection('restaurant_managers').doc(uid).get().catch(() => null);
-              if (rmDoc && rmDoc.exists) {
-                const rmd = rmDoc.data() || {};
-                const email = (rmd.email || '').toLowerCase().trim();
-                const st = (rmd.status || '').toUpperCase();
-                if (!OWNER_EMAILS.has(email) && (st === 'APPROVED' || st === 'ACTIVE' || !rmd.status) && rmd.isActive !== false) {
+              const uDoc = await db.collection('users').doc(uid).get().catch(() => null);
+              if (uDoc && uDoc.exists) {
+                const ud = uDoc.data() || {};
+                const role = (ud.role || '').toLowerCase().trim();
+                if ((ALLOWED_STAFF_ROLES.has(role) || role === 'owner') && ud.isActive !== false) {
                   isVerifiedStaff = true;
                 }
               }
             }
 
-            // Fail-closed: Only allow positively verified restaurant staff tokens
+            // 3. Fallback to restaurant_managers collection
+            if (!isVerifiedStaff) {
+              const rmDoc = await db.collection('restaurant_managers').doc(uid).get().catch(() => null);
+              if (rmDoc && rmDoc.exists) {
+                const rmd = rmDoc.data() || {};
+                const st = (rmd.status || '').toUpperCase();
+                if ((st === 'APPROVED' || st === 'ACTIVE' || !rmd.status) && rmd.isActive !== false) {
+                  isVerifiedStaff = true;
+                }
+              }
+            }
+
+            // Allow positively verified restaurant staff tokens
             if (isVerifiedStaff) {
               verifiedRows.push(row);
             } else {
-              console.warn(`[NotificationEngine] 🚨 SECURITY BLOCK: Token for UID ${uid} rejected — not verified as active restaurant staff`);
+              console.warn(`[NotificationEngine] Token for UID ${uid} rejected — not verified as active restaurant staff`);
             }
           } catch (vErr: any) {
             console.warn(`[NotificationEngine] Error verifying token for UID ${row.firebase_uid} — failing closed:`, vErr.message);
@@ -751,10 +764,10 @@ export class NotificationEngine {
             const userData = userDoc.data() || {};
             const userEmail = (userData.email || '').toLowerCase().trim();
             const userRole = (userData.role || '').toLowerCase().trim();
-            const isOwner = OWNER_EMAILS.has(userEmail) || OWNER_ROLES.has(userRole);
+            const isOwner = userRole === 'owner' || userRole === 'platform_owner';
 
-            // Safety Guard: Owner tokens must NEVER fallback for restaurant or delivery notifications
-            if (isOwner && targetApp && targetApp !== 'owner') {
+            // Safety Guard: Owner tokens must NEVER fallback for customer notifications
+            if (isOwner && targetApp === 'customer') {
               continue;
             }
             // Delivery tokens fallback guard: only delivery roles

@@ -69,7 +69,7 @@ async function startNewOrder() {
   try {
     const sequences = await BillingNumberService.allocateNumbers();
     orderData.permanentBillNo = Number(sequences.permanentBillNo) || 10850;
-    orderData.dailyOrderNumber = Number(sequences.dailyOrderNumber || (sequences as any).dailyOrderNo) || 1;
+    orderData.dailyOrderNumber = Number(sequences.dailyOrderNo) || 1;
     console.log(`✅ Statutory numbers allocated: Permanent Bill #${orderData.permanentBillNo}, Daily Order #${orderData.dailyOrderNumber}`);
   } catch (err: any) {
     orderData.permanentBillNo = Math.floor(10000 + Math.random() * 90000);
