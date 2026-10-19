@@ -2132,10 +2132,14 @@ router.post('/stock/toggle', verifyToken, requirePOSRole, async (req: AuthReques
   }
 });
 
-// POST /api/pos/stock/custom-price — Update branch custom price from POS
+// POST /api/pos/stock/custom-price — Update branch custom price from POS (Manager only)
 router.post(['/stock/custom-price', '/branch/:branchId/custom-price'], verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
+    if (user.role === 'cashier' || user.role === 'pos_operator') {
+      res.status(403).json({ success: false, error: 'Forbidden: Cashiers and POS operators are not authorized to alter franchise selling prices.' });
+      return;
+    }
     const isOwner = FranchiseScopeService.isGlobalOwner(user.email, user.role);
     const branchId = req.params.branchId || (isOwner && req.query.branchId as string) || user.branchId!;
     const { productId, customPrice, price, isAvailable, isEnabled } = req.body;
@@ -2464,24 +2468,48 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
 
         const orderId = bill.orderId || ('ord_pos_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
 
-        let permBillNo = bill.permanentBillNo;
-        if (!permBillNo) {
-          try {
-            const alloc = await BillingNumberService.allocateNumbers(new Date(bill.createdAt || Date.now()));
-            permBillNo = alloc.permanentBillNo;
-          } catch (e) {
-            console.warn('[SyncOffline] Bill number allocation fallback:', e);
-          }
-        }
+        // Authoritative Canonical PostgreSQL Order, Items, and Bill Commit (Atomic & Mandatory)
+        const canonicalResult = await CanonicalOrderService.createCanonicalOrder({
+          id: orderId,
+          orderSource: 'POS',
+          orderType: bill.orderSource || 'POS_DINE_IN',
+          customerName: bill.customerName || 'Walk-in Customer',
+          customerPhone: bill.customerPhone || 'N/A',
+          items: (calc.items || []).map((it: any) => ({
+            menuItemId: it.menuItemId || it.id,
+            name: it.name,
+            price: it.price,
+            quantity: it.quantity,
+            size: it.size,
+            crust: it.crust,
+            addons: it.addons
+          })),
+          subtotal: calc.subtotal,
+          discountAmount: calc.discountAmount,
+          taxAmount: calc.taxes,
+          totalAmount: calc.finalTotal,
+          paymentMethod: bill.payment?.method || 'CASH',
+          paymentStatus: bill.payment?.status || 'PAID',
+          orderStatus: 'completed',
+          franchiseId,
+          branchId,
+          cashierId: user.uid,
+          cashierName: bill.session?.cashierName || user.email?.split('@')[0],
+          terminalId: bill.session?.terminalId || user.terminalId || `pos_${user.franchiseId}`
+        });
+
+        const permBillNo = canonicalResult.permanentBillNo;
 
         const orderData = {
           id: orderId,
           orderId,
           idempotencyKey,
-          permanentBillNo: permBillNo || null,
-          billNumber: permBillNo ? `#${permBillNo}` : (bill.billNumber || `#${orderId.slice(-6).toUpperCase()}`),
-          orderNumber: bill.billNumber || `#${orderId.slice(-6).toUpperCase()}`,
-          orderDateLocal: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(bill.createdAt || Date.now())),
+          permanentBillNo: permBillNo,
+          billNumber: `#${permBillNo}`,
+          dailyOrderNumber: canonicalResult.dailyOrderNo,
+          orderNumber: `#${canonicalResult.dailyOrderNo}`,
+          orderDateLocal: canonicalResult.orderDate,
+          orderTimeLocal: canonicalResult.orderTime,
           userId: user.uid,
           customerName: bill.customerName || 'Walk-in Customer',
           contactPhone: bill.customerPhone || 'N/A',
@@ -2492,7 +2520,7 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
           taxAmount: calc.taxes,
           deliveryFee: calc.deliveryFee,
           paymentMethod: bill.payment?.method || 'CASH',
-          paymentStatus: 'PAID',
+          paymentStatus: bill.payment?.status || 'PAID',
           status: 'completed',
           source: 'POS',
           orderType: bill.orderSource || 'POS_DINE_IN',
@@ -2511,55 +2539,6 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
         };
 
         await adminDb.collection('orders').doc(orderId).set(orderData, { merge: true });
-
-        // Authoritative Canonical PostgreSQL Order & Items commit
-        try {
-          await CanonicalOrderService.createCanonicalOrder({
-            id: orderId,
-            orderSource: 'POS',
-            orderType: orderData.orderType,
-            customerName: orderData.customerName,
-            customerPhone: orderData.contactPhone,
-            items: (calc.items || []).map((it: any) => ({
-              name: it.name,
-              price: it.price,
-              quantity: it.quantity,
-              size: it.size,
-              crust: it.crust,
-              addons: it.addons
-            })),
-            subtotal: calc.subtotal,
-            discountAmount: calc.discountAmount,
-            taxAmount: calc.taxes,
-            totalAmount: calc.finalTotal,
-            paymentMethod: orderData.paymentMethod,
-            paymentStatus: 'PAID',
-            orderStatus: 'completed',
-            franchiseId,
-            branchId,
-            cashierId: user.uid,
-            cashierName: orderData.cashierName,
-            terminalId: orderData.terminalId
-          });
-        } catch (pgErr: any) {
-          console.warn('[SyncOffline] Canonical PostgreSQL order commit notice:', pgErr?.message);
-        }
-
-        if (permBillNo) {
-          billingRepository.saveBill({
-            permanentBillNumber: permBillNo,
-            billFormattedNumber: `#${permBillNo}`,
-            orderId,
-            source: 'POS',
-            franchiseId,
-            branchId,
-            terminalId: bill.session?.terminalId || user.terminalId || `pos_${user.franchiseId}`,
-            totalAmount: calc.finalTotal,
-            paymentMethod: bill.payment?.method || 'CASH',
-            paymentStatus: 'PAID',
-            createdAt: bill.createdAt || new Date().toISOString()
-          }).catch(err => console.warn('[SyncOffline] Billing repo save warning:', err));
-        }
 
         // Async Google Sheets reporting queue (non-blocking)
         SheetsSyncWorker.queueOrder(orderId, {

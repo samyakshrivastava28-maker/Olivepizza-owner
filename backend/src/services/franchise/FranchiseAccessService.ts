@@ -335,7 +335,7 @@ export class FranchiseAccessService {
       const userRole = (pgUserData.role || '').toLowerCase();
       const allowedApps: string[] = Array.isArray(pgUserData.allowed_apps) ? pgUserData.allowed_apps : [];
       const isOwner = userRole === 'owner' || userRole === 'platform_owner';
-      const hasAppAccess = isOwner || allowedApps.includes(targetApp);
+      const hasAppAccess = isOwner || allowedApps.some(a => (a || '').toString().trim().toUpperCase() === targetApp.toUpperCase());
 
       if (hasAppAccess) {
         const resolvedBranch = requestedBranchId || pgUserData.branch_id || 'main_branch';

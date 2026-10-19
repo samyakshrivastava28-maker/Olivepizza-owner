@@ -20,6 +20,7 @@ import { BillingNumberService } from '../services/pos/BillingNumberService.js';
 import { calculateDistance } from '../lib/utils.js';
 import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
+import { AuthoritativePricingResolver } from '../services/menu/AuthoritativePricingResolver.js';
 import crypto from 'crypto';
 
 // Restaurant local timezone for daily order counter reset
@@ -826,47 +827,47 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         return;
       }
 
+      // Authoritative Branch Pricing Resolution
+      let authoritativePrice: any = null;
+      try {
+        authoritativePrice = await AuthoritativePricingResolver.resolveItemPrice({
+          branchId: resolvedBranchId,
+          productId: itemId,
+          size: item.size || item.variant,
+          crust: item.crust,
+          addons: item.addons
+        });
+      } catch (authErr: any) {
+        res.status(400).json({
+          error: authErr.message || `Unable to authoritatively resolve pricing for "${item.name || itemId}".`,
+          code: 'INVALID_MENU_ITEM'
+        });
+        return;
+      }
+
       let menuData: any = null;
       try {
-        // 1. Check products collection
+        // Fetch product/combo metadata for image & category
         let docSnap = await adminDb.collection('products').doc(itemId).get();
         if (docSnap.exists) {
           menuData = docSnap.data();
         } else {
-          // 2. Check menu_items collection
-          docSnap = await adminDb.collection('menu_items').doc(itemId).get();
+          docSnap = await adminDb.collection('combos').doc(itemId).get();
           if (docSnap.exists) {
             menuData = docSnap.data();
-          } else {
-            // 3. Check combos collection
-            docSnap = await adminDb.collection('combos').doc(itemId).get();
-            if (docSnap.exists) {
-              menuData = docSnap.data();
-            }
           }
         }
       } catch (dbReadErr) {
         console.warn('[Orders] DB lookup fallback:', dbReadErr);
       }
 
-      if (!menuData && item.price && item.name) {
-        menuData = {
-          name: item.name,
-          productName: item.name,
-          price: Number(item.price),
-          basePrice: Number(item.price),
-          isAvailable: true,
-          isActive: true
-        };
-      }
-
-      // Security check: Must exist in authoritative catalog
       if (!menuData) {
-        res.status(400).json({
-          error: `Item "${item.name || itemId}" was not found in our authoritative menu catalog.`,
-          code: 'INVALID_MENU_ITEM'
-        });
-        return;
+        menuData = {
+          name: authoritativePrice.productName,
+          productName: authoritativePrice.productName,
+          price: authoritativePrice.unitPrice,
+          basePrice: authoritativePrice.basePrice
+        };
       }
 
       if (menuData.isAvailable === false || menuData.isActive === false) {
@@ -874,25 +875,11 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         return;
       }
 
-      // Authoritative Price Determination
-      let itemPrice = 0;
-      const selectedSize = (item.size || item.variant || '').toLowerCase();
-      if (selectedSize && menuData.sizes && menuData.sizes[selectedSize]?.price) {
-        itemPrice = Number(menuData.sizes[selectedSize].price);
-      } else if (selectedSize && Array.isArray(menuData.variants)) {
-        const variant = menuData.variants.find((v: any) => (v.name || v.size || '').toLowerCase() === selectedSize);
-        if (variant && variant.price) {
-          itemPrice = Number(variant.price);
-        }
-      }
-
-      if (!itemPrice || itemPrice <= 0) {
-        itemPrice = Number(menuData.offerPrice || menuData.basePrice || menuData.price || 0);
-      }
-
+      // Authoritative Price Determination from AuthoritativePricingResolver
+      const itemPrice = authoritativePrice.unitPrice;
       if (itemPrice <= 0) {
         res.status(400).json({
-          error: `Unable to verify price for item "${menuData.name || menuData.productName || item.name}".`,
+          error: `Unable to verify authoritative price for item "${menuData.name || menuData.productName || item.name}".`,
           code: 'PRICE_VERIFICATION_FAILED'
         });
         return;

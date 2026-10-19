@@ -12,6 +12,7 @@
 import { adminDb } from '../../config/firebase.js';
 import crypto from 'crypto';
 import { OrderStateMachine } from '../order/OrderStateMachine.js';
+import { AuthoritativePricingResolver } from '../menu/AuthoritativePricingResolver.js';
 
 export interface POSCartItem {
   id?: string;
@@ -161,60 +162,87 @@ export class POSService {
       let itemName = item.name || 'Menu Item';
       const formattedAddons: string[] = [];
 
-      // 1. Resolve authoritative pricing strictly from catalog
+      // 1. Resolve authoritative pricing strictly from catalog or branch override
       if (!itemId) {
         throw new Error(`Menu item identifier is required for "${itemName}". Client prices are strictly rejected.`);
       }
 
-      const catalogItem = await this.getCatalogItem(itemId);
-      if (!catalogItem) {
-        throw new Error(`Item "${itemId || itemName}" not found in authoritative catalog. Client-controlled prices are strictly rejected.`);
-      }
-
-      itemName = catalogItem.productName || catalogItem.name || itemName;
-      
-      // Determine size / variant price
-      const selectedSize = (item.size || '').toLowerCase();
-      if (selectedSize && catalogItem.sizes && catalogItem.sizes[selectedSize]?.price) {
-        unitPrice = Number(catalogItem.sizes[selectedSize].price);
-      } else if (selectedSize && Array.isArray(catalogItem.variants)) {
-        const v = catalogItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
-        if (v && v.price) {
-          unitPrice = Number(v.price);
+      // If branchId is present, resolve authoritative price through AuthoritativePricingResolver
+      const resolvedBranchId = req.branchId;
+      if (resolvedBranchId) {
+        try {
+          const authPrice = await AuthoritativePricingResolver.resolveItemPrice({
+            branchId: resolvedBranchId,
+            productId: itemId,
+            size: item.size,
+            crust: item.crust,
+            addons: item.addons
+          });
+          unitPrice = authPrice.unitPrice;
+          itemName = authPrice.productName;
+          for (const a of authPrice.addons) {
+            formattedAddons.push(a.name);
+          }
+        } catch (resolveErr: any) {
+          // If branch-specific resolution fails with explicit unavailable/unconfigured error, propagate
+          if (resolveErr.message?.includes('unavailable') || resolveErr.message?.includes('not configured')) {
+            throw resolveErr;
+          }
+          console.warn(`[POSService] AuthoritativePricingResolver fallback to catalog for ${itemId}:`, resolveErr?.message);
         }
       }
 
-      if (!unitPrice || unitPrice <= 0) {
-        unitPrice = Number(catalogItem.offerPrice || catalogItem.basePrice || catalogItem.price || 0);
-      }
+      if (unitPrice <= 0) {
+        const catalogItem = await this.getCatalogItem(itemId);
+        if (!catalogItem) {
+          throw new Error(`Item "${itemId || itemName}" not found in authoritative catalog. Client-controlled prices are strictly rejected.`);
+        }
 
-      if (!unitPrice || unitPrice <= 0) {
-        throw new Error(`Authoritative price for item "${itemId}" (${itemName}) is invalid or not configured in catalog.`);
-      }
-
-      // Authoritative Addon Pricing
-      if (Array.isArray(item.addons) && item.addons.length > 0) {
-        for (const a of item.addons) {
-          const rawAddon: any = a;
-          if (!rawAddon) continue;
-          let addonPrice = 0;
-          let addonName = typeof rawAddon === 'object' ? (rawAddon.name || rawAddon.id || 'Addon') : String(rawAddon);
-
-          if (Array.isArray(catalogItem.addons)) {
-            const authoritativeAddon = catalogItem.addons.find(
-              (ca: any) =>
-                ca.id === rawAddon.id ||
-                ca.name === rawAddon.name ||
-                ca.id === rawAddon ||
-                ca.name === rawAddon
-            );
-            if (authoritativeAddon && authoritativeAddon.price != null) {
-              addonPrice = Math.max(0, Number(authoritativeAddon.price));
-              addonName = authoritativeAddon.name || addonName;
-            }
+        itemName = catalogItem.productName || catalogItem.name || itemName;
+        
+        // Determine size / variant price
+        const selectedSize = (item.size || '').toLowerCase();
+        if (selectedSize && catalogItem.sizes && catalogItem.sizes[selectedSize]?.price) {
+          unitPrice = Number(catalogItem.sizes[selectedSize].price);
+        } else if (selectedSize && Array.isArray(catalogItem.variants)) {
+          const v = catalogItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
+          if (v && v.price) {
+            unitPrice = Number(v.price);
           }
-          unitPrice += addonPrice;
-          formattedAddons.push(addonName);
+        }
+
+        if (!unitPrice || unitPrice <= 0) {
+          unitPrice = Number(catalogItem.offerPrice || catalogItem.basePrice || catalogItem.price || 0);
+        }
+
+        if (!unitPrice || unitPrice <= 0) {
+          throw new Error(`Authoritative price for item "${itemId}" (${itemName}) is invalid or not configured in catalog.`);
+        }
+
+        // Authoritative Addon Pricing
+        if (Array.isArray(item.addons) && item.addons.length > 0) {
+          for (const a of item.addons) {
+            const rawAddon: any = a;
+            if (!rawAddon) continue;
+            let addonPrice = 0;
+            let addonName = typeof rawAddon === 'object' ? (rawAddon.name || rawAddon.id || 'Addon') : String(rawAddon);
+
+            if (Array.isArray(catalogItem.addons)) {
+              const authoritativeAddon = catalogItem.addons.find(
+                (ca: any) =>
+                  ca.id === rawAddon.id ||
+                  ca.name === rawAddon.name ||
+                  ca.id === rawAddon ||
+                  ca.name === rawAddon
+              );
+              if (authoritativeAddon && authoritativeAddon.price != null) {
+                addonPrice = Math.max(0, Number(authoritativeAddon.price));
+                addonName = authoritativeAddon.name || addonName;
+              }
+            }
+            unitPrice += addonPrice;
+            formattedAddons.push(addonName);
+          }
         }
       }
 

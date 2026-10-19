@@ -17,6 +17,7 @@ import { adminDb } from '../../config/firebase.js';
 import { billingRepository } from '../../repositories/billing.repository.js';
 import { appEventBus } from '../eventBus/AppEventBus.js';
 import { POSService } from './POSService.js';
+import { AuthoritativePricingResolver } from '../menu/AuthoritativePricingResolver.js';
 
 export interface CreateOrderParams {
   id?: string;
@@ -136,46 +137,68 @@ export class CanonicalOrderService {
       let itemName = item.name || 'Menu Item';
       const formattedAddons: any[] = item.addons || [];
 
-      // Server/catalog price > Client price: Always resolve authoritative catalog price
+      // Server/catalog price > Client price: Always resolve authoritative catalog price or branch override
       const itemId = item.menuItemId || (item as any).id;
       if (itemId) {
-        try {
-          const catItem = await POSService.getCatalogItem(itemId);
-          if (catItem) {
-            itemName = catItem.productName || catItem.name || itemName;
-            const selectedSize = (item.size || '').toLowerCase();
-            if (selectedSize && catItem.sizes && catItem.sizes[selectedSize]?.price) {
-              unitPrice = Number(catItem.sizes[selectedSize].price);
-            } else if (selectedSize && Array.isArray(catItem.variants)) {
-              const v = catItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
-              if (v && v.price) {
-                unitPrice = Number(v.price);
-              }
+        if (params.branchId) {
+          try {
+            const authPrice = await AuthoritativePricingResolver.resolveItemPrice({
+              branchId: params.branchId,
+              franchiseId: params.franchiseId,
+              productId: itemId,
+              size: item.size,
+              crust: item.crust,
+              addons: item.addons
+            });
+            unitPrice = authPrice.unitPrice;
+            itemName = authPrice.productName;
+          } catch (resErr: any) {
+            if (resErr.message?.includes('unavailable') || resErr.message?.includes('not configured')) {
+              throw resErr;
             }
-            if (!unitPrice || unitPrice <= 0) {
-              unitPrice = Number(catItem.offerPrice || catItem.basePrice || catItem.price || 0);
-            }
+            console.warn('[CanonicalOrderService] AuthoritativePricingResolver fallback to catalog:', resErr?.message);
+          }
+        }
 
-            // Authoritative Addon Pricing
-            if (Array.isArray(item.addons) && item.addons.length > 0 && Array.isArray(catItem.addons)) {
-              for (const a of item.addons) {
-                const rawAddon: any = a;
-                if (!rawAddon) continue;
-                const authoritativeAddon = catItem.addons.find(
-                  (ca: any) =>
-                    ca.id === rawAddon.id ||
-                    ca.name === rawAddon.name ||
-                    ca.id === rawAddon ||
-                    ca.name === rawAddon
-                );
-                if (authoritativeAddon && authoritativeAddon.price != null) {
-                  unitPrice += Math.max(0, Number(authoritativeAddon.price));
+        if (unitPrice <= 0) {
+          try {
+            const catItem = await POSService.getCatalogItem(itemId);
+            if (catItem) {
+              itemName = catItem.productName || catItem.name || itemName;
+              const selectedSize = (item.size || '').toLowerCase();
+              if (selectedSize && catItem.sizes && catItem.sizes[selectedSize]?.price) {
+                unitPrice = Number(catItem.sizes[selectedSize].price);
+              } else if (selectedSize && Array.isArray(catItem.variants)) {
+                const v = catItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
+                if (v && v.price) {
+                  unitPrice = Number(v.price);
+                }
+              }
+              if (!unitPrice || unitPrice <= 0) {
+                unitPrice = Number(catItem.offerPrice || catItem.basePrice || catItem.price || 0);
+              }
+
+              // Authoritative Addon Pricing
+              if (Array.isArray(item.addons) && item.addons.length > 0 && Array.isArray(catItem.addons)) {
+                for (const a of item.addons) {
+                  const rawAddon: any = a;
+                  if (!rawAddon) continue;
+                  const authoritativeAddon = catItem.addons.find(
+                    (ca: any) =>
+                      ca.id === rawAddon.id ||
+                      ca.name === rawAddon.name ||
+                      ca.id === rawAddon ||
+                      ca.name === rawAddon
+                  );
+                  if (authoritativeAddon && authoritativeAddon.price != null) {
+                    unitPrice += Math.max(0, Number(authoritativeAddon.price));
+                  }
                 }
               }
             }
+          } catch (catErr) {
+            console.warn('[CanonicalOrderService] Catalog lookup warning:', catErr);
           }
-        } catch (catErr) {
-          console.warn('[CanonicalOrderService] Catalog lookup warning:', catErr);
         }
       }
 

@@ -89,20 +89,19 @@ export class FranchisePricingSyncService {
       if (existingPrice !== undefined && !isNaN(existingPrice)) {
         sellingPrice = existingPrice;
       } else {
-        // Fallback to master product basePrice in Firestore
-        try {
-          const pDoc = await adminDb.collection('products').doc(productId).get();
-          if (pDoc.exists) {
-            const pData = pDoc.data()!;
-            sellingPrice = Number(pData.basePrice || pData.price || 249);
-            if (isAvailable === undefined) {
-              isAvailable = pData.isActive !== false && pData.isAvailable !== false;
-            }
-          } else {
-            sellingPrice = 249;
-          }
-        } catch {
-          sellingPrice = 249;
+        // Query master product basePrice in Firestore
+        const pDoc = await adminDb.collection('products').doc(productId).get();
+        if (!pDoc.exists) {
+          throw new Error(`Master product "${productId}" not found. Cannot configure franchise price for non-existent product.`);
+        }
+        const pData = pDoc.data()!;
+        const masterBase = Number(pData.basePrice || pData.price || pData.offerPrice || 0);
+        if (masterBase <= 0) {
+          throw new Error(`Master product "${productId}" does not have an authoritative price configured.`);
+        }
+        sellingPrice = masterBase;
+        if (isAvailable === undefined) {
+          isAvailable = pData.isActive !== false && pData.isAvailable !== false;
         }
       }
     }
@@ -147,7 +146,8 @@ export class FranchisePricingSyncService {
         isAvailable = Boolean(res.rows[0].is_available);
       }
     } catch (pgError: any) {
-      console.error('[FranchisePricingSync] PostgreSQL upsert error (proceeding with Firestore sync):', pgError.message);
+      console.error('[FranchisePricingSync] PostgreSQL upsert error:', pgError.message);
+      throw new Error(`Failed to commit franchise price override to canonical PostgreSQL database: ${pgError.message}`);
     }
 
     // 3. Sync to Firestore branch_menu_overrides doc `${branchId}_${productId}`

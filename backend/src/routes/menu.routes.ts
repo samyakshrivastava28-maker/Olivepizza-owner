@@ -420,9 +420,16 @@ router.get('/branch/:branchId/management', verifyToken, requireRole(['restaurant
   }
 });
 
-router.post('/branch/:branchId/toggle', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner', 'pos_operator', 'cashier']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/branch/:branchId/toggle', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { branchId } = req.params;
+    const user = req.user!;
+    const isOwner = user.role === 'owner' || user.role === 'platform_owner' || user.role === 'admin' || user.role === 'developer';
+    if (!isOwner && user.branchId && user.branchId !== branchId && user.branchId !== 'all') {
+      res.status(403).json({ success: false, error: 'Forbidden: You are not authorized to modify products for this branch.' });
+      return;
+    }
+
     const { productId, isEnabled, isAvailable } = req.body;
     const effectiveAvailable = typeof isEnabled === 'boolean' ? isEnabled : (typeof isAvailable === 'boolean' ? isAvailable : undefined);
     if (!productId || effectiveAvailable === undefined) {
@@ -456,9 +463,16 @@ router.post('/branch/:branchId/toggle', verifyToken, requireRole(['restaurant_ma
   }
 });
 
-router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner', 'pos_operator', 'cashier']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { branchId } = req.params;
+    const user = req.user!;
+    const isOwner = user.role === 'owner' || user.role === 'platform_owner' || user.role === 'admin' || user.role === 'developer';
+    if (!isOwner && user.branchId && user.branchId !== branchId && user.branchId !== 'all') {
+      res.status(403).json({ success: false, error: 'Forbidden: You are not authorized to modify customizations for this branch.' });
+      return;
+    }
+
     const { productId, allowedSizes, allowedCrusts, allowedAddons, channelAvailability, customPrice, price, isEnabled, isAvailable } = req.body;
     if (!productId) {
       res.status(400).json({ success: false, error: 'productId is required' });
@@ -494,9 +508,16 @@ router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restau
   }
 });
 
-router.post('/branch/:branchId/custom-price', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner', 'pos_operator', 'cashier']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/branch/:branchId/custom-price', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { branchId } = req.params;
+    const user = req.user!;
+    const isOwner = user.role === 'owner' || user.role === 'platform_owner' || user.role === 'admin' || user.role === 'developer';
+    if (!isOwner && user.branchId && user.branchId !== branchId && user.branchId !== 'all') {
+      res.status(403).json({ success: false, error: 'Forbidden: You are not authorized to modify pricing for this branch.' });
+      return;
+    }
+
     const { productId, customPrice, price, isAvailable, isEnabled } = req.body;
     if (!productId) {
       res.status(400).json({ success: false, error: 'productId is required' });
