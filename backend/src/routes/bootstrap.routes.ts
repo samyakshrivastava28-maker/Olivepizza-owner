@@ -138,6 +138,29 @@ router.get(['/home/bootstrap', '/v1/home/bootstrap'], optionalAuth, async (req: 
             };
           });
 
+          // Apply branch overrides (custom price and availability)
+          try {
+            const oSnap = await adminDb.collection('branch_menu_overrides')
+              .where('branchId', '==', branchId)
+              .get()
+              .catch(() => ({ docs: [] } as any));
+            if (!oSnap.empty) {
+              const oMap = new Map<string, any>();
+              oSnap.docs.forEach((d: any) => oMap.set(d.data().productId, d.data()));
+              items = items.map(it => {
+                const ov = oMap.get(it.id);
+                if (!ov) return it;
+                const customPrice = ov.customPrice ? Number(ov.customPrice) : undefined;
+                return {
+                  ...it,
+                  price: customPrice && customPrice > 0 ? customPrice : it.price,
+                  basePrice: customPrice && customPrice > 0 ? customPrice : it.basePrice,
+                  isAvailable: ov.stockStatus !== 'OUT_OF_STOCK' && ov.isEnabledForBranch !== false
+                };
+              });
+            }
+          } catch {}
+
           // Prioritize explicitly featured items or take top 8
           const featuredOnly = items.filter(i => i.isFeatured);
           return (featuredOnly.length >= 4 ? featuredOnly : items).slice(0, 8);
@@ -543,9 +566,21 @@ router.get(['/menu/bootstrap', '/v1/menu/bootstrap'], async (req: AuthRequest, r
       })()
     ]);
 
+        const mergedProducts = productsRaw.map((p: any) => {
+          const override = availabilityMap[p.id];
+          const customPrice = override?.customPrice;
+          const isEnabled = override ? override.isEnabled : (p.isActive !== false);
+          return {
+            ...p,
+            price: customPrice !== undefined && Number(customPrice) > 0 ? Number(customPrice) : p.price,
+            basePrice: customPrice !== undefined && Number(customPrice) > 0 ? Number(customPrice) : p.basePrice,
+            isAvailable: override ? override.inStock && isEnabled : (p.isActive !== false)
+          };
+        });
+
         return {
           categories: categoriesRaw,
-          products: productsRaw,
+          products: mergedProducts,
           offers: offersRaw,
           availability: availabilityMap
         };

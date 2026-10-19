@@ -4,6 +4,7 @@ import { verifyToken, AuthRequest, requireRole } from '../middleware/auth.middle
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { webSocketServer } from '../services/websocket/WebSocketServer.js';
 import { redisService } from '../services/redis/RedisService.js';
+import { FranchisePricingSyncService } from '../services/menu/FranchisePricingSyncService.js';
 
 const router = Router();
 
@@ -283,9 +284,27 @@ router.get('/branch/:branchId', async (req: Request, res: Response): Promise<voi
         const oSnap = await adminDb.collection('branch_menu_overrides').where('branchId', '==', branchId).get().catch(() => ({ docs: [] } as any));
         const overridesMap = new Map<string, any>();
         oSnap.docs.forEach((d: any) => overridesMap.set(d.data().productId, d.data()));
+
+        // Merge with canonical PostgreSQL franchise prices
+        try {
+          const pgPricesMap = await FranchisePricingSyncService.getBranchPricesMap(branchId);
+          for (const [pId, pData] of pgPricesMap.entries()) {
+            const existing = overridesMap.get(pId) || {};
+            overridesMap.set(pId, {
+              ...existing,
+              customPrice: pData.sellingPrice,
+              sellingPrice: pData.sellingPrice,
+              isEnabledForBranch: pData.isAvailable ?? existing.isEnabledForBranch ?? true,
+              version: pData.version
+            });
+          }
+        } catch (pgErr: any) {
+          console.warn('[MenuRoutes] Reading franchise prices from PostgreSQL warning:', pgErr?.message);
+        }
+
         return masterProducts.map(mp => {
           const override = overridesMap.get(mp.id);
-          const isEnabled = override ? override.isEnabledForBranch : (mp.isActive ?? true);
+          const isEnabled = override ? (override.isEnabledForBranch ?? override.isAvailable ?? true) : (mp.isActive ?? true);
           const stockStatus = override?.stockStatus || (mp.isAvailable !== false ? 'IN_STOCK' : 'OUT_OF_STOCK');
           const channels = override?.channelAvailability || mp.channelAvailability || { online: true, dineIn: true, takeaway: true, posDelivery: true };
           const allowedSizes = override?.allowedSizes || mp.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'];
@@ -298,13 +317,21 @@ router.get('/branch/:branchId', async (req: Request, res: Response): Promise<voi
           if (channel === 'TAKEAWAY' && !channels.takeaway) channelMatch = false;
           if (channel === 'POS_DELIVERY' && !channels.posDelivery) channelMatch = false;
           if (!isEnabled || !channelMatch) return null;
+
+          const customPrice = override?.customPrice ?? override?.sellingPrice;
+          const effectivePrice = customPrice !== undefined && customPrice !== null && !isNaN(Number(customPrice))
+            ? Number(customPrice)
+            : Number(mp.basePrice || mp.price || 299);
+
           return {
             id: mp.id,
             name: mp.productName || mp.name,
             description: mp.description || '',
             category: mp.category || 'Pizzas',
-            basePrice: override?.customPrice || mp.basePrice || mp.price || 299,
-            price: override?.customPrice || mp.basePrice || mp.price || 299,
+            basePrice: effectivePrice,
+            price: effectivePrice,
+            customPrice: customPrice !== undefined && customPrice !== null ? Number(customPrice) : undefined,
+            version: override?.version || 1,
             imageUrl: mp.imageUrl || mp.image || 'https://res.cloudinary.com/dxmlvkff1/image/upload/v1786517437/olive-pizza/ai-product-images/dv4uty06rq4tznlpqz2i.jpg',
             isVegetarian: mp.isVegetarian ?? true,
             stockStatus,
@@ -327,7 +354,7 @@ router.get('/branch/:branchId', async (req: Request, res: Response): Promise<voi
   }
 });
 
-router.get('/branch/:branchId/management', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get('/branch/:branchId/management', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner', 'pos_operator', 'cashier']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { branchId } = req.params;
     const pSnap = await adminDb.collection('products').get();
@@ -341,13 +368,38 @@ router.get('/branch/:branchId/management', verifyToken, requireRole(['restaurant
     const oSnap = await adminDb.collection('branch_menu_overrides').where('branchId', '==', branchId).get().catch(() => ({ docs: [] } as any));
     const overridesMap = new Map<string, any>();
     oSnap.docs.forEach((d: any) => overridesMap.set(d.data().productId, d.data()));
+
+    // Merge PostgreSQL franchise prices
+    try {
+      const pgPricesMap = await FranchisePricingSyncService.getBranchPricesMap(branchId);
+      for (const [pId, pData] of pgPricesMap.entries()) {
+        const existing = overridesMap.get(pId) || {};
+        overridesMap.set(pId, {
+          ...existing,
+          customPrice: pData.sellingPrice,
+          sellingPrice: pData.sellingPrice,
+          isEnabledForBranch: pData.isAvailable ?? existing.isEnabledForBranch ?? true,
+          version: pData.version
+        });
+      }
+    } catch (pgErr: any) {
+      console.warn('[MenuRoutes] Management reading franchise prices from PostgreSQL warning:', pgErr?.message);
+    }
+
     const managementItems = masterProducts.map(mp => {
       const override = overridesMap.get(mp.id);
+      const customPrice = override?.customPrice ?? override?.sellingPrice;
+      const basePrice = Number(mp.basePrice || mp.price || 299);
+      const effectivePrice = customPrice !== undefined && customPrice !== null && !isNaN(Number(customPrice)) ? Number(customPrice) : basePrice;
+
       return {
         id: mp.id,
         name: mp.productName || mp.name,
         category: mp.category || 'Pizzas',
-        basePrice: mp.basePrice || mp.price || 299,
+        basePrice,
+        price: effectivePrice,
+        customPrice: effectivePrice,
+        version: override?.version || 1,
         description: mp.description || '',
         imageUrl: mp.imageUrl || mp.image || '',
         allSizes: mp.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
@@ -368,78 +420,115 @@ router.get('/branch/:branchId/management', verifyToken, requireRole(['restaurant
   }
 });
 
-router.post('/branch/:branchId/toggle', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post('/branch/:branchId/toggle', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner', 'pos_operator', 'cashier']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { branchId } = req.params;
-    const { productId, isEnabled } = req.body;
-    if (!productId || typeof isEnabled !== 'boolean') {
-      res.status(400).json({ success: false, error: 'productId and isEnabled (boolean) are required' });
+    const { productId, isEnabled, isAvailable } = req.body;
+    const effectiveAvailable = typeof isEnabled === 'boolean' ? isEnabled : (typeof isAvailable === 'boolean' ? isAvailable : undefined);
+    if (!productId || effectiveAvailable === undefined) {
+      res.status(400).json({ success: false, error: 'productId and isEnabled/isAvailable (boolean) are required' });
       return;
     }
-    const docKey = branchId + '_' + productId;
-    const nowIso = new Date().toISOString();
-    await adminDb.collection('branch_menu_overrides').doc(docKey).set({
+
+    const syncResult = await FranchisePricingSyncService.syncPrice({
       branchId,
       productId,
-      isEnabledForBranch: isEnabled,
-      updatedAt: nowIso,
+      franchiseId: req.user?.franchiseId,
+      isAvailable: effectiveAvailable,
+      isEnabled: effectiveAvailable,
       updatedBy: req.user?.email || 'manager'
-    }, { merge: true });
-
-    console.log('[PRODUCT_UPDATED]', { branchId, productId, isEnabled, type: 'branch_toggle', timestamp: nowIso });
-
-    webSocketServer.broadcastToAll({
-      type: 'branch_menu.updated',
-      data: { branchId, productId, isEnabledForBranch: isEnabled, timestamp: nowIso }
     });
 
-    // Invalidate cached branch menu
-    await redisService.invalidateMenu(branchId);
+    console.log('[PRODUCT_UPDATED]', { branchId, productId, isEnabled: effectiveAvailable, type: 'branch_toggle', timestamp: syncResult.updatedAt });
 
-    res.json({ success: true, message: 'Product ' + productId + ' ' + (isEnabled ? 'enabled' : 'disabled') + ' for branch ' + branchId, branchId, productId, isEnabledForBranch: isEnabled });
+    res.json({
+      success: true,
+      message: `Product ${productId} ${effectiveAvailable ? 'enabled' : 'disabled'} for branch ${branchId}`,
+      branchId,
+      productId,
+      isEnabledForBranch: effectiveAvailable,
+      isAvailable: effectiveAvailable,
+      ...syncResult
+    });
   } catch (error: any) {
     console.error('[MenuRoutes] Error toggling branch product:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner', 'pos_operator', 'cashier']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { branchId } = req.params;
-    const { productId, allowedSizes, allowedCrusts, allowedAddons, channelAvailability, customPrice } = req.body;
+    const { productId, allowedSizes, allowedCrusts, allowedAddons, channelAvailability, customPrice, price, isEnabled, isAvailable } = req.body;
     if (!productId) {
       res.status(400).json({ success: false, error: 'productId is required' });
       return;
     }
-    const docKey = branchId + '_' + productId;
-    const nowIso = new Date().toISOString();
-    const overrideData: any = {
+
+    const effectivePrice = customPrice !== undefined ? customPrice : price;
+    const syncResult = await FranchisePricingSyncService.syncPrice({
       branchId,
       productId,
-      updatedAt: nowIso,
-      updatedBy: req.user?.email || 'manager'
-    };
-    if (allowedSizes) overrideData.allowedSizes = allowedSizes;
-    if (allowedCrusts) overrideData.allowedCrusts = allowedCrusts;
-    if (allowedAddons) overrideData.allowedAddons = allowedAddons;
-    if (channelAvailability) overrideData.channelAvailability = channelAvailability;
-    if (customPrice) overrideData.customPrice = Number(customPrice);
-    await adminDb.collection('branch_menu_overrides').doc(docKey).set(overrideData, { merge: true });
-
-    webSocketServer.broadcastToAll({
-      type: 'branch_menu.updated',
-      data: { branchId, productId, override: overrideData, timestamp: nowIso }
+      franchiseId: req.user?.franchiseId,
+      customPrice: effectivePrice !== undefined && effectivePrice !== null ? Number(effectivePrice) : undefined,
+      isAvailable: isAvailable !== undefined ? Boolean(isAvailable) : (isEnabled !== undefined ? Boolean(isEnabled) : undefined),
+      isEnabled: isEnabled !== undefined ? Boolean(isEnabled) : isAvailable,
+      updatedBy: req.user?.email || 'manager',
+      additionalOverrides: {
+        allowedSizes,
+        allowedCrusts,
+        allowedAddons,
+        channelAvailability
+      }
     });
 
-    // Invalidate cached branch menu
-    await redisService.invalidateMenu(branchId);
-
-    res.json({ success: true, message: 'Customizations updated for product ' + productId + ' in branch ' + branchId, override: overrideData });
+    res.json({
+      success: true,
+      message: `Customizations updated for product ${productId} in branch ${branchId}`,
+      override: syncResult,
+      ...syncResult
+    });
   } catch (error: any) {
     console.error('[MenuRoutes] Error saving branch customizations:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+router.post('/branch/:branchId/custom-price', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner', 'pos_operator', 'cashier']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { branchId } = req.params;
+    const { productId, customPrice, price, isAvailable, isEnabled } = req.body;
+    if (!productId) {
+      res.status(400).json({ success: false, error: 'productId is required' });
+      return;
+    }
+    const effectivePrice = customPrice !== undefined ? customPrice : price;
+    if (effectivePrice === undefined || effectivePrice === null || isNaN(Number(effectivePrice))) {
+      res.status(400).json({ success: false, error: 'Valid customPrice is required' });
+      return;
+    }
+
+    const syncResult = await FranchisePricingSyncService.syncPrice({
+      branchId,
+      productId,
+      franchiseId: req.user?.franchiseId,
+      customPrice: Number(effectivePrice),
+      isAvailable: isAvailable !== undefined ? Boolean(isAvailable) : (isEnabled !== undefined ? Boolean(isEnabled) : undefined),
+      isEnabled: isEnabled !== undefined ? Boolean(isEnabled) : isAvailable,
+      updatedBy: req.user?.email || 'manager'
+    });
+
+    res.json({
+      success: true,
+      message: `Custom price updated for product ${productId} in branch ${branchId}`,
+      ...syncResult
+    });
+  } catch (error: any) {
+    console.error('[MenuRoutes] Error updating custom price:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 
 router.post('/branch/:branchId/stock-status', verifyToken, requireRole(['cashier', 'restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {

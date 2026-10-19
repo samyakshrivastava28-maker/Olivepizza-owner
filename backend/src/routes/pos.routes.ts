@@ -18,7 +18,9 @@ import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngi
 import { OrderProjectionService } from '../services/order/OrderProjectionService.js';
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
+import { POSShiftRepository } from '../repositories/posShift.repository.js';
 import { query } from '../lib/db.js';
+import { FranchisePricingSyncService } from '../services/menu/FranchisePricingSyncService.js';
 import crypto from 'crypto';
 import net from 'net';
 
@@ -181,7 +183,7 @@ router.get('/menu', verifyToken, requirePOSRole, async (req: AuthRequest, res: R
     const pSnap = await adminDb.collection('products').get();
     let masterProducts = pSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
 
-    // 2. Fetch Branch Menu Overrides
+    // 2. Fetch Branch Menu Overrides (Firestore + PostgreSQL)
     const oSnap = await adminDb.collection('branch_menu_overrides')
       .where('branchId', '==', effectiveBranchId)
       .get()
@@ -190,11 +192,28 @@ router.get('/menu', verifyToken, requirePOSRole, async (req: AuthRequest, res: R
     const overridesMap = new Map<string, any>();
     oSnap.docs.forEach((d: any) => overridesMap.set(d.data().productId, d.data()));
 
+    // Merge with PostgreSQL canonical franchise prices
+    try {
+      const pgPricesMap = await FranchisePricingSyncService.getBranchPricesMap(effectiveBranchId);
+      for (const [pId, pData] of pgPricesMap.entries()) {
+        const existing = overridesMap.get(pId) || {};
+        overridesMap.set(pId, {
+          ...existing,
+          customPrice: pData.sellingPrice,
+          sellingPrice: pData.sellingPrice,
+          isEnabledForBranch: pData.isAvailable ?? existing.isEnabledForBranch ?? true,
+          version: pData.version
+        });
+      }
+    } catch (pgErr: any) {
+      console.warn('[POSMenu] Postgres franchise_prices lookup warning:', pgErr?.message);
+    }
+
     masterProducts.forEach((mp: any) => {
       const override = overridesMap.get(mp.id);
       
       // Branch Enabled Check: defaults to true unless explicitly disabled for branch
-      const isEnabledForBranch = override ? Boolean(override.isEnabledForBranch) : (mp.isActive ?? mp.isAvailable ?? true);
+      const isEnabledForBranch = override ? (override.isEnabledForBranch ?? override.isAvailable ?? true) : (mp.isActive ?? mp.isAvailable ?? true);
       if (!isEnabledForBranch) return;
 
       // Channel Check: Product must be available on at least one POS channel (Dine-In, Takeaway, or POS Delivery)
@@ -212,12 +231,16 @@ router.get('/menu', verifyToken, requirePOSRole, async (req: AuthRequest, res: R
       const stockStatus = override?.stockStatus || (mp.isAvailable !== false ? 'IN_STOCK' : 'OUT_OF_STOCK');
       const isAvailable = stockStatus === 'IN_STOCK';
 
-      const basePrice = Number(override?.customPrice || mp.basePrice || mp.price || 249);
+      const customPrice = override?.customPrice ?? override?.sellingPrice;
+      const basePrice = (customPrice !== undefined && customPrice !== null && !isNaN(Number(customPrice)))
+        ? Number(customPrice)
+        : Number(mp.basePrice || mp.price || 249);
       const offerPrice = mp.offerPrice ? Number(mp.offerPrice) : undefined;
       const price = offerPrice && offerPrice > 0 && offerPrice < basePrice ? offerPrice : basePrice;
 
       let name = String(mp.productName || mp.name || mp.title || '').trim();
       if (!name || name.toLowerCase() === 'pizza') name = 'Artisan Pizza';
+
 
       itemsMap.set(mp.id, {
         id: mp.id,
@@ -226,6 +249,8 @@ router.get('/menu', verifyToken, requirePOSRole, async (req: AuthRequest, res: R
         description: mp.description || 'Olive Pizza Stone Oven specialty.',
         basePrice: price,
         price,
+        customPrice: customPrice !== undefined && !isNaN(Number(customPrice)) ? Number(customPrice) : undefined,
+        version: override?.version || 1,
         category: mp.category || 'Veg Pizzas',
         image: mp.imageUrl || mp.image || '',
         imageUrl: mp.imageUrl || mp.image || '',
@@ -522,6 +547,15 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
           }
 
           await shiftRef.set(updates, { merge: true });
+
+          // Authoritative PostgreSQL pos_shifts sale recording
+          try {
+            const cashAmount = pMethod === 'CASH' ? amount : 0;
+            const digitalAmount = pMethod !== 'CASH' ? amount : 0;
+            await POSShiftRepository.recordSale(activeShift.id, cashAmount, digitalAmount);
+          } catch (pgErr: any) {
+            console.warn('[POS] PostgreSQL pos_shifts recordSale notice:', pgErr.message);
+          }
         }
       } catch (shiftErr: any) {
         console.warn('[POS] Shift tally update warning:', shiftErr.message);
@@ -964,6 +998,22 @@ router.post('/shifts/open', verifyToken, requirePOSRole, async (req: AuthRequest
       notes
     });
 
+    // Authoritative PostgreSQL pos_shifts insertion
+    try {
+      await POSShiftRepository.openShift({
+        id: shift.id,
+        terminalId,
+        franchiseId,
+        branchId,
+        cashierId: user.uid,
+        cashierName: shift.cashierName || user.email?.split('@')[0] || 'Cashier',
+        openingCash: Number(openingCash || 0),
+        notes
+      });
+    } catch (pgErr: any) {
+      console.warn('[POS] PostgreSQL pos_shifts openShift notice:', pgErr.message);
+    }
+
     res.status(201).json({ success: true, shift });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -972,7 +1022,7 @@ router.post('/shifts/open', verifyToken, requirePOSRole, async (req: AuthRequest
 
 router.post('/shifts/close', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { shiftId, closingCash, notes } = req.body;
+    const { shiftId, closingCash, actualCash, notes } = req.body;
     if (!shiftId) {
       res.status(400).json({ success: false, error: 'shiftId is required' });
       return;
@@ -991,7 +1041,16 @@ router.post('/shifts/close', verifyToken, requirePOSRole, async (req: AuthReques
       }
     }
 
-    const shift = await POSService.closeShift(shiftId, Number(closingCash || 0), notes);
+    const resolvedActualCash = Number(actualCash != null ? actualCash : (closingCash || 0));
+    const shift = await POSService.closeShift(shiftId, resolvedActualCash, notes);
+
+    // Authoritative PostgreSQL pos_shifts closing & reconciliation
+    try {
+      await POSShiftRepository.closeShift(shiftId, resolvedActualCash, notes);
+    } catch (pgErr: any) {
+      console.warn('[POS] PostgreSQL pos_shifts closeShift notice:', pgErr.message);
+    }
+
     res.json({ success: true, shift });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -1380,13 +1439,23 @@ router.post('/shifts/cash-adjustment', verifyToken, requirePOSRole, async (req: 
   try {
     const user = req.user!;
     const { shiftId, type, amount, reason } = req.body;
-    if (!shiftId || !type || !amount) {
-      res.status(400).json({ success: false, error: 'shiftId, type, and amount are required' });
+    if (!type || !amount) {
+      res.status(400).json({ success: false, error: 'type and amount are required' });
       return;
     }
 
+    let targetShiftId = shiftId;
+    if (!targetShiftId) {
+      const active = await POSService.getActiveShift(user.branchId!, user.terminalId || `pos_${user.franchiseId}`);
+      if (!active) {
+        res.status(400).json({ success: false, error: 'No active shift found for this terminal. Open a shift first.' });
+        return;
+      }
+      targetShiftId = active.id;
+    }
+
     const result = await POSService.recordCashAdjustment({
-      shiftId,
+      shiftId: targetShiftId,
       branchId: user.branchId!,
       terminalId: user.terminalId || `pos_${user.franchiseId}`,
       type,
@@ -1395,6 +1464,13 @@ router.post('/shifts/cash-adjustment', verifyToken, requirePOSRole, async (req: 
       cashierUid: user.uid,
       cashierName: user.email?.split('@')[0] || 'Cashier'
     });
+
+    // Authoritative PostgreSQL pos_shifts adjustment
+    try {
+      await POSShiftRepository.recordCashAdjustment(targetShiftId, type, Number(amount), reason || 'Manual drawer adjustment');
+    } catch (pgErr: any) {
+      console.warn('[POS] PostgreSQL pos_shifts cashAdjustment notice:', pgErr.message);
+    }
 
     res.json(result);
   } catch (error: any) {
@@ -2056,6 +2132,46 @@ router.post('/stock/toggle', verifyToken, requirePOSRole, async (req: AuthReques
   }
 });
 
+// POST /api/pos/stock/custom-price — Update branch custom price from POS
+router.post(['/stock/custom-price', '/branch/:branchId/custom-price'], verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user!;
+    const isOwner = FranchiseScopeService.isGlobalOwner(user.email, user.role);
+    const branchId = req.params.branchId || (isOwner && req.query.branchId as string) || user.branchId!;
+    const { productId, customPrice, price, isAvailable, isEnabled } = req.body;
+
+    if (!productId) {
+      res.status(400).json({ success: false, error: 'productId is required' });
+      return;
+    }
+    const effectivePrice = customPrice !== undefined ? customPrice : price;
+    if (effectivePrice === undefined || effectivePrice === null || isNaN(Number(effectivePrice))) {
+      res.status(400).json({ success: false, error: 'Valid customPrice is required' });
+      return;
+    }
+
+    const syncResult = await FranchisePricingSyncService.syncPrice({
+      branchId,
+      productId,
+      franchiseId: user.franchiseId,
+      customPrice: Number(effectivePrice),
+      isAvailable,
+      isEnabled,
+      updatedBy: user.email || 'pos_operator'
+    });
+
+    res.json({
+      success: true,
+      message: `Branch custom price updated to ₹${syncResult.customPrice}`,
+      ...syncResult
+    });
+  } catch (error: any) {
+    console.error('[POSStock] Error updating branch custom price:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+
 // GET /api/pos/branches — Return all branches for Owner context switcher
 router.get('/branches', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -2324,11 +2440,14 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
         const existingDoc = await adminDb.collection('orders').doc(bill.orderId || idempotencyKey).get();
         if (existingDoc.exists) {
           duplicateCount++;
+          const existData = existingDoc.data() || {};
           processedBills.push({
             id: existingDoc.id,
             idempotencyKey,
             status: 'ALREADY_SYNCED',
             success: true,
+            permanentBillNo: existData.permanentBillNo || null,
+            billNumber: existData.billNumber || null,
             duplicate: true
           });
           continue;
@@ -2456,6 +2575,28 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
         }).catch((sheetsErr) => {
           console.warn('[OfflineSync] Sheets sync queue warning (non-fatal):', sheetsErr?.message);
         });
+
+        // Active shift sales tally for offline synchronized bill
+        try {
+          const activeShift = await POSService.getActiveShift(branchId, orderData.terminalId);
+          if (activeShift) {
+            const shiftRef = adminDb.collection('pos_shifts').doc(activeShift.id);
+            const isCash = orderData.paymentMethod === 'CASH';
+            const cashAmount = isCash ? calc.finalTotal : 0;
+            const digitalAmount = !isCash ? calc.finalTotal : 0;
+            await shiftRef.set({
+              totalRevenue: (activeShift.totalRevenue || 0) + calc.finalTotal,
+              totalBills: (activeShift.totalBills || 0) + 1,
+              cashSales: (activeShift.cashSales || 0) + cashAmount,
+              expectedCash: (activeShift.openingCash || 0) + (activeShift.cashSales || 0) + cashAmount,
+              updatedAt: new Date().toISOString()
+            }, { merge: true });
+
+            await POSShiftRepository.recordSale(activeShift.id, cashAmount, digitalAmount);
+          }
+        } catch (shErr: any) {
+          console.warn('[SyncOffline] Active shift sale tally update notice:', shErr.message);
+        }
 
         processedBills.push({
           id: orderId,
