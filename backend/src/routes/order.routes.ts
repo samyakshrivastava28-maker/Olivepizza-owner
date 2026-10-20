@@ -1146,7 +1146,25 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
           initialPaymentStatus = cashReceived >= finalOrderTotal - 0.05 ? 'PAID' : 'PENDING';
         } else {
           // Card / UPI / Split: verify settlement details
-          const isSettled = req.body.paymentDetails?.settled === true || !!req.body.paymentDetails?.edcAuthCode || !!req.body.paymentDetails?.transactionId;
+          const digitalRef = (req.body.paymentId || req.body.paymentDetails?.paymentId || req.body.paymentDetails?.providerTransactionId || '').toString().trim();
+          let isVerified = false;
+          if (digitalRef) {
+            try {
+              const payRes = await query(
+                `SELECT id, status, amount FROM payments 
+                 WHERE (id = $1 OR provider_payment_id = $1 OR payment_session_id = $1)
+                 AND status IN ('PAYMENT_CAPTURED', 'PAID')
+                 LIMIT 1`,
+                [digitalRef]
+              );
+              if (payRes.rows.length > 0 && Number(payRes.rows[0].amount) >= finalOrderTotal - 0.05) {
+                isVerified = true;
+              }
+            } catch (payDbErr) {
+              console.warn('[Orders] Non-online payment verification lookup notice:', payDbErr);
+            }
+          }
+          const isSettled = isVerified;
           initialPaymentStatus = isSettled ? 'PAID' : 'PENDING';
         }
       } else if (rawPaymentMethod !== 'COD') {

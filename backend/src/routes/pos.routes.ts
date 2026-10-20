@@ -446,6 +446,37 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
     const branchId = user.branchId!;
     let franchiseId = user.franchiseId!;
 
+    // Fail-Closed Branch Ownership Enforcement (Defect 3)
+    try {
+      const branchAuthCheck = await query(
+        `SELECT id, franchise_id, is_open FROM restaurant_branches WHERE id = $1 LIMIT 1`,
+        [branchId]
+      );
+      if (branchAuthCheck.rows.length === 0) {
+        res.status(403).json({
+          success: false,
+          error: `Forbidden: Branch "${branchId}" does not exist in authorized restaurant records.`
+        });
+        return;
+      }
+      const trustedBranchFranchise = branchAuthCheck.rows[0].franchise_id;
+      if (franchiseId && trustedBranchFranchise && trustedBranchFranchise !== franchiseId) {
+        res.status(403).json({
+          success: false,
+          error: `Forbidden: Cross-franchise access rejected. Branch "${branchId}" does not belong to franchise "${franchiseId}".`
+        });
+        return;
+      }
+      franchiseId = trustedBranchFranchise || franchiseId;
+    } catch (authErr: any) {
+      console.error('[POS Orders] Branch authorization query failed:', authErr.message || authErr);
+      res.status(500).json({
+        success: false,
+        error: `Database authorization failure verifying branch "${branchId}". Operation rejected.`
+      });
+      return;
+    }
+
     // Server-authoritative calculation
     const resolvedOrderType: 'DINE_IN' | 'TAKEAWAY' | 'DELIVERY' = 
       ['DINE_IN', 'TAKEAWAY', 'DELIVERY'].includes(orderType) ? orderType : 'DINE_IN';
@@ -492,20 +523,57 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
       } else {
         paymentStatus = 'PARTIAL'; // Underpaid cash tender
       }
-    } else if (resolvedPaymentMethod === 'CARD') {
-      // Card can be marked PAID only following valid confirmation from configured provider workflow
-      const isVerified = Boolean(paymentDetails.isCardVerified || edcAuthCode || paymentDetails.cardAuthCode);
-      paymentStatus = isVerified ? 'PAID' : 'PENDING';
-    } else if (resolvedPaymentMethod === 'UPI') {
-      // UPI can be marked PAID only following valid confirmation from dynamic QR / gateway webhook / terminal
-      const isVerified = Boolean(paymentDetails.isUpiVerified || paymentDetails.verified || req.body.isUpiVerified);
-      paymentStatus = isVerified ? 'PAID' : 'PENDING';
+    } else if (resolvedPaymentMethod === 'CARD' || resolvedPaymentMethod === 'UPI') {
+      // Server-Verified Payments (Defect 1):
+      // Client-supplied flags (isCardVerified, isUpiVerified, verified) and arbitrary reference strings (edcAuthCode, upiRef, transactionId)
+      // are NEVER trusted as proof of payment.
+      // Payment can only be marked PAID if a trusted server-side record exists in PostgreSQL `payments`
+      // with status = 'PAYMENT_CAPTURED' matching this session/order and covering the required total.
+      const paymentRef = (paymentDetails.paymentId || req.body.paymentId || paymentDetails.providerTransactionId || req.body.providerTransactionId || '').toString().trim();
+      let isVerifiedByServer = false;
+      if (paymentRef) {
+        try {
+          const payRes = await query(
+            `SELECT id, status, amount FROM payments 
+             WHERE (id = $1 OR provider_payment_id = $1 OR payment_session_id = $1)
+             AND status IN ('PAYMENT_CAPTURED', 'PAID')
+             LIMIT 1`,
+            [paymentRef]
+          );
+          if (payRes.rows.length > 0 && Number(payRes.rows[0].amount) >= (calc.finalTotal - 0.05)) {
+            isVerifiedByServer = true;
+          }
+        } catch (payDbErr) {
+          console.warn('[POS Order] Server payment lookup notice:', payDbErr);
+        }
+      }
+
+      // Reject forged success attempts and keep payment pending
+      paymentStatus = isVerifiedByServer ? 'PAID' : 'PENDING';
     } else if (resolvedPaymentMethod === 'SPLIT') {
       const splitCash = Number(paymentDetails.splitCash ?? 0);
       const splitDigital = Number(paymentDetails.splitUPI ?? paymentDetails.splitDigital ?? 0);
-      const isDigitalVerified = Boolean(paymentDetails.splitDigitalVerified || paymentDetails.isUpiVerified);
+      const digitalRef = (paymentDetails.paymentId || req.body.paymentId || paymentDetails.providerTransactionId || '').toString().trim();
+      let isDigitalVerifiedByServer = false;
+      if (digitalRef && splitDigital > 0) {
+        try {
+          const payRes = await query(
+            `SELECT id, status, amount FROM payments 
+             WHERE (id = $1 OR provider_payment_id = $1 OR payment_session_id = $1)
+             AND status IN ('PAYMENT_CAPTURED', 'PAID')
+             LIMIT 1`,
+            [digitalRef]
+          );
+          if (payRes.rows.length > 0 && Number(payRes.rows[0].amount) >= (splitDigital - 0.05)) {
+            isDigitalVerifiedByServer = true;
+          }
+        } catch (payDbErr) {
+          console.warn('[POS Order] Split digital server payment lookup notice:', payDbErr);
+        }
+      }
+
       if (splitCash + splitDigital >= (calc.finalTotal - 0.05)) {
-        paymentStatus = isDigitalVerified ? 'PAID' : 'PARTIAL';
+        paymentStatus = (splitDigital === 0 || isDigitalVerifiedByServer) ? 'PAID' : 'PARTIAL';
       } else {
         paymentStatus = 'PARTIAL';
       }
@@ -565,13 +633,9 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
     const billNumber = `#${permanentBillNo}`;
     const today = canonical.orderDate;
 
-    const resolvedPaymentStatus = ((): string => {
-      const m = (paymentMethod || 'CASH').toUpperCase();
-      if (m === 'CASH') return Number(amountReceived || 0) >= (calc.finalTotal - 0.05) ? 'PAID' : 'PENDING';
-      if (m === 'CARD') return (edcAuthCode && String(edcAuthCode).trim().length > 0) ? 'PAID' : 'PENDING';
-      if (m === 'UPI') return (edcAuthCode || req.body.upiRef || req.body.transactionId) ? 'PAID' : 'PENDING';
-      return 'PAID';
-    })();
+    // Consistent Payment Status (Defect 2):
+    // Use the exact same validated payment outcome in PostgreSQL and the Firestore projection.
+    const finalValidatedPaymentStatus = paymentStatus;
 
     const orderDocData = {
       id: newOrderId,
@@ -594,14 +658,14 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
       totalAmount: calc.finalTotal,
       finalTotal: calc.finalTotal,
       status: resolvedOrderType === 'DINE_IN' ? 'preparing' : 'pending_acceptance',
-      paymentMethod: (paymentMethod || 'CASH').toUpperCase(),
-      paymentStatus: resolvedPaymentStatus,
+      paymentMethod: resolvedPaymentMethod,
+      paymentStatus: finalValidatedPaymentStatus,
       paymentDetails: {
-        method: paymentMethod || 'CASH',
-        amountReceived: Number(amountReceived || calc.finalTotal),
-        changeDue: Number(changeDue || 0),
+        method: resolvedPaymentMethod,
+        amountReceived: Number(amountReceived || (resolvedPaymentMethod === 'CASH' ? cashReceived : calc.finalTotal)),
+        changeDue: Number(changeDue || serverChangeDue),
         edcAuthCode: edcAuthCode || null,
-        paidAt: resolvedPaymentStatus === 'PAID' ? new Date().toISOString() : null
+        paidAt: finalValidatedPaymentStatus === 'PAID' ? new Date().toISOString() : null
       },
       orderType: resolvedOrderType.toLowerCase(),
       source: 'POS',
@@ -1210,7 +1274,7 @@ router.get('/receipt/:orderId', verifyToken, requirePOSRole, async (req: AuthReq
       deliveryFee: Number(d.deliveryFee || 0),
       finalTotal: Number(d.totalAmount || d.finalTotal || 0),
       paymentMethod: d.paymentMethod || 'CASH',
-      paymentStatus: d.paymentStatus || 'PAID',
+      paymentStatus: d.paymentStatus || 'PENDING',
       amountReceived: d.paymentDetails?.amountReceived || undefined,
       changeDue: d.paymentDetails?.changeDue || undefined,
       edcAuthCode: d.paymentDetails?.edcAuthCode || undefined
@@ -2530,7 +2594,39 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
     }
 
     const branchId = user.branchId!;
-    const franchiseId = user.franchiseId!;
+    let franchiseId = user.franchiseId!;
+
+    // Fail-Closed Branch Ownership Enforcement (Defect 3)
+    try {
+      const branchAuthCheck = await query(
+        `SELECT id, franchise_id, is_open FROM restaurant_branches WHERE id = $1 LIMIT 1`,
+        [branchId]
+      );
+      if (branchAuthCheck.rows.length === 0) {
+        res.status(403).json({
+          success: false,
+          error: `Forbidden: Branch "${branchId}" does not exist in authorized restaurant records.`
+        });
+        return;
+      }
+      const trustedBranchFranchise = branchAuthCheck.rows[0].franchise_id;
+      if (franchiseId && trustedBranchFranchise && trustedBranchFranchise !== franchiseId) {
+        res.status(403).json({
+          success: false,
+          error: `Forbidden: Cross-franchise access rejected. Branch "${branchId}" does not belong to franchise "${franchiseId}".`
+        });
+        return;
+      }
+      franchiseId = trustedBranchFranchise || franchiseId;
+    } catch (authErr: any) {
+      console.error('[POS Sync-Offline] Branch authorization query failed:', authErr.message || authErr);
+      res.status(500).json({
+        success: false,
+        error: `Database authorization failure verifying branch "${branchId}". Operation rejected.`
+      });
+      return;
+    }
+
     const processedBills: any[] = [];
     let duplicateCount = 0;
 
@@ -2574,17 +2670,34 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
 
         const orderId = syncOrderId;
 
-        // Payment status resolution for offline bills:
-        // Cash is locally durably received. Offline UPI and Card remain PENDING (reconciliation-required)
-        // until verified against bank statement or provider batch settlement.
+        // Payment status resolution for offline bills (Defect 1 & 2):
+        // Cash is locally collected in physical cash drawer.
+        // Offline UPI, Card, and Split digital remain PENDING (reconciliation-required) on the server.
+        // Client-supplied flags (isUpiVerified, isCardVerified) are strictly rejected as proof of settlement.
         const offlinePayMethod = (bill.payment?.method || bill.paymentMethod || 'CASH').toString().toUpperCase();
         let offlinePayStatus = 'PENDING';
         if (offlinePayMethod === 'CASH') {
           offlinePayStatus = 'PAID';
-        } else if (offlinePayMethod === 'UPI') {
-          offlinePayStatus = Boolean(bill.payment?.isUpiVerified || bill.isUpiVerified) ? 'PAID' : 'PENDING';
-        } else if (offlinePayMethod === 'CARD') {
-          offlinePayStatus = Boolean(bill.payment?.isCardVerified || bill.isCardVerified) ? 'PAID' : 'PENDING';
+        } else {
+          const digitalRef = (bill.payment?.paymentId || bill.paymentId || bill.payment?.providerTransactionId || '').toString().trim();
+          let isServerVerified = false;
+          if (digitalRef) {
+            try {
+              const payRes = await query(
+                `SELECT id, status, amount FROM payments 
+                 WHERE (id = $1 OR provider_payment_id = $1 OR payment_session_id = $1)
+                 AND status IN ('PAYMENT_CAPTURED', 'PAID')
+                 LIMIT 1`,
+                [digitalRef]
+              );
+              if (payRes.rows.length > 0 && Number(payRes.rows[0].amount) >= (calc.finalTotal - 0.05)) {
+                isServerVerified = true;
+              }
+            } catch (pErr) {
+              console.warn('[SyncOffline] Payment record verification notice:', pErr);
+            }
+          }
+          offlinePayStatus = isServerVerified ? 'PAID' : 'PENDING';
         }
 
         // Authoritative Canonical PostgreSQL Order, Items, and Bill Commit (Atomic & Mandatory)
@@ -2619,6 +2732,9 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
 
         const permBillNo = canonicalResult.permanentBillNo;
 
+        // Consistent Offline Payment Status (Defect 2):
+        // Use the exact same validated payment outcome in PostgreSQL and the Firestore projection.
+        // Never default to 'PAID' when canonical status is unknown or pending!
         const orderData = {
           id: orderId,
           orderId,
@@ -2638,8 +2754,8 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
           discountAmount: calc.discountAmount,
           taxAmount: calc.taxes,
           deliveryFee: calc.deliveryFee,
-          paymentMethod: bill.payment?.method || 'CASH',
-          paymentStatus: bill.payment?.status || 'PAID',
+          paymentMethod: offlinePayMethod,
+          paymentStatus: offlinePayStatus,
           status: 'completed',
           source: 'POS',
           orderType: bill.orderSource || 'POS_DINE_IN',

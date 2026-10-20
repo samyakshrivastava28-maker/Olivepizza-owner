@@ -68,24 +68,28 @@ export class AuthoritativePricingResolver {
       throw new Error('Product identifier is required. Client-submitted items without product ID are strictly rejected.');
     }
 
-    // 0. Validate branch/franchise relationship if franchiseId is provided
-    if (req.franchiseId) {
-      try {
-        const branchCheck = await query(
-          `SELECT franchise_id FROM restaurant_branches WHERE id = $1 LIMIT 1`,
-          [branchId]
-        );
-        if (branchCheck.rows.length > 0) {
-          const trustedFranchiseId = branchCheck.rows[0].franchise_id;
-          if (trustedFranchiseId && trustedFranchiseId !== req.franchiseId) {
-            throw new Error(`Cross-franchise access rejected: branch "${branchId}" does not belong to franchise "${req.franchiseId}".`);
-          }
-        }
-      } catch (fErr: any) {
-        if (fErr.message?.includes('Cross-franchise access rejected')) {
-          throw fErr;
-        }
+    // 0. Fail-Closed Branch & Franchise Ownership Verification
+    // Every scoped pricing operation MUST have a valid, confirmed branch in restaurant_branches.
+    // If the branch/franchise relationship cannot be verified or the query fails, reject the operation immediately.
+    let trustedFranchiseId: string | null = null;
+    try {
+      const branchCheck = await query(
+        `SELECT id, franchise_id, is_open FROM restaurant_branches WHERE id = $1 LIMIT 1`,
+        [branchId]
+      );
+      if (branchCheck.rows.length === 0) {
+        throw new Error(`[AuthoritativePricingResolver] Branch "${branchId}" does not exist in authorized restaurant records.`);
       }
+      trustedFranchiseId = branchCheck.rows[0].franchise_id || null;
+      if (req.franchiseId && trustedFranchiseId && trustedFranchiseId !== req.franchiseId) {
+        throw new Error(`Cross-franchise access rejected: branch "${branchId}" belongs to franchise "${trustedFranchiseId}", not "${req.franchiseId}".`);
+      }
+    } catch (fErr: any) {
+      if (fErr.message?.includes('Cross-franchise access rejected') || fErr.message?.includes('does not exist in authorized restaurant records')) {
+        throw fErr;
+      }
+      console.error(`[AuthoritativePricingResolver] Branch authorization query failed for ${branchId}:`, fErr.message || fErr);
+      throw new Error(`[AuthoritativePricingResolver] Database authorization failure verifying branch "${branchId}": ${fErr.message || fErr}`);
     }
 
     // Check bounded cache
