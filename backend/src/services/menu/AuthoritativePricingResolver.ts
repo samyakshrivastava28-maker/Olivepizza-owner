@@ -81,24 +81,31 @@ export class AuthoritativePricingResolver {
         throw new Error(`[AuthoritativePricingResolver] Branch "${branchId}" does not exist in authorized restaurant records.`);
       }
       trustedFranchiseId = branchCheck.rows[0].franchise_id || null;
-      if (req.franchiseId && trustedFranchiseId && trustedFranchiseId !== req.franchiseId) {
-        throw new Error(`Cross-franchise access rejected: branch "${branchId}" belongs to franchise "${trustedFranchiseId}", not "${req.franchiseId}".`);
+      if (req.franchiseId) {
+        if (!trustedFranchiseId) {
+          throw new Error(`[AuthoritativePricingResolver] Branch "${branchId}" has no assigned franchise ownership. Franchise-scoped access rejected.`);
+        }
+        if (trustedFranchiseId !== req.franchiseId) {
+          throw new Error(`Cross-franchise access rejected: branch "${branchId}" belongs to franchise "${trustedFranchiseId}", not "${req.franchiseId}".`);
+        }
       }
     } catch (fErr: any) {
-      if (fErr.message?.includes('Cross-franchise access rejected') || fErr.message?.includes('does not exist in authorized restaurant records')) {
+      if (fErr.message?.includes('Cross-franchise access rejected') || 
+          fErr.message?.includes('does not exist in authorized restaurant records') ||
+          fErr.message?.includes('has no assigned franchise ownership')) {
         throw fErr;
       }
       console.error(`[AuthoritativePricingResolver] Branch authorization query failed for ${branchId}:`, fErr.message || fErr);
       throw new Error(`[AuthoritativePricingResolver] Database authorization failure verifying branch "${branchId}": ${fErr.message || fErr}`);
     }
 
-    // Check bounded cache
+    // Check bounded cache (scoped by branch and trusted franchise)
     const sizeKey = (req.size || '').toLowerCase().trim();
     const crustKey = (req.crust || '').toLowerCase().trim();
     const addonsKey = Array.isArray(req.addons) 
       ? req.addons.map(a => typeof a === 'object' ? (a.id || a.name || '') : String(a)).sort().join(',')
       : '';
-    const cacheKey = `${branchId}:${productId}:${sizeKey}:${crustKey}:${addonsKey}`;
+    const cacheKey = `${branchId}:${trustedFranchiseId || 'unassigned'}:${productId}:${sizeKey}:${crustKey}:${addonsKey}`;
     const cached = this.priceCache.get(cacheKey);
     const now = Date.now();
     if (cached && (now - cached.timestamp) < this.CACHE_TTL_MS) {

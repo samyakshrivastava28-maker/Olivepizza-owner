@@ -553,4 +553,102 @@ export class PaymentService {
       refundId: refundRes.refundTransactionId,
     };
   }
+
+  /**
+   * P0 Security: Verifies that a server-captured payment is valid, matches the required amount,
+   * and atomically binds it to targetOrderId, preventing captured payment reuse across bills.
+   * 
+   * Returns:
+   * - verified: true if payment is captured, covers amount, and is successfully bound/already bound to targetOrderId.
+   * - verified: false if missing, uncaptured, insufficient, or already consumed by a different order.
+   */
+  public static async verifyAndBindCapturedPayment(params: {
+    paymentRef: string;
+    targetOrderId: string;
+    expectedAmount: number;
+    expectedMethod?: string;
+    currency?: string;
+  }): Promise<{
+    verified: boolean;
+    reason?: 'ALREADY_CONSUMED' | 'NOT_FOUND' | 'NOT_CAPTURED' | 'INSUFFICIENT_AMOUNT' | 'CURRENCY_MISMATCH' | 'DB_ERROR';
+    paymentId?: string;
+    amount?: number;
+    status?: string;
+  }> {
+    const { paymentRef, targetOrderId, expectedAmount, currency = 'INR' } = params;
+    const cleanRef = (paymentRef || '').toString().trim();
+    const cleanOrderId = (targetOrderId || '').toString().trim();
+
+    if (!cleanRef || !cleanOrderId || expectedAmount <= 0) {
+      return { verified: false, reason: 'NOT_FOUND' };
+    }
+
+    try {
+      // 1. Check existing record first to provide exact audit diagnostics
+      const checkRes = await query(
+        `SELECT id, order_id, amount, currency, status, payment_method, provider 
+         FROM payments 
+         WHERE (id = $1 OR provider_payment_id = $1 OR payment_session_id = $1)
+         LIMIT 1`,
+        [cleanRef]
+      );
+
+      if (checkRes.rows.length === 0) {
+        return { verified: false, reason: 'NOT_FOUND' };
+      }
+
+      const rec = checkRes.rows[0];
+
+      // Verify status
+      if (!['PAYMENT_CAPTURED', 'PAID'].includes(rec.status)) {
+        return { verified: false, reason: 'NOT_CAPTURED', paymentId: rec.id, status: rec.status };
+      }
+
+      // Verify amount (allow 5 paisa rounding tolerance)
+      const payAmount = Number(rec.amount || 0);
+      if (payAmount < (expectedAmount - 0.05)) {
+        return { verified: false, reason: 'INSUFFICIENT_AMOUNT', paymentId: rec.id, amount: payAmount };
+      }
+
+      // Verify currency if present
+      if (rec.currency && rec.currency.toUpperCase() !== currency.toUpperCase()) {
+        return { verified: false, reason: 'CURRENCY_MISMATCH', paymentId: rec.id };
+      }
+
+      // Anti-Reuse Check: If already assigned to a DIFFERENT order, strictly reject!
+      if (rec.order_id && rec.order_id !== cleanOrderId) {
+        console.warn(`[PaymentSecurity] REUSE ATTEMPT DETECTED! Payment ${rec.id} is already bound to order ${rec.order_id}. Cannot be reused for order ${cleanOrderId}.`);
+        return { verified: false, reason: 'ALREADY_CONSUMED', paymentId: rec.id };
+      }
+
+      // 2. Atomic Bind: Claim payment for this targetOrderId under concurrency protection
+      // If order_id is NULL or already equals cleanOrderId, set order_id = cleanOrderId
+      const updateRes = await query(
+        `UPDATE payments 
+         SET order_id = $1, updated_at = NOW() 
+         WHERE (id = $2 OR provider_payment_id = $2 OR payment_session_id = $2)
+           AND status IN ('PAYMENT_CAPTURED', 'PAID')
+           AND amount >= ($3 - 0.05)
+           AND (order_id IS NULL OR order_id = $1)
+         RETURNING id, order_id, amount, status`,
+        [cleanOrderId, cleanRef, expectedAmount]
+      );
+
+      if (updateRes.rows.length === 0) {
+        // Under concurrent race condition, another request claimed the payment first!
+        console.warn(`[PaymentSecurity] Concurrency lock: Payment ${cleanRef} was claimed by another transaction during atomic bind.`);
+        return { verified: false, reason: 'ALREADY_CONSUMED' };
+      }
+
+      return {
+        verified: true,
+        paymentId: updateRes.rows[0].id,
+        amount: Number(updateRes.rows[0].amount),
+        status: updateRes.rows[0].status
+      };
+    } catch (err: any) {
+      console.error('[PaymentSecurity] Database error during payment verification and binding:', err.message || err);
+      return { verified: false, reason: 'DB_ERROR' };
+    }
+  }
 }

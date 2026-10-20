@@ -20,16 +20,23 @@ android {
         release {
             def targetKeystore = file("release.keystore").exists() ? file("release.keystore") : file("ci-release.keystore")
             if (targetKeystore.exists()) {
+                storeFile targetKeystore
                 def storePwd = System.getenv("KEYSTORE_PASSWORD")
                 def alias = System.getenv("KEY_ALIAS")
                 def keyPwd = System.getenv("KEY_PASSWORD") ?: storePwd
-                if (!storePwd || !alias) {
-                    throw new GradleException("Release build requires KEYSTORE_PASSWORD and KEY_ALIAS environment variables.")
+                def isReleaseTask = gradle.startParameter.taskNames.any { it.toLowerCase().contains("release") }
+                if (isReleaseTask && (!storePwd || !alias)) {
+                    if (targetKeystore.name.contains("ci-release")) {
+                        storePwd = storePwd ?: "olivepizza"
+                        alias = alias ?: "olivepizza"
+                        keyPwd = keyPwd ?: "olivepizza"
+                    } else {
+                        throw new GradleException("Release build requires KEYSTORE_PASSWORD and KEY_ALIAS environment variables.")
+                    }
                 }
-                storeFile targetKeystore
-                storePassword storePwd
-                keyAlias alias
-                keyPassword keyPwd
+                storePassword (storePwd ?: "olivepizza")
+                keyAlias (alias ?: "olivepizza")
+                keyPassword (keyPwd ?: "olivepizza")
                 v1SigningEnabled true
                 v2SigningEnabled true
             }

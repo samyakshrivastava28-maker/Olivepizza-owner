@@ -21,6 +21,7 @@ import { calculateDistance } from '../lib/utils.js';
 import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
 import { AuthoritativePricingResolver } from '../services/menu/AuthoritativePricingResolver.js';
+import { PaymentService } from '../services/payment/PaymentService.js';
 import crypto from 'crypto';
 
 // Restaurant local timezone for daily order counter reset
@@ -1149,42 +1150,33 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
           const digitalRef = (req.body.paymentId || req.body.paymentDetails?.paymentId || req.body.paymentDetails?.providerTransactionId || '').toString().trim();
           let isVerified = false;
           if (digitalRef) {
-            try {
-              const payRes = await query(
-                `SELECT id, status, amount FROM payments 
-                 WHERE (id = $1 OR provider_payment_id = $1 OR payment_session_id = $1)
-                 AND status IN ('PAYMENT_CAPTURED', 'PAID')
-                 LIMIT 1`,
-                [digitalRef]
-              );
-              if (payRes.rows.length > 0 && Number(payRes.rows[0].amount) >= finalOrderTotal - 0.05) {
-                isVerified = true;
-              }
-            } catch (payDbErr) {
-              console.warn('[Orders] Non-online payment verification lookup notice:', payDbErr);
+            const bindRes = await PaymentService.verifyAndBindCapturedPayment({
+              paymentRef: digitalRef,
+              targetOrderId: newOrderId,
+              expectedAmount: finalOrderTotal,
+              expectedMethod: rawPaymentMethod,
+            });
+            isVerified = bindRes.verified;
+            if (!bindRes.verified && bindRes.reason === 'ALREADY_CONSUMED') {
+              console.warn(`[Orders] Payment ${digitalRef} already bound to another order. Non-online order settlement rejected.`);
             }
           }
           const isSettled = isVerified;
           initialPaymentStatus = isSettled ? 'PAID' : 'PENDING';
         }
       } else if (rawPaymentMethod !== 'COD') {
-        const incomingPaymentId = req.body.paymentId;
+        const incomingPaymentId = (req.body.paymentId || req.body.paymentDetails?.paymentId || '').toString().trim();
         if (incomingPaymentId) {
-          try {
-            const payRes = await query(
-              'SELECT id, status, amount, order_id FROM payments WHERE (id = $1 OR provider_payment_id = $1) AND (order_id IS NULL OR order_id = $2)',
-              [incomingPaymentId, newOrderId]
-            );
-            if (payRes.rows.length > 0) {
-              const payRow = payRes.rows[0];
-              if (payRow.status === 'PAYMENT_CAPTURED' && Number(payRow.amount) >= finalOrderTotal - 0.05) {
-                initialPaymentStatus = 'PAID';
-                // Tie payment to newOrderId to prevent replay attacks
-                await query('UPDATE payments SET order_id = $1 WHERE id = $2', [newOrderId, payRow.id]);
-              }
-            }
-          } catch (e) {
-            console.warn('[Orders] Canonical payment verification lookup notice:', e);
+          const bindRes = await PaymentService.verifyAndBindCapturedPayment({
+            paymentRef: incomingPaymentId,
+            targetOrderId: newOrderId,
+            expectedAmount: finalOrderTotal,
+            expectedMethod: rawPaymentMethod,
+          });
+          if (bindRes.verified) {
+            initialPaymentStatus = 'PAID';
+          } else {
+            console.warn(`[Orders] Online payment verification failed for ${incomingPaymentId}: ${bindRes.reason}`);
           }
         }
 

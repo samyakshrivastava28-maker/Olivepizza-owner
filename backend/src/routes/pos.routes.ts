@@ -21,6 +21,7 @@ import { OrderPersistenceArchiveService } from '../services/order/OrderPersisten
 import { POSShiftRepository } from '../repositories/posShift.repository.js';
 import { query } from '../lib/db.js';
 import { FranchisePricingSyncService } from '../services/menu/FranchisePricingSyncService.js';
+import { PaymentService } from '../services/payment/PaymentService.js';
 import crypto from 'crypto';
 import net from 'net';
 
@@ -460,12 +461,21 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
         return;
       }
       const trustedBranchFranchise = branchAuthCheck.rows[0].franchise_id;
-      if (franchiseId && trustedBranchFranchise && trustedBranchFranchise !== franchiseId) {
-        res.status(403).json({
-          success: false,
-          error: `Forbidden: Cross-franchise access rejected. Branch "${branchId}" does not belong to franchise "${franchiseId}".`
-        });
-        return;
+      if (franchiseId) {
+        if (!trustedBranchFranchise) {
+          res.status(403).json({
+            success: false,
+            error: `Forbidden: Branch "${branchId}" has no assigned franchise ownership. Operation rejected.`
+          });
+          return;
+        }
+        if (trustedBranchFranchise !== franchiseId) {
+          res.status(403).json({
+            success: false,
+            error: `Forbidden: Cross-franchise access rejected. Branch "${branchId}" belongs to franchise "${trustedBranchFranchise}", not "${franchiseId}".`
+          });
+          return;
+        }
       }
       franchiseId = trustedBranchFranchise || franchiseId;
     } catch (authErr: any) {
@@ -515,6 +525,10 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
     const cashReceived = Number(paymentDetails.cashReceived ?? amountReceived ?? 0);
     const serverChangeDue = cashReceived >= calc.finalTotal ? parseFloat((cashReceived - calc.finalTotal).toFixed(2)) : 0;
 
+    // Generate or retain target order ID for payment binding & canonical idempotency
+    const incomingOrderId = (req.body.id || req.body.orderId || '').toString().trim();
+    const orderId = incomingOrderId || ('pos_' + crypto.randomUUID().slice(0, 12));
+
     let paymentStatus: 'PAID' | 'PENDING' | 'PARTIAL' | 'FAILED' = 'PENDING';
 
     if (resolvedPaymentMethod === 'CASH') {
@@ -524,31 +538,27 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
         paymentStatus = 'PARTIAL'; // Underpaid cash tender
       }
     } else if (resolvedPaymentMethod === 'CARD' || resolvedPaymentMethod === 'UPI') {
-      // Server-Verified Payments (Defect 1):
+      // Server-Verified Payments & Anti-Reuse Binding (P0 Defect 1):
       // Client-supplied flags (isCardVerified, isUpiVerified, verified) and arbitrary reference strings (edcAuthCode, upiRef, transactionId)
       // are NEVER trusted as proof of payment.
-      // Payment can only be marked PAID if a trusted server-side record exists in PostgreSQL `payments`
-      // with status = 'PAYMENT_CAPTURED' matching this session/order and covering the required total.
+      // Payment can only be marked PAID if a captured server-side record exists in PostgreSQL `payments`
+      // covering the required total and is atomically bound to this target order ID without having been consumed by another order.
       const paymentRef = (paymentDetails.paymentId || req.body.paymentId || paymentDetails.providerTransactionId || req.body.providerTransactionId || '').toString().trim();
       let isVerifiedByServer = false;
       if (paymentRef) {
-        try {
-          const payRes = await query(
-            `SELECT id, status, amount FROM payments 
-             WHERE (id = $1 OR provider_payment_id = $1 OR payment_session_id = $1)
-             AND status IN ('PAYMENT_CAPTURED', 'PAID')
-             LIMIT 1`,
-            [paymentRef]
-          );
-          if (payRes.rows.length > 0 && Number(payRes.rows[0].amount) >= (calc.finalTotal - 0.05)) {
-            isVerifiedByServer = true;
-          }
-        } catch (payDbErr) {
-          console.warn('[POS Order] Server payment lookup notice:', payDbErr);
+        const bindRes = await PaymentService.verifyAndBindCapturedPayment({
+          paymentRef,
+          targetOrderId: orderId,
+          expectedAmount: calc.finalTotal,
+          expectedMethod: resolvedPaymentMethod,
+        });
+        isVerifiedByServer = bindRes.verified;
+        if (!bindRes.verified && bindRes.reason === 'ALREADY_CONSUMED') {
+          console.warn(`[POS Order] Payment settlement rejected: Payment ${paymentRef} is already bound to another order.`);
         }
       }
 
-      // Reject forged success attempts and keep payment pending
+      // Reject forged success attempts and uncaptured/already-consumed payments
       paymentStatus = isVerifiedByServer ? 'PAID' : 'PENDING';
     } else if (resolvedPaymentMethod === 'SPLIT') {
       const splitCash = Number(paymentDetails.splitCash ?? 0);
@@ -556,20 +566,12 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
       const digitalRef = (paymentDetails.paymentId || req.body.paymentId || paymentDetails.providerTransactionId || '').toString().trim();
       let isDigitalVerifiedByServer = false;
       if (digitalRef && splitDigital > 0) {
-        try {
-          const payRes = await query(
-            `SELECT id, status, amount FROM payments 
-             WHERE (id = $1 OR provider_payment_id = $1 OR payment_session_id = $1)
-             AND status IN ('PAYMENT_CAPTURED', 'PAID')
-             LIMIT 1`,
-            [digitalRef]
-          );
-          if (payRes.rows.length > 0 && Number(payRes.rows[0].amount) >= (splitDigital - 0.05)) {
-            isDigitalVerifiedByServer = true;
-          }
-        } catch (payDbErr) {
-          console.warn('[POS Order] Split digital server payment lookup notice:', payDbErr);
-        }
+        const bindRes = await PaymentService.verifyAndBindCapturedPayment({
+          paymentRef: digitalRef,
+          targetOrderId: orderId,
+          expectedAmount: splitDigital,
+        });
+        isDigitalVerifiedByServer = bindRes.verified;
       }
 
       if (splitCash + splitDigital >= (calc.finalTotal - 0.05)) {
@@ -592,6 +594,7 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
 
     // Authoritative PostgreSQL Order, Immutable Item Snapshot & Permanent Bill Creation
     const canonical = await CanonicalOrderService.createCanonicalOrder({
+      id: orderId,
       orderSource,
       orderType: resolvedOrderType.toLowerCase() as any,
       customerName: customerName || (resolvedOrderType === 'DINE_IN' ? `Table ${tableNumber || 'Guest'}` : 'Walk-in Customer'),
@@ -2610,12 +2613,21 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
         return;
       }
       const trustedBranchFranchise = branchAuthCheck.rows[0].franchise_id;
-      if (franchiseId && trustedBranchFranchise && trustedBranchFranchise !== franchiseId) {
-        res.status(403).json({
-          success: false,
-          error: `Forbidden: Cross-franchise access rejected. Branch "${branchId}" does not belong to franchise "${franchiseId}".`
-        });
-        return;
+      if (franchiseId) {
+        if (!trustedBranchFranchise) {
+          res.status(403).json({
+            success: false,
+            error: `Forbidden: Branch "${branchId}" has no assigned franchise ownership. Operation rejected.`
+          });
+          return;
+        }
+        if (trustedBranchFranchise !== franchiseId) {
+          res.status(403).json({
+            success: false,
+            error: `Forbidden: Cross-franchise access rejected. Branch "${branchId}" belongs to franchise "${trustedBranchFranchise}", not "${franchiseId}".`
+          });
+          return;
+        }
       }
       franchiseId = trustedBranchFranchise || franchiseId;
     } catch (authErr: any) {
@@ -2682,19 +2694,15 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
           const digitalRef = (bill.payment?.paymentId || bill.paymentId || bill.payment?.providerTransactionId || '').toString().trim();
           let isServerVerified = false;
           if (digitalRef) {
-            try {
-              const payRes = await query(
-                `SELECT id, status, amount FROM payments 
-                 WHERE (id = $1 OR provider_payment_id = $1 OR payment_session_id = $1)
-                 AND status IN ('PAYMENT_CAPTURED', 'PAID')
-                 LIMIT 1`,
-                [digitalRef]
-              );
-              if (payRes.rows.length > 0 && Number(payRes.rows[0].amount) >= (calc.finalTotal - 0.05)) {
-                isServerVerified = true;
-              }
-            } catch (pErr) {
-              console.warn('[SyncOffline] Payment record verification notice:', pErr);
+            const bindRes = await PaymentService.verifyAndBindCapturedPayment({
+              paymentRef: digitalRef,
+              targetOrderId: syncOrderId,
+              expectedAmount: calc.finalTotal,
+              expectedMethod: offlinePayMethod,
+            });
+            isServerVerified = bindRes.verified;
+            if (!bindRes.verified && bindRes.reason === 'ALREADY_CONSUMED') {
+              console.warn(`[SyncOffline] Payment ${digitalRef} already consumed by another order. Marked PENDING for reconciliation.`);
             }
           }
           offlinePayStatus = isServerVerified ? 'PAID' : 'PENDING';
