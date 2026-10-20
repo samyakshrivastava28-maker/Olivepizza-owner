@@ -24,6 +24,7 @@ export interface AuthoritativePriceResult {
   addons: Array<{ name: string; price: number }>;
   isAvailable: boolean;
   source: 'FRANCHISE_PRICE_OVERRIDE' | 'MASTER_CATALOG';
+  version?: number;
 }
 
 /**
@@ -32,12 +33,29 @@ export interface AuthoritativePriceResult {
  * 
  * Rules:
  * 1. Checks PostgreSQL franchise_prices table first for branch-specific selling_price and availability.
- * 2. If no branch override exists, checks Firestore master catalog (or cache).
- * 3. Validates sizes, crusts, and addons against authoritative definitions.
- * 4. NEVER trusts client-submitted prices or totals.
- * 5. NEVER invents fake fallback prices (like ₹249). Throws an error if product is unconfigured or unavailable.
+ * 2. Distinguishes confirmed absence of branch override from database failures / outages (fails closed!).
+ * 3. Inherits master catalog price ONLY when confirmed absent in branch overrides and product is active.
+ * 4. Validates sizes, crusts, and addons against authoritative definitions — rejects invalid variants.
+ * 5. Deterministic size pricing: preserves size delta without arbitrary fractional ratios.
+ * 6. Branch-scoped in-memory cache with bounded 60s staleness and immediate invalidation.
+ * 7. Strictly rejects client-submitted prices, unconfigured items, or cross-franchise requests.
  */
 export class AuthoritativePricingResolver {
+  private static priceCache = new Map<string, { result: AuthoritativePriceResult; timestamp: number }>();
+  private static readonly CACHE_TTL_MS = 60 * 1000; // 60s bounded staleness
+
+  public static clearCache(branchId?: string): void {
+    if (!branchId) {
+      this.priceCache.clear();
+      return;
+    }
+    for (const key of this.priceCache.keys()) {
+      if (key.startsWith(`${branchId}:`)) {
+        this.priceCache.delete(key);
+      }
+    }
+  }
+
   /**
    * Resolves the authoritative item price for a given branch and item options.
    */
@@ -48,6 +66,39 @@ export class AuthoritativePricingResolver {
     }
     if (!productId) {
       throw new Error('Product identifier is required. Client-submitted items without product ID are strictly rejected.');
+    }
+
+    // 0. Validate branch/franchise relationship if franchiseId is provided
+    if (req.franchiseId) {
+      try {
+        const branchCheck = await query(
+          `SELECT franchise_id FROM restaurant_branches WHERE id = $1 LIMIT 1`,
+          [branchId]
+        );
+        if (branchCheck.rows.length > 0) {
+          const trustedFranchiseId = branchCheck.rows[0].franchise_id;
+          if (trustedFranchiseId && trustedFranchiseId !== req.franchiseId) {
+            throw new Error(`Cross-franchise access rejected: branch "${branchId}" does not belong to franchise "${req.franchiseId}".`);
+          }
+        }
+      } catch (fErr: any) {
+        if (fErr.message?.includes('Cross-franchise access rejected')) {
+          throw fErr;
+        }
+      }
+    }
+
+    // Check bounded cache
+    const sizeKey = (req.size || '').toLowerCase().trim();
+    const crustKey = (req.crust || '').toLowerCase().trim();
+    const addonsKey = Array.isArray(req.addons) 
+      ? req.addons.map(a => typeof a === 'object' ? (a.id || a.name || '') : String(a)).sort().join(',')
+      : '';
+    const cacheKey = `${branchId}:${productId}:${sizeKey}:${crustKey}:${addonsKey}`;
+    const cached = this.priceCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && (now - cached.timestamp) < this.CACHE_TTL_MS) {
+      return cached.result;
     }
 
     // 1. Fetch master catalog item for structure, variants, sizes, addons, and baseline price
@@ -63,9 +114,13 @@ export class AuthoritativePricingResolver {
     }
 
     const productName = masterItem.productName || masterItem.name || 'Menu Item';
+    const masterBasePrice = Number(masterItem.offerPrice || masterItem.basePrice || masterItem.price || 0);
 
     // 2. Query PostgreSQL franchise_prices for branch-specific price override
     let branchOverride: { selling_price: number; is_available: boolean; version: number } | null = null;
+    let isConfirmedAbsence = false;
+    let pgError: Error | null = null;
+
     try {
       const pgRes = await query(
         `SELECT selling_price, is_available, version 
@@ -80,26 +135,18 @@ export class AuthoritativePricingResolver {
           is_available: Boolean(pgRes.rows[0].is_available),
           version: Number(pgRes.rows[0].version) || 1
         };
+      } else {
+        isConfirmedAbsence = true;
       }
     } catch (pgErr: any) {
-      console.warn(`[AuthoritativePricingResolver] PostgreSQL franchise_prices lookup warning for ${branchId}/${productId}:`, pgErr.message);
+      pgError = pgErr;
+      console.error(`[AuthoritativePricingResolver] PostgreSQL franchise_prices query failure for ${branchId}/${productId}:`, pgErr.message);
     }
 
-    // Fallback to Firestore branch_menu_overrides if PostgreSQL was temporarily unreachable
-    if (!branchOverride) {
-      try {
-        const oDoc = await adminDb.collection('branch_menu_overrides').doc(`${branchId}_${productId}`).get();
-        if (oDoc.exists) {
-          const oData = oDoc.data()!;
-          if (oData.customPrice !== undefined || oData.sellingPrice !== undefined) {
-            branchOverride = {
-              selling_price: Number(oData.customPrice ?? oData.sellingPrice),
-              is_available: oData.isAvailable !== false && oData.isEnabled !== false,
-              version: Number(oData.version) || 1
-            };
-          }
-        }
-      } catch {}
+    // FAIL CLOSED: If PostgreSQL failed with an error, we CANNOT assume "no override exists"
+    // A database outage must fail closed rather than silently charging master catalog price!
+    if (pgError) {
+      throw new Error(`Canonical pricing service unavailable for branch "${branchId}". Database lookup failed: ${pgError.message}`);
     }
 
     // Check availability
@@ -111,59 +158,89 @@ export class AuthoritativePricingResolver {
     // Determine base selling price
     let basePrice: number;
     let source: 'FRANCHISE_PRICE_OVERRIDE' | 'MASTER_CATALOG';
+    let version = 1;
 
     if (branchOverride && !isNaN(branchOverride.selling_price) && branchOverride.selling_price > 0) {
       basePrice = branchOverride.selling_price;
       source = 'FRANCHISE_PRICE_OVERRIDE';
-    } else {
-      const catBase = Number(masterItem.offerPrice || masterItem.basePrice || masterItem.price || 0);
-      if (catBase <= 0) {
-        throw new Error(`Authoritative price for "${productName}" (${productId}) is not configured or invalid.`);
+      version = branchOverride.version;
+    } else if (isConfirmedAbsence) {
+      // Inherit master catalog only when confirmed absent from branch overrides
+      if (masterBasePrice <= 0) {
+        throw new Error(`Authoritative price for "${productName}" (${productId}) is not configured or invalid in master catalog.`);
       }
-      basePrice = catBase;
+      basePrice = masterBasePrice;
       source = 'MASTER_CATALOG';
+    } else {
+      throw new Error(`Authoritative pricing could not be verified for "${productName}" (${productId}) at branch "${branchId}".`);
     }
 
-    // 3. Resolve size / variant pricing
+    // 3. Resolve size / variant pricing & validate sizes
     let sizePrice = 0;
     const selectedSize = (req.size || '').toLowerCase().trim();
     if (selectedSize) {
-      if (masterItem.sizes && masterItem.sizes[selectedSize]?.price) {
-        sizePrice = Number(masterItem.sizes[selectedSize].price);
-      } else if (Array.isArray(masterItem.variants)) {
-        const v = masterItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
-        if (v && v.price) {
-          sizePrice = Number(v.price);
+      let matchedSize = false;
+      if (masterItem.sizes && typeof masterItem.sizes === 'object') {
+        const foundKey = Object.keys(masterItem.sizes).find(k => k.toLowerCase() === selectedSize);
+        if (foundKey && masterItem.sizes[foundKey]?.price != null) {
+          sizePrice = Number(masterItem.sizes[foundKey].price);
+          matchedSize = true;
         }
       }
-    }
-
-    // If size price is explicitly specified in variants and larger than 0, use sizePrice as base or diff
-    // In Olive Pizza schema, sizes often define the full price or differential. If sizePrice > basePrice, sizePrice is the unit baseline.
-    let itemBasePrice = sizePrice > 0 ? sizePrice : basePrice;
-
-    // If branch has a price override, apply proportional ratio or direct override to size
-    if (branchOverride && sizePrice > 0) {
-      const masterBase = Number(masterItem.offerPrice || masterItem.basePrice || masterItem.price || 1);
-      const ratio = masterBase > 0 ? branchOverride.selling_price / masterBase : 1;
-      itemBasePrice = parseFloat((sizePrice * ratio).toFixed(2));
-    }
-
-    // 4. Resolve crust pricing
-    let crustPrice = 0;
-    const selectedCrust = (req.crust || '').toLowerCase().trim();
-    if (selectedCrust && Array.isArray(masterItem.crusts)) {
-      const c = masterItem.crusts.find((cr: any) => (cr.name || cr.id || '').toLowerCase() === selectedCrust);
-      if (c && c.price) {
-        crustPrice = Math.max(0, Number(c.price));
+      if (!matchedSize && Array.isArray(masterItem.variants)) {
+        const v = masterItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
+        if (v && v.price != null) {
+          sizePrice = Number(v.price);
+          matchedSize = true;
+        }
+      }
+      if (!matchedSize) {
+        throw new Error(`Invalid size "${req.size}" requested for product "${productName}".`);
       }
     }
 
-    // 5. Resolve addons pricing
+    // Deterministic size pricing: preserve size tier increment above branch base price
+    let itemBasePrice: number;
+    if (branchOverride) {
+      if (sizePrice > 0 && masterBasePrice > 0) {
+        const sizeDelta = Math.max(0, sizePrice - masterBasePrice);
+        itemBasePrice = parseFloat((basePrice + sizeDelta).toFixed(2));
+      } else {
+        itemBasePrice = basePrice;
+      }
+    } else {
+      itemBasePrice = sizePrice > 0 ? sizePrice : basePrice;
+    }
+
+    // 4. Resolve crust pricing & validate crust
+    let crustPrice = 0;
+    const selectedCrust = (req.crust || '').toLowerCase().trim();
+    const isDefaultCrust = ['classic', 'normal', 'regular', 'default', ''].includes(selectedCrust);
+
+    if (selectedCrust && !isDefaultCrust) {
+      if (!Array.isArray(masterItem.crusts) || masterItem.crusts.length === 0) {
+        throw new Error(`Invalid crust "${req.crust}" requested: product "${productName}" does not offer custom crusts.`);
+      }
+      const c = masterItem.crusts.find((cr: any) => (cr.name || cr.id || '').toLowerCase() === selectedCrust);
+      if (!c) {
+        throw new Error(`Invalid crust "${req.crust}" requested for product "${productName}".`);
+      }
+      crustPrice = Math.max(0, Number(c.price || 0));
+    } else if (isDefaultCrust && Array.isArray(masterItem.crusts)) {
+      const c = masterItem.crusts.find((cr: any) => (cr.name || cr.id || '').toLowerCase() === selectedCrust);
+      if (c) {
+        crustPrice = Math.max(0, Number(c.price || 0));
+      }
+    }
+
+    // 5. Resolve addons pricing & validate addons
     let addonsPrice = 0;
     const formattedAddons: Array<{ name: string; price: number }> = [];
 
-    if (Array.isArray(req.addons) && req.addons.length > 0 && Array.isArray(masterItem.addons)) {
+    if (Array.isArray(req.addons) && req.addons.length > 0) {
+      if (!Array.isArray(masterItem.addons) || masterItem.addons.length === 0) {
+        throw new Error(`Invalid addons requested: product "${productName}" does not offer custom add-ons.`);
+      }
       for (const a of req.addons) {
         if (!a) continue;
         const targetId = typeof a === 'object' ? (a.id || a.name || '') : String(a);
@@ -177,20 +254,22 @@ export class AuthoritativePricingResolver {
             (ma.name && ma.name.toLowerCase() === targetName.toLowerCase())
         );
 
-        if (authoritativeAddon && authoritativeAddon.price != null) {
-          const aPrice = Math.max(0, Number(authoritativeAddon.price));
-          addonsPrice += aPrice;
-          formattedAddons.push({
-            name: authoritativeAddon.name || targetName,
-            price: aPrice
-          });
+        if (!authoritativeAddon) {
+          throw new Error(`Invalid addon "${targetName}" requested for product "${productName}".`);
         }
+
+        const aPrice = Math.max(0, Number(authoritativeAddon.price || 0));
+        addonsPrice += aPrice;
+        formattedAddons.push({
+          name: authoritativeAddon.name || targetName,
+          price: aPrice
+        });
       }
     }
 
     const unitPrice = parseFloat((itemBasePrice + crustPrice + addonsPrice).toFixed(2));
 
-    return {
+    const result: AuthoritativePriceResult = {
       branchId,
       franchiseId: req.franchiseId,
       productId,
@@ -202,7 +281,13 @@ export class AuthoritativePricingResolver {
       addonsPrice,
       addons: formattedAddons,
       isAvailable,
-      source
+      source,
+      version
     };
+
+    // Save in cache
+    this.priceCache.set(cacheKey, { result, timestamp: now });
+
+    return result;
   }
 }

@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
+import { query } from '../config/postgres.js';
 import { verifyToken, AuthRequest, requireRole } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { webSocketServer } from '../services/websocket/WebSocketServer.js';
@@ -468,9 +469,29 @@ router.put('/branch/:branchId/customizations', verifyToken, requireRole(['restau
     const { branchId } = req.params;
     const user = req.user!;
     const isOwner = user.role === 'owner' || user.role === 'platform_owner' || user.role === 'admin' || user.role === 'developer';
-    if (!isOwner && user.branchId && user.branchId !== branchId && user.branchId !== 'all') {
-      res.status(403).json({ success: false, error: 'Forbidden: You are not authorized to modify customizations for this branch.' });
-      return;
+    
+    // Strict Scope & Role Validation:
+    // 1. Cashiers and POS counter staff cannot manage franchise prices
+    // 2. Cross-franchise price modification is strictly rejected
+    if (!isOwner) {
+      if (['cashier', 'pos_operator', 'staff', 'delivery_partner'].includes(user.role)) {
+        res.status(403).json({ success: false, error: 'Forbidden: Cashier and counter staff accounts cannot modify menu pricing.' });
+        return;
+      }
+      if (user.franchiseId) {
+        const branchCheck = await query(
+          `SELECT franchise_id FROM restaurant_branches WHERE id = $1 LIMIT 1`,
+          [branchId]
+        );
+        if (branchCheck.rows.length > 0 && branchCheck.rows[0].franchise_id !== user.franchiseId) {
+          res.status(403).json({ success: false, error: 'Forbidden: Cross-franchise access denied. You cannot modify prices for another franchise branch.' });
+          return;
+        }
+      }
+      if (user.branchId && user.branchId !== branchId && user.branchId !== 'all') {
+        res.status(403).json({ success: false, error: 'Forbidden: You are not authorized to modify customizations for this branch.' });
+        return;
+      }
     }
 
     const { productId, allowedSizes, allowedCrusts, allowedAddons, channelAvailability, customPrice, price, isEnabled, isAvailable } = req.body;
@@ -513,9 +534,29 @@ router.post('/branch/:branchId/custom-price', verifyToken, requireRole(['restaur
     const { branchId } = req.params;
     const user = req.user!;
     const isOwner = user.role === 'owner' || user.role === 'platform_owner' || user.role === 'admin' || user.role === 'developer';
-    if (!isOwner && user.branchId && user.branchId !== branchId && user.branchId !== 'all') {
-      res.status(403).json({ success: false, error: 'Forbidden: You are not authorized to modify pricing for this branch.' });
-      return;
+    
+    // Strict Scope & Role Validation:
+    // 1. Cashiers and POS counter staff cannot manage franchise prices
+    // 2. Cross-franchise price modification is strictly rejected
+    if (!isOwner) {
+      if (['cashier', 'pos_operator', 'staff', 'delivery_partner'].includes(user.role)) {
+        res.status(403).json({ success: false, error: 'Forbidden: Cashier and counter staff accounts cannot modify menu pricing.' });
+        return;
+      }
+      if (user.franchiseId) {
+        const branchCheck = await query(
+          `SELECT franchise_id FROM restaurant_branches WHERE id = $1 LIMIT 1`,
+          [branchId]
+        );
+        if (branchCheck.rows.length > 0 && branchCheck.rows[0].franchise_id !== user.franchiseId) {
+          res.status(403).json({ success: false, error: 'Forbidden: Cross-franchise access denied. You cannot modify prices for another franchise branch.' });
+          return;
+        }
+      }
+      if (user.branchId && user.branchId !== branchId && user.branchId !== 'all') {
+        res.status(403).json({ success: false, error: 'Forbidden: You are not authorized to modify pricing for this branch.' });
+        return;
+      }
     }
 
     const { productId, customPrice, price, isAvailable, isEnabled } = req.body;

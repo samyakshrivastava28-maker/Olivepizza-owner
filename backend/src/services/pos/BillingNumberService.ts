@@ -84,22 +84,6 @@ export class BillingNumberService {
         orderTime
       };
 
-      // Non-blocking mirror to billing repository for downstream projections
-      billingRepository.saveBill({
-        permanentBillNumber: permanentBillNo,
-        billFormattedNumber: `BILL-${String(permanentBillNo).padStart(6, '0')}`,
-        orderId: `ALLOCATED_${permanentBillNo}`,
-        source: 'POS',
-        franchiseId: 'fra_primary',
-        branchId: 'main_branch',
-        totalAmount: 0,
-        paymentMethod: 'PENDING',
-        paymentStatus: 'PENDING',
-        createdAt: new Date().toISOString()
-      }).catch((e) => {
-        console.warn('[BillingNumberService] Non-blocking projection sync notice:', e?.message || e);
-      });
-
       return allocated;
     });
   }

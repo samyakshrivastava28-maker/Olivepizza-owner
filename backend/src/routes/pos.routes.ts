@@ -473,6 +473,47 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
     }
     const cashierName = user.email?.split('@')[0] || 'Counter Cashier';
 
+    // Typed Payment Validation Contract:
+    // Resolve mismatch between nested paymentDetails and top-level fields
+    const paymentDetails = req.body.paymentDetails || {};
+    const rawMethod = (paymentDetails.method || paymentMethod || 'CASH').toString().toUpperCase();
+    const resolvedPaymentMethod: 'CASH' | 'UPI' | 'CARD' | 'SPLIT' = 
+      ['CASH', 'UPI', 'CARD', 'SPLIT'].includes(rawMethod) ? (rawMethod as any) : 'CASH';
+
+    // Server-side validate cash tender & change due
+    const cashReceived = Number(paymentDetails.cashReceived ?? amountReceived ?? 0);
+    const serverChangeDue = cashReceived >= calc.finalTotal ? parseFloat((cashReceived - calc.finalTotal).toFixed(2)) : 0;
+
+    let paymentStatus: 'PAID' | 'PENDING' | 'PARTIAL' | 'FAILED' = 'PENDING';
+
+    if (resolvedPaymentMethod === 'CASH') {
+      if (cashReceived >= (calc.finalTotal - 0.05)) {
+        paymentStatus = 'PAID';
+      } else {
+        paymentStatus = 'PARTIAL'; // Underpaid cash tender
+      }
+    } else if (resolvedPaymentMethod === 'CARD') {
+      // Card can be marked PAID only following valid confirmation from configured provider workflow
+      const isVerified = Boolean(paymentDetails.isCardVerified || edcAuthCode || paymentDetails.cardAuthCode);
+      paymentStatus = isVerified ? 'PAID' : 'PENDING';
+    } else if (resolvedPaymentMethod === 'UPI') {
+      // UPI can be marked PAID only following valid confirmation from dynamic QR / gateway webhook / terminal
+      const isVerified = Boolean(paymentDetails.isUpiVerified || paymentDetails.verified || req.body.isUpiVerified);
+      paymentStatus = isVerified ? 'PAID' : 'PENDING';
+    } else if (resolvedPaymentMethod === 'SPLIT') {
+      const splitCash = Number(paymentDetails.splitCash ?? 0);
+      const splitDigital = Number(paymentDetails.splitUPI ?? paymentDetails.splitDigital ?? 0);
+      const isDigitalVerified = Boolean(paymentDetails.splitDigitalVerified || paymentDetails.isUpiVerified);
+      if (splitCash + splitDigital >= (calc.finalTotal - 0.05)) {
+        paymentStatus = isDigitalVerified ? 'PAID' : 'PARTIAL';
+      } else {
+        paymentStatus = 'PARTIAL';
+      }
+    } else {
+      // Unrecognized methods must never default to PAID!
+      paymentStatus = 'PENDING';
+    }
+
     // Map orderSource
     const orderSourceMap: Record<string, string> = {
       DINE_IN: 'POS_DINE_IN',
@@ -506,14 +547,8 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
       sgst: calc.sgst,
       deliveryFee: calc.deliveryFee,
       totalAmount: calc.finalTotal,
-      paymentMethod: (paymentMethod || 'CASH').toUpperCase(),
-      paymentStatus: ((): string => {
-        const m = (paymentMethod || 'CASH').toUpperCase();
-        if (m === 'CASH') return Number(amountReceived || 0) >= (calc.finalTotal - 0.05) ? 'PAID' : 'PENDING';
-        if (m === 'CARD') return (edcAuthCode && String(edcAuthCode).trim().length > 0) ? 'PAID' : 'PENDING';
-        if (m === 'UPI') return (edcAuthCode || req.body.upiRef || req.body.transactionId) ? 'PAID' : 'PENDING';
-        return 'PAID';
-      })(),
+      paymentMethod: resolvedPaymentMethod,
+      paymentStatus,
       orderStatus: resolvedOrderType === 'DINE_IN' ? 'preparing' : 'pending_acceptance',
       franchiseId,
       branchId,
@@ -2501,20 +2536,28 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
 
     for (const bill of bills) {
       const idempotencyKey = bill.idempotencyKey || bill.orderId || `offline_${Date.now()}`;
+      const syncOrderId = bill.orderId || idempotencyKey;
       
       try {
-        // Check if already processed
-        const existingDoc = await adminDb.collection('orders').doc(bill.orderId || idempotencyKey).get();
-        if (existingDoc.exists) {
+        // 1. Check PostgreSQL canonical ledger first for stable duplicate suppression
+        const existingOrder = await query(
+          `SELECT id, permanent_bill_no, daily_order_no, payment_status, total_amount 
+           FROM canonical_orders 
+           WHERE id = $1 LIMIT 1`,
+          [syncOrderId]
+        );
+
+        if (existingOrder.rows.length > 0) {
           duplicateCount++;
-          const existData = existingDoc.data() || {};
+          const existRow = existingOrder.rows[0];
           processedBills.push({
-            id: existingDoc.id,
+            id: existRow.id,
             idempotencyKey,
             status: 'ALREADY_SYNCED',
             success: true,
-            permanentBillNo: existData.permanentBillNo || null,
-            billNumber: existData.billNumber || null,
+            permanentBillNo: Number(existRow.permanent_bill_no),
+            dailyOrderNumber: Number(existRow.daily_order_no),
+            billNumber: `#${existRow.permanent_bill_no}`,
             duplicate: true
           });
           continue;
@@ -2529,7 +2572,20 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
           branchId
         });
 
-        const orderId = bill.orderId || ('ord_pos_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
+        const orderId = syncOrderId;
+
+        // Payment status resolution for offline bills:
+        // Cash is locally durably received. Offline UPI and Card remain PENDING (reconciliation-required)
+        // until verified against bank statement or provider batch settlement.
+        const offlinePayMethod = (bill.payment?.method || bill.paymentMethod || 'CASH').toString().toUpperCase();
+        let offlinePayStatus = 'PENDING';
+        if (offlinePayMethod === 'CASH') {
+          offlinePayStatus = 'PAID';
+        } else if (offlinePayMethod === 'UPI') {
+          offlinePayStatus = Boolean(bill.payment?.isUpiVerified || bill.isUpiVerified) ? 'PAID' : 'PENDING';
+        } else if (offlinePayMethod === 'CARD') {
+          offlinePayStatus = Boolean(bill.payment?.isCardVerified || bill.isCardVerified) ? 'PAID' : 'PENDING';
+        }
 
         // Authoritative Canonical PostgreSQL Order, Items, and Bill Commit (Atomic & Mandatory)
         const canonicalResult = await CanonicalOrderService.createCanonicalOrder({
@@ -2551,8 +2607,8 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
           discountAmount: calc.discountAmount,
           taxAmount: calc.taxes,
           totalAmount: calc.finalTotal,
-          paymentMethod: bill.payment?.method || 'CASH',
-          paymentStatus: bill.payment?.status || 'PAID',
+          paymentMethod: offlinePayMethod,
+          paymentStatus: offlinePayStatus,
           orderStatus: 'completed',
           franchiseId,
           branchId,

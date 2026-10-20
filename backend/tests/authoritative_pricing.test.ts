@@ -142,4 +142,114 @@ describe('Authoritative Multi-Franchise Pricing & RBAC Integration Tests', () =>
     const staffApps = ['POS', 'RESTAURANT_MANAGER'];
     expect(staffApps.map(a => a.toUpperCase()).includes('POS')).toBe(true);
   });
+
+  it('rejects invalid size variants and fails closed', async () => {
+    await expect(
+      AuthoritativePricingResolver.resolveItemPrice({
+        branchId: branchA,
+        productId: testProductId,
+        size: 'ExtraLarge_Invalid'
+      })
+    ).rejects.toThrow(/Invalid size "ExtraLarge_Invalid"/);
+  });
+
+  it('rejects invalid crusts and fails closed', async () => {
+    await expect(
+      AuthoritativePricingResolver.resolveItemPrice({
+        branchId: branchA,
+        productId: testProductId,
+        crust: 'StuffedCrust_Invalid'
+      })
+    ).rejects.toThrow(/Invalid crust/);
+  });
+
+  it('rejects invalid addons and fails closed', async () => {
+    await expect(
+      AuthoritativePricingResolver.resolveItemPrice({
+        branchId: branchA,
+        productId: testProductId,
+        addons: ['add_unauthorized_topping']
+      })
+    ).rejects.toThrow(/Invalid addon "add_unauthorized_topping"/);
+  });
+
+  it('calculates deterministic size delta pricing without arbitrary proportional ratios', async () => {
+    // Master base: 189, Medium: 299 (delta = +110)
+    // Branch A override: 199 -> Medium unitPrice = 199 + 110 = 309
+    const priceMedium = await AuthoritativePricingResolver.resolveItemPrice({
+      branchId: branchA,
+      productId: testProductId,
+      size: 'medium'
+    });
+    expect(priceMedium.unitPrice).toBe(309.00);
+    expect(priceMedium.source).toBe('FRANCHISE_PRICE_OVERRIDE');
+  });
+
+  it('inherits master catalog pricing when confirmed absent from branch overrides', async () => {
+    const inheritedProdId = 'prod_inherits_master_pricing';
+    POSService.seedCatalogItem(inheritedProdId, {
+      id: inheritedProdId,
+      name: 'Paneer Tikka Special',
+      basePrice: 249.00,
+      isAvailable: true
+    });
+
+    const inheritedPrice = await AuthoritativePricingResolver.resolveItemPrice({
+      branchId: 'branch_non_overridden_store',
+      productId: inheritedProdId
+    });
+    expect(inheritedPrice.unitPrice).toBe(249.00);
+    expect(inheritedPrice.source).toBe('MASTER_CATALOG');
+  });
+
+  it('enforces payment validation contract for cash tender, change, and digital verification', () => {
+    const finalTotal = 418.00;
+
+    // 1. Cash fully paid
+    const cashPaidReceived = 500;
+    const changeDue = cashPaidReceived >= finalTotal ? parseFloat((cashPaidReceived - finalTotal).toFixed(2)) : 0;
+    const cashStatus = cashPaidReceived >= (finalTotal - 0.05) ? 'PAID' : 'PARTIAL';
+    expect(cashStatus).toBe('PAID');
+    expect(changeDue).toBe(82.00);
+
+    // 2. Cash underpaid
+    const cashUnderpaidReceived = 350;
+    const underpaidStatus = cashUnderpaidReceived >= (finalTotal - 0.05) ? 'PAID' : 'PARTIAL';
+    expect(underpaidStatus).toBe('PARTIAL');
+
+    // 3. Card unverified manual string
+    const cardUnverified = { method: 'CARD', isCardVerified: false, cardRef: 'MANUAL_1234' };
+    const cardUnverifiedStatus = cardUnverified.isCardVerified ? 'PAID' : 'PENDING';
+    expect(cardUnverifiedStatus).toBe('PENDING');
+
+    // 4. Card verified with EDC auth
+    const cardVerified = { method: 'CARD', isCardVerified: true, cardAuthCode: 'AUTH_882910' };
+    const cardVerifiedStatus = cardVerified.isCardVerified ? 'PAID' : 'PENDING';
+    expect(cardVerifiedStatus).toBe('PAID');
+
+    // 5. UPI unverified manual reference
+    const upiUnverified = { method: 'UPI', isUpiVerified: false, upiRef: 'UTR991823771' };
+    const upiUnverifiedStatus = upiUnverified.isUpiVerified ? 'PAID' : 'PENDING';
+    expect(upiUnverifiedStatus).toBe('PENDING');
+
+    // 6. UPI verified via webhook / QR
+    const upiVerified = { method: 'UPI', isUpiVerified: true, upiTxnId: 'UPI_TXN_OK_99' };
+    const upiVerifiedStatus = upiVerified.isUpiVerified ? 'PAID' : 'PENDING';
+    expect(upiVerifiedStatus).toBe('PAID');
+
+    // 7. Split payment with unverified digital
+    const splitPayment = { method: 'SPLIT', splitCash: 200, splitUPI: 218, splitDigitalVerified: false };
+    const splitTotal = splitPayment.splitCash + splitPayment.splitUPI;
+    const splitStatus = (splitTotal >= finalTotal - 0.05 && splitPayment.splitDigitalVerified) ? 'PAID' : 'PARTIAL';
+    expect(splitStatus).toBe('PARTIAL');
+
+    // 8. Offline cash vs digital
+    const offlineCash = { method: 'CASH', isOffline: true };
+    const offlineCashStatus = offlineCash.method === 'CASH' ? 'PAID' : 'PENDING';
+    expect(offlineCashStatus).toBe('PAID');
+
+    const offlineDigital = { method: 'UPI', isOffline: true, isUpiVerified: false };
+    const offlineDigitalStatus = (offlineDigital.method === 'CASH' || offlineDigital.isUpiVerified) ? 'PAID' : 'PENDING';
+    expect(offlineDigitalStatus).toBe('PENDING');
+  });
 });

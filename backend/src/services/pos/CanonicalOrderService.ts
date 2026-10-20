@@ -114,6 +114,35 @@ export class CanonicalOrderService {
       }
     }
 
+    // 0. Idempotent check: if order with this ID already exists in canonical PostgreSQL ledger, return existing details
+    if (params.id) {
+      try {
+        const existing = await query(
+          `SELECT id, permanent_bill_no, daily_order_no, order_date, order_time, total_amount, payment_status, order_status 
+           FROM canonical_orders 
+           WHERE id = $1 LIMIT 1`,
+          [orderId]
+        );
+        if (existing.rows.length > 0) {
+          const row = existing.rows[0];
+          console.log(`[CanonicalOrderService] Idempotent retry detected for existing order ${orderId} (Bill: #${row.permanent_bill_no}). Returning existing record.`);
+          return {
+            id: row.id,
+            permanentBillNo: Number(row.permanent_bill_no),
+            dailyOrderNo: Number(row.daily_order_no),
+            orderDate: row.order_date,
+            orderTime: row.order_time,
+            totalAmount: Number(row.total_amount),
+            paymentStatus: row.payment_status,
+            orderStatus: row.order_status,
+            isDuplicate: true
+          };
+        }
+      } catch (checkErr: any) {
+        console.warn(`[CanonicalOrderService] Idempotency pre-check notice for ${orderId}:`, checkErr.message);
+      }
+    }
+
     // 1. Allocate continuous Permanent Bill No. and Daily Order No.
     const nums = await BillingNumberService.allocateNumbers();
     const { permanentBillNo, dailyOrderNo, orderDate, orderTime } = nums;
@@ -141,26 +170,17 @@ export class CanonicalOrderService {
       const itemId = item.menuItemId || (item as any).id;
       if (itemId) {
         if (params.branchId) {
-          try {
-            const authPrice = await AuthoritativePricingResolver.resolveItemPrice({
-              branchId: params.branchId,
-              franchiseId: params.franchiseId,
-              productId: itemId,
-              size: item.size,
-              crust: item.crust,
-              addons: item.addons
-            });
-            unitPrice = authPrice.unitPrice;
-            itemName = authPrice.productName;
-          } catch (resErr: any) {
-            if (resErr.message?.includes('unavailable') || resErr.message?.includes('not configured')) {
-              throw resErr;
-            }
-            console.warn('[CanonicalOrderService] AuthoritativePricingResolver fallback to catalog:', resErr?.message);
-          }
-        }
-
-        if (unitPrice <= 0) {
+          const authPrice = await AuthoritativePricingResolver.resolveItemPrice({
+            branchId: params.branchId,
+            franchiseId: params.franchiseId,
+            productId: itemId,
+            size: item.size,
+            crust: item.crust,
+            addons: item.addons
+          });
+          unitPrice = authPrice.unitPrice;
+          itemName = authPrice.productName;
+        } else {
           try {
             const catItem = await POSService.getCatalogItem(itemId);
             if (catItem) {
@@ -243,106 +263,114 @@ export class CanonicalOrderService {
     const cashierName = params.cashierName || (params.orderSource === 'ONLINE' ? 'Online Customer App' : 'Cashier');
 
     // 2. Execute atomic PostgreSQL transaction for Order, Line Items, and Bill (Authoritative Canonical Ledger)
-    await withTransaction(async (client) => {
-      // 2.1 Insert canonical order
-      await client.query(`
-        INSERT INTO canonical_orders (
-          id, permanent_bill_no, daily_order_no, order_date, order_time,
-          order_source, order_type, order_status, payment_method, payment_status,
-          customer_name, customer_phone, delivery_address, table_number,
-          subtotal, discount_amount, coupon_code, tax_amount, cgst, sgst,
-          delivery_fee, total_amount, franchise_id, branch_id, cashier_id,
-          cashier_name, terminal_id, notes
-        ) VALUES (
-          $1, $2, $3, $4::date, $5::time,
-          $6, $7, $8, $9, $10,
-          $11, $12, $13, $14,
-          $15, $16, $17, $18, $19, $20,
-          $21, $22, $23, $24, $25,
-          $26, $27, $28
-        ) ON CONFLICT (id) DO UPDATE SET
-          order_status = EXCLUDED.order_status,
-          payment_status = EXCLUDED.payment_status,
-          total_amount = EXCLUDED.total_amount,
-          updated_at = NOW();
-      `, [
-        orderId, permanentBillNo, dailyOrderNo, orderDate, orderTime,
-        params.orderSource, resolvedOrderType, orderStatus, paymentMethod, paymentStatus,
-        params.customerName || 'Walk-in Customer', params.customerPhone || 'N/A',
-        params.deliveryAddress || null, params.tableNumber || null,
-        subtotal, discountAmount, params.couponCode || null, taxAmount, cgst, sgst,
-        deliveryFee, totalAmount, franchiseId, branchId, params.cashierId || null,
-        cashierName, params.terminalId || 'POS-TERM-01', params.notes || ''
-      ]);
-
-      // 2.2 Insert immutable line items
-      for (const item of processedItems) {
-        const itemId = crypto.randomUUID();
-        await client.query(`
-          INSERT INTO canonical_order_items (
-            id, order_id, menu_item_id, item_name, size_variant,
-            crust, quantity, unit_price, addons_json, line_total
+    try {
+      await withTransaction(async (client) => {
+        // 2.1 Insert canonical order
+        const orderInsertRes = await client.query(`
+          INSERT INTO canonical_orders (
+            id, permanent_bill_no, daily_order_no, order_date, order_time,
+            order_source, order_type, order_status, payment_method, payment_status,
+            customer_name, customer_phone, delivery_address, table_number,
+            subtotal, discount_amount, coupon_code, tax_amount, cgst, sgst,
+            delivery_fee, total_amount, franchise_id, branch_id, cashier_id,
+            cashier_name, terminal_id, notes
           ) VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9::jsonb, $10
-          ) ON CONFLICT (id) DO NOTHING;
-        `, [
-          itemId, orderId, item.menuItemId || null, item.name, item.size || 'Regular',
-          item.crust || 'Normal', item.quantity, item.unitPrice, JSON.stringify(item.addons || []), item.lineTotal
-        ]);
-      }
-
-      // 2.3 Insert canonical financial bill
-      const billId = crypto.randomUUID();
-      await client.query(`
-        INSERT INTO canonical_bills (
-          id, permanent_bill_no, order_id, bill_date, subtotal,
-          discount, tax, net_amount, payment_method, payment_status
-        ) VALUES (
-          $1, $2, $3, $4::date, $5,
-          $6, $7, $8, $9, $10
-        ) ON CONFLICT (id) DO NOTHING;
-      `, [
-        billId, permanentBillNo, orderId, orderDate, subtotal,
-        discountAmount, taxAmount, totalAmount, paymentMethod, paymentStatus
-      ]);
-
-      // 2.4 Insert canonical payment record
-      const paymentId = 'pay_' + orderId;
-      await client.query(`
-        INSERT INTO payments (
-          id, order_id, user_id, provider, amount, currency, status, payment_method
-        ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8
-        ) ON CONFLICT (id) DO UPDATE SET
-          status = EXCLUDED.status,
-          amount = EXCLUDED.amount,
-          updated_at = NOW();
-      `, [
-        paymentId, orderId, params.customerPhone || 'customer', paymentMethod, totalAmount, 'INR',
-        paymentStatus === 'PAID' ? 'PAYMENT_CAPTURED' : 'PENDING', paymentMethod
-      ]);
-
-      // 2.5 Update customer total_orders and total_spent in app_users
-      if (params.customerPhone && params.customerPhone !== 'N/A') {
-        await client.query(`
-          INSERT INTO app_users (
-            firebase_uid, phone, name, role, status, is_active, total_orders, total_spent, updated_at
-          ) VALUES (
-            $1, $2, $3, 'customer', 'APPROVED', true, 1, $4, NOW()
-          ) ON CONFLICT (phone) DO UPDATE SET
-            total_orders = app_users.total_orders + 1,
-            total_spent = app_users.total_spent + EXCLUDED.total_spent,
-            name = CASE WHEN app_users.name = 'Olive Customer' AND EXCLUDED.name != 'Walk-in Customer' THEN EXCLUDED.name ELSE app_users.name END,
+            $1, $2, $3, $4::date, $5::time,
+            $6, $7, $8, $9, $10,
+            $11, $12, $13, $14,
+            $15, $16, $17, $18, $19, $20,
+            $21, $22, $23, $24, $25,
+            $26, $27, $28
+          ) ON CONFLICT (id) DO UPDATE SET
+            order_status = EXCLUDED.order_status,
+            payment_status = EXCLUDED.payment_status,
+            total_amount = EXCLUDED.total_amount,
             updated_at = NOW();
         `, [
-          `cust_${params.customerPhone.replace(/[^0-9]/g, '')}`,
-          params.customerPhone,
-          params.customerName || 'Walk-in Customer',
-          totalAmount
-        ]).catch(() => {});
-      }
-    });
+          orderId, permanentBillNo, dailyOrderNo, orderDate, orderTime,
+          params.orderSource, resolvedOrderType, orderStatus, paymentMethod, paymentStatus,
+          params.customerName || 'Walk-in Customer', params.customerPhone || 'N/A',
+          params.deliveryAddress || null, params.tableNumber || null,
+          subtotal, discountAmount, params.couponCode || null, taxAmount, cgst, sgst,
+          deliveryFee, totalAmount, franchiseId, branchId, params.cashierId || null,
+          cashierName, params.terminalId || 'POS-TERM-01', params.notes || ''
+        ]);
+
+        // 2.2 Insert immutable line items
+        for (const item of processedItems) {
+          const itemId = crypto.randomUUID();
+          await client.query(`
+            INSERT INTO canonical_order_items (
+              id, order_id, menu_item_id, item_name, size_variant,
+              crust, quantity, unit_price, addons_json, line_total
+            ) VALUES (
+              $1, $2, $3, $4, $5,
+              $6, $7, $8, $9::jsonb, $10
+            ) ON CONFLICT (id) DO NOTHING;
+          `, [
+            itemId, orderId, item.menuItemId || null, item.name, item.size || 'Regular',
+            item.crust || 'Normal', item.quantity, item.unitPrice, JSON.stringify(item.addons || []), item.lineTotal
+          ]);
+        }
+
+        // 2.3 Insert canonical financial bill
+        const billId = crypto.randomUUID();
+        await client.query(`
+          INSERT INTO canonical_bills (
+            id, permanent_bill_no, order_id, bill_date, subtotal,
+            discount, tax, net_amount, payment_method, payment_status
+          ) VALUES (
+            $1, $2, $3, $4::date, $5,
+            $6, $7, $8, $9, $10
+          ) ON CONFLICT (permanent_bill_no) DO UPDATE SET
+            net_amount = EXCLUDED.net_amount,
+            payment_status = EXCLUDED.payment_status;
+        `, [
+          billId, permanentBillNo, orderId, orderDate, subtotal,
+          discountAmount, taxAmount, totalAmount, paymentMethod, paymentStatus
+        ]);
+
+        // 2.4 Insert canonical payment record
+        const paymentId = 'pay_' + orderId;
+        await client.query(`
+          INSERT INTO payments (
+            id, order_id, user_id, provider, amount, currency, status, payment_method
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8
+          ) ON CONFLICT (id) DO UPDATE SET
+            status = EXCLUDED.status,
+            amount = EXCLUDED.amount,
+            updated_at = NOW();
+        `, [
+          paymentId, orderId, params.customerPhone || 'customer', paymentMethod, totalAmount, 'INR',
+          paymentStatus === 'PAID' ? 'PAYMENT_CAPTURED' : 'PENDING', paymentMethod
+        ]);
+
+        // 2.5 Update customer total_orders and total_spent in app_users
+        if (params.customerPhone && params.customerPhone !== 'N/A') {
+          const custId = `cust_${params.customerPhone.replace(/[^0-9]/g, '')}`;
+          await client.query(`
+            INSERT INTO app_users (
+              id, phone, name, role, status, is_active, total_orders, total_spent, updated_at
+            ) VALUES (
+              $1, $2, $3, 'customer', 'APPROVED', true, 1, $4, NOW()
+            ) ON CONFLICT (id) DO UPDATE SET
+              total_orders = COALESCE(app_users.total_orders, 0) + 1,
+              total_spent = COALESCE(app_users.total_spent, 0) + EXCLUDED.total_spent,
+              name = CASE WHEN app_users.name = 'Olive Customer' AND EXCLUDED.name != 'Walk-in Customer' THEN EXCLUDED.name ELSE app_users.name END,
+              updated_at = NOW();
+          `, [
+            custId,
+            params.customerPhone,
+            params.customerName || 'Walk-in Customer',
+            totalAmount
+          ]);
+        }
+      });
+    } catch (txError: any) {
+      console.error('[CanonicalOrderService] Transaction FAILED with error:', txError.message || txError);
+      throw txError;
+    }
 
     // 2.4 Authoritative Firestore Billing Record Persistence
     try {

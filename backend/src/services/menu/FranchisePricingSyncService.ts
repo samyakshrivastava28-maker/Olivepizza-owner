@@ -2,6 +2,7 @@ import { adminDb } from '../../config/firebase.js';
 import { query } from '../../lib/db.js';
 import { redisService } from '../redis/RedisService.js';
 import { webSocketServer } from '../websocket/WebSocketServer.js';
+import { AuthoritativePricingResolver } from './AuthoritativePricingResolver.js';
 
 export interface SyncFranchisePriceParams {
   branchId: string;
@@ -176,12 +177,13 @@ export class FranchisePricingSyncService {
 
     await adminDb.collection('branch_menu_overrides').doc(docKey).set(firestoreOverride, { merge: true });
 
-    // 4. Invalidate Redis cache `cache:menu:branch:${branchId}:*`
+    // 4. Invalidate Redis cache and in-memory AuthoritativePricingResolver cache
     try {
+      AuthoritativePricingResolver.clearCache(branchId);
       await redisService.delByPattern(`cache:menu:branch:${branchId}:*`);
       await redisService.invalidateMenu(branchId);
     } catch (redisErr: any) {
-      console.warn('[FranchisePricingSync] Redis cache invalidation warning:', redisErr?.message);
+      console.warn('[FranchisePricingSync] Cache invalidation warning:', redisErr?.message);
     }
 
     // 5. Broadcast WebSocket event `branch_menu.updated` with the updated price and version

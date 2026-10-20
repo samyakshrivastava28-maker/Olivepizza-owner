@@ -167,32 +167,22 @@ export class POSService {
         throw new Error(`Menu item identifier is required for "${itemName}". Client prices are strictly rejected.`);
       }
 
-      // If branchId is present, resolve authoritative price through AuthoritativePricingResolver
+      // If branchId is present, resolve authoritative price through AuthoritativePricingResolver (fail closed!)
       const resolvedBranchId = req.branchId;
       if (resolvedBranchId) {
-        try {
-          const authPrice = await AuthoritativePricingResolver.resolveItemPrice({
-            branchId: resolvedBranchId,
-            productId: itemId,
-            size: item.size,
-            crust: item.crust,
-            addons: item.addons
-          });
-          unitPrice = authPrice.unitPrice;
-          itemName = authPrice.productName;
-          for (const a of authPrice.addons) {
-            formattedAddons.push(a.name);
-          }
-        } catch (resolveErr: any) {
-          // If branch-specific resolution fails with explicit unavailable/unconfigured error, propagate
-          if (resolveErr.message?.includes('unavailable') || resolveErr.message?.includes('not configured')) {
-            throw resolveErr;
-          }
-          console.warn(`[POSService] AuthoritativePricingResolver fallback to catalog for ${itemId}:`, resolveErr?.message);
+        const authPrice = await AuthoritativePricingResolver.resolveItemPrice({
+          branchId: resolvedBranchId,
+          productId: itemId,
+          size: item.size,
+          crust: item.crust,
+          addons: item.addons
+        });
+        unitPrice = authPrice.unitPrice;
+        itemName = authPrice.productName;
+        for (const a of authPrice.addons) {
+          formattedAddons.push(a.name);
         }
-      }
-
-      if (unitPrice <= 0) {
+      } else {
         const catalogItem = await this.getCatalogItem(itemId);
         if (!catalogItem) {
           throw new Error(`Item "${itemId || itemName}" not found in authoritative catalog. Client-controlled prices are strictly rejected.`);
