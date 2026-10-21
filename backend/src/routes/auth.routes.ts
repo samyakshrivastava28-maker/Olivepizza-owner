@@ -103,7 +103,10 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
                            userIdentifier === 'olivepizzarjn@gmail.com' || 
                            userIdentifier === 'olivepizzamaker@gmail.com' || 
                            user.role === 'owner' || 
-                           user.role === 'platform_owner';
+                           user.role === 'platform_owner' ||
+                           (user as any)?.isOwnerMode === true ||
+                           (user as any)?.isGlobalOwner === true ||
+                           (user as any)?.admin === true;
 
     // ── 1. Server-Enforced Login Rate Limiter (Protection against brute-force) ──
     if (targetApp !== 'CUSTOMER' && !isOwnerAccount) {

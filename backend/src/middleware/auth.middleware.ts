@@ -42,6 +42,10 @@ export interface AuthRequest extends Request {
     isActive?: boolean;
     terminalId?: string;       // POS terminal scope — populated for cashier role
     scope?: ScopeContext;
+    allowedApps?: string[];
+    isOwnerMode?: boolean;
+    isGlobalOwner?: boolean;
+    admin?: boolean;
   };
 }
 
@@ -87,6 +91,8 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
     const emailLower = decodedToken.email ? decodedToken.email.toLowerCase().trim() : '';
     let dbResolved = false;
 
+    let allowedApps: string[] = Array.isArray(decodedToken.allowedApps) ? (decodedToken.allowedApps as string[]) : [];
+
     // 1. Authoritative Database Indexed Lookup (PostgreSQL app_users & delivery_partners)
     // Indexes: idx_app_users_lower_email, app_users_pkey, idx_delivery_partners_lower_email
     try {
@@ -103,12 +109,17 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked in system database', code: 'ACCOUNT_REVOKED' });
           return;
         }
-        role = pgUser.role || role;
+        if (Array.isArray(pgUser.allowed_apps) && pgUser.allowed_apps.length > 0) {
+          allowedApps = Array.from(new Set([...allowedApps, ...pgUser.allowed_apps]));
+        }
+        if (pgUser.role && pgUser.role !== 'customer') {
+          role = pgUser.role;
+          dbResolved = true;
+        }
         if (pgUser.franchise_id) franchiseId = pgUser.franchise_id;
         if (pgUser.branch_id) branchId = pgUser.branch_id;
         branchIds = branchId ? [branchId] : branchIds;
         isActive = pgUser.is_active !== false;
-        dbResolved = true;
       }
     } catch (pgErr: any) {
       console.warn('[verifyToken] PostgreSQL app_users indexed lookup notice:', pgErr.message);
@@ -161,12 +172,39 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
             res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked', code: 'ACCOUNT_REVOKED' });
             return;
           }
-          if (userData.role) role = userData.role;
+
+          const isOwnerMode = userData.isOwnerMode === true || 
+                              userData.isGlobalOwner === true || 
+                              userData.admin === true || 
+                              (userData.role || '').toLowerCase() === 'owner' || 
+                              (userData.role || '').toLowerCase() === 'platform_owner';
+
+          if (isOwnerMode) {
+            role = 'owner';
+            allowedApps = ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'];
+            permissions = ['*'];
+            dbResolved = true;
+          } else if (userData.role && userData.role !== 'customer') {
+            role = userData.role;
+            dbResolved = true;
+          }
+
+          if (Array.isArray(userData.allowedApps)) {
+            allowedApps = Array.from(new Set([...allowedApps, ...userData.allowedApps]));
+          }
+          if (userData.applicationAccess) {
+            if (userData.applicationAccess.app_pos) allowedApps.push('POS');
+            if (userData.applicationAccess.app_restaurant_management) allowedApps.push('RESTAURANT_MANAGER');
+            if (userData.applicationAccess.app_franchise_management) allowedApps.push('FRANCHISE_MANAGER');
+            if (userData.applicationAccess.app_delivery) allowedApps.push('DELIVERY');
+            allowedApps = Array.from(new Set(allowedApps));
+          }
+
           if (userData.organizationId) organizationId = userData.organizationId;
           if (userData.franchiseId) franchiseId = userData.franchiseId;
           if (userData.branchId) branchId = userData.branchId;
           if (userData.branchIds && Array.isArray(userData.branchIds)) branchIds = userData.branchIds;
-          if (userData.permissions) permissions = userData.permissions;
+          if (userData.permissions && permissions.length === 0) permissions = userData.permissions;
           if (userData.isActive !== undefined) isActive = userData.isActive;
           // POS terminal binding — stored in Firestore user record for cashier role
           if (userData.terminalId) terminalId = userData.terminalId as string;
@@ -299,6 +337,9 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
       email: decodedToken.email
     });
 
+    const isOwnerByRole = role === 'owner' || role === 'platform_owner' ||
+      (emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com' || emailLower === 'olivepizzamaker@gmail.com');
+
     req.user = {
       uid,
       email: decodedToken.email,
@@ -312,7 +353,10 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
       permissions,
       isActive,
       terminalId,
-      scope
+      scope,
+      allowedApps,
+      isOwnerMode: isOwnerByRole,
+      isGlobalOwner: isOwnerByRole
     };
     
     // Immediately execute parameter tampering & privilege escalation defenses upon authentication
@@ -354,7 +398,25 @@ export const requireRole = (allowedRoles: string[]) => {
     const isFranchiseOwnerEquivalent = (r: string) => r === 'franchise_owner' || r === 'owner' || r === 'franchise_manager';
     const isPosEquivalent = (r: string) => r === 'pos' || r === 'pos_operator' || r === 'cashier';
 
-    const hasRole = isDeveloperAllowedForOwner || 
+    const isOwner = userRole === 'owner' || 
+                    userRole === 'platform_owner' || 
+                    (req.user as any)?.isOwnerMode === true || 
+                    (req.user as any)?.isGlobalOwner === true || 
+                    (req.user as any)?.admin === true ||
+                    isInternalAccount;
+
+    const userAllowedApps: string[] = (req.user as any)?.allowedApps || [];
+    const isAllowedByApp = allowedRoles.some(r => {
+      if (['restaurant_manager', 'manager', 'kitchen_staff'].includes(r) && userAllowedApps.includes('RESTAURANT_MANAGER')) return true;
+      if (['pos_operator', 'cashier', 'pos'].includes(r) && userAllowedApps.includes('POS')) return true;
+      if (['franchise_manager', 'franchise_owner'].includes(r) && userAllowedApps.includes('FRANCHISE_MANAGER')) return true;
+      if (['delivery_partner', 'delivery', 'rider'].includes(r) && userAllowedApps.includes('DELIVERY')) return true;
+      return false;
+    });
+
+    const hasRole = isOwner ||
+      isDeveloperAllowedForOwner || 
+      isAllowedByApp ||
       allowedRoles.includes(userRole) || 
       (isDeliveryEquivalent(userRole) && allowedRoles.some(isDeliveryEquivalent)) ||
       (isManagerEquivalent(userRole) && allowedRoles.some(isManagerEquivalent)) ||

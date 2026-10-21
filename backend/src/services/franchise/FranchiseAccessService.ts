@@ -321,9 +321,10 @@ export class FranchiseAccessService {
 
     // Synchronize to PostgreSQL app_users table
     try {
+      const allowedAppsJson = JSON.stringify(allowedApps);
       await query(
         `INSERT INTO app_users (id, email, role, status, franchise_id, branch_id, allowed_apps, is_active, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, NOW())
          ON CONFLICT (id) DO UPDATE SET
            email = COALESCE(EXCLUDED.email, app_users.email),
            role = EXCLUDED.role,
@@ -340,10 +341,27 @@ export class FranchiseAccessService {
           accountStatus === 'ACTIVE' ? 'APPROVED' : 'DISABLED',
           franchiseId,
           effectiveBranchId,
-          allowedApps,
+          allowedAppsJson,
           accountStatus === 'ACTIVE'
         ]
       );
+      if (email) {
+        await query(
+          `UPDATE app_users 
+           SET role = $2, status = $3, franchise_id = $4, branch_id = $5, allowed_apps = $6::jsonb, is_active = $7, updated_at = NOW()
+           WHERE email IS NOT NULL AND LOWER(email) = LOWER($1) AND id <> $8`,
+          [
+            email,
+            targetRole,
+            accountStatus === 'ACTIVE' ? 'APPROVED' : 'DISABLED',
+            franchiseId,
+            effectiveBranchId,
+            allowedAppsJson,
+            accountStatus === 'ACTIVE',
+            targetUid
+          ]
+        ).catch(() => {});
+      }
     } catch (pgSyncErr: any) {
       console.warn('[FranchiseAccessService] PostgreSQL app_users sync notice:', pgSyncErr.message);
     }
@@ -670,7 +688,8 @@ export class FranchiseAccessService {
     if (isOwnerByProfile) {
       let resolvedBranch = requestedBranchId || userData?.branchId || 'main_branch';
       let resolvedFranchise = userData?.franchiseId || 'fra_rajnandgaon';
-      if (resolvedFranchise === 'fra_primary') resolvedFranchise = 'fra_rajnandgaon';
+      if (resolvedFranchise === 'fra_primary' || !resolvedFranchise) resolvedFranchise = 'fra_rajnandgaon';
+      if (resolvedBranch === 'fra_primary' || !resolvedBranch) resolvedBranch = 'main_branch';
 
       const roleMap: Record<string, string> = {
         OWNER: 'owner',
@@ -782,6 +801,9 @@ export class FranchiseAccessService {
       resolvedFranchiseId = 'fra_rajnandgaon';
     }
     let resolvedBranchId = activeAccessEntry?.branchId || assignedFranchiseDoc?.mainBranchId || assignedFranchiseDoc?.id || userData?.branchId || requestedBranchId || 'main_branch';
+    if (resolvedBranchId === 'fra_primary' || !resolvedBranchId) {
+      resolvedBranchId = 'main_branch';
+    }
 
     // 7. Verify franchise status: NOT DELETED OR SUSPENDED
     // Only verify real franchise IDs (starting with fra_ or matched as franchiseId), avoiding branch IDs like 'main_branch'
