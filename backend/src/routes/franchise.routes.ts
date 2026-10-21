@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { adminDb, adminAuth } from '../config/firebase.js';
+import { query } from '../config/postgres.js';
 import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { FranchiseLifecycleService } from '../services/franchise/FranchiseLifecycleService.js';
@@ -1617,6 +1618,54 @@ router.post('/:id/riders', requireRole(['owner', 'admin', 'developer', 'platform
       updatedAt: now
     }, { merge: true }).catch(() => {});
 
+    // Set active Firebase custom claims
+    try {
+      await adminAuth.setCustomUserClaims(targetUid, {
+        role: 'delivery_partner',
+        allowedApps: ['DELIVERY'],
+        franchiseId: id,
+        branchId: riderData.branchId
+      });
+    } catch (claimErr: any) {
+      console.warn('[FranchiseRoutes] Custom claims warning on rider provision:', claimErr.message);
+    }
+
+    // Synchronize to PostgreSQL delivery_partners and app_users tables
+    try {
+      await query(
+        `INSERT INTO delivery_partners (id, name, phone, email, franchise_id, branch_id, status, is_online, vehicle_number, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'APPROVED', false, $7, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name,
+           phone = EXCLUDED.phone,
+           email = EXCLUDED.email,
+           franchise_id = EXCLUDED.franchise_id,
+           branch_id = EXCLUDED.branch_id,
+           status = 'APPROVED',
+           vehicle_number = EXCLUDED.vehicle_number,
+           updated_at = NOW()`,
+        [targetUid, riderData.name, cleanPhone, cleanEmail, id, riderData.branchId, riderData.vehicleNumber]
+      );
+      await query(
+        `INSERT INTO app_users (id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active, updated_at)
+         VALUES ($1, $2, $3, $4, 'delivery_partner', 'APPROVED', $5, $6, '["DELIVERY"]'::jsonb, true, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           name = EXCLUDED.name,
+           phone = EXCLUDED.phone,
+           email = EXCLUDED.email,
+           role = 'delivery_partner',
+           status = 'APPROVED',
+           franchise_id = EXCLUDED.franchise_id,
+           branch_id = EXCLUDED.branch_id,
+           allowed_apps = '["DELIVERY"]'::jsonb,
+           is_active = true,
+           updated_at = NOW()`,
+        [targetUid, cleanEmail, cleanPhone, riderData.name, id, riderData.branchId]
+      );
+    } catch (pgSyncErr: any) {
+      console.warn('[FranchiseRoutes] PostgreSQL rider sync notice:', pgSyncErr.message);
+    }
+
     await FranchiseScopeService.logFranchiseAudit({
       organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
       franchiseId: id,
@@ -1671,6 +1720,25 @@ router.patch('/:id/riders/:riderId/status', requireRole(['owner', 'admin', 'deve
       }
     }
 
+    // Synchronize PostgreSQL delivery_partners and app_users
+    try {
+      const nextStatus = isActive ? 'APPROVED' : 'DISABLED';
+      await query(
+        `UPDATE delivery_partners
+         SET status = $2, is_online = $3, updated_at = NOW()
+         WHERE id = $1`,
+        [riderId, nextStatus, false]
+      );
+      await query(
+        `UPDATE app_users
+         SET status = $2, is_active = $3, updated_at = NOW()
+         WHERE id = $1`,
+        [riderId, nextStatus, Boolean(isActive)]
+      );
+    } catch (pgErr: any) {
+      console.warn('[FranchiseRoutes] PostgreSQL rider status update notice:', pgErr.message);
+    }
+
     res.json({ success: true, message: `Rider ${isActive ? 'activated' : 'deactivated'} successfully` });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to update rider status' });
@@ -1703,9 +1771,126 @@ router.delete('/:id/riders/:riderId', requireRole(['owner', 'admin', 'developer'
     }
 
     await adminDb.collection('delivery_partners').doc(riderId).delete();
+
+    // Synchronize PostgreSQL deletion/revocation
+    try {
+      await query(
+        `UPDATE delivery_partners
+         SET status = 'TERMINATED', is_online = false, updated_at = NOW()
+         WHERE id = $1`,
+        [riderId]
+      );
+      await query(
+        `UPDATE app_users
+         SET status = 'REVOKED', is_active = false, updated_at = NOW()
+         WHERE id = $1`,
+        [riderId]
+      );
+    } catch (pgErr: any) {
+      console.warn('[FranchiseRoutes] PostgreSQL rider deletion notice:', pgErr.message);
+    }
+
     res.json({ success: true, message: 'Rider deleted successfully' });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Failed to delete rider' });
+  }
+});
+
+// PUT /:id/riders/:riderId/reassign - Reassign Rider to Branch/Franchise
+router.put('/:id/riders/:riderId/reassign', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_manager']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id, riderId } = req.params;
+    const { targetFranchiseId, targetBranchId, reason } = req.body;
+
+    const isOwner = FranchiseScopeService.isGlobalOwner(req.user?.email, req.user?.role);
+    if (!isOwner && req.user?.franchiseId && req.user.franchiseId !== id) {
+      res.status(403).json({ error: 'Cross-franchise access denied' });
+      return;
+    }
+
+    // Non-owners can only reassign to branches within their own franchise
+    const destFranchise = targetFranchiseId || id;
+    if (!isOwner && destFranchise !== id) {
+      res.status(403).json({ error: 'Franchise managers cannot reassign riders to a different franchise without owner authorization' });
+      return;
+    }
+
+    const destBranch = targetBranchId || 'main_branch';
+    const now = new Date().toISOString();
+
+    // 1. Update Firestore delivery_partners & users
+    await adminDb.collection('delivery_partners').doc(riderId).set({
+      franchiseId: destFranchise,
+      branchId: destBranch,
+      updatedAt: now,
+      reassignedAt: now,
+      reassignedBy: req.user?.email || 'manager',
+      reassignmentReason: reason || 'Operational reassignment'
+    }, { merge: true });
+
+    await adminDb.collection('users').doc(riderId).set({
+      franchiseId: destFranchise,
+      branchId: destBranch,
+      updatedAt: now
+    }, { merge: true }).catch(() => {});
+
+    // 2. Synchronize PostgreSQL delivery_partners and app_users
+    try {
+      await query(
+        `UPDATE delivery_partners
+         SET franchise_id = $2, branch_id = $3, is_online = false, updated_at = NOW()
+         WHERE id = $1`,
+        [riderId, destFranchise, destBranch]
+      );
+      await query(
+        `UPDATE app_users
+         SET franchise_id = $2, branch_id = $3, updated_at = NOW()
+         WHERE id = $1`,
+        [riderId, destFranchise, destBranch]
+      );
+    } catch (pgErr: any) {
+      console.warn('[FranchiseRoutes] PostgreSQL rider reassignment notice:', pgErr.message);
+    }
+
+    // 3. Invalidate/revoke existing tokens & set updated custom claims
+    try {
+      await adminAuth.revokeRefreshTokens(riderId);
+      await adminAuth.setCustomUserClaims(riderId, {
+        role: 'delivery_partner',
+        allowedApps: ['DELIVERY'],
+        franchiseId: destFranchise,
+        branchId: destBranch
+      });
+    } catch (authErr: any) {
+      console.warn('[FranchiseRoutes] Rider reassignment token revocation notice:', authErr.message);
+    }
+
+    // 4. Audit Trail
+    await FranchiseScopeService.logFranchiseAudit({
+      organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
+      franchiseId: id,
+      branchId: destBranch,
+      actorUid: req.user?.uid || 'manager',
+      actorEmail: req.user?.email || 'manager@olivepizza.in',
+      actionType: 'RIDER_REASSIGNED',
+      entityType: 'delivery_partner',
+      entityId: riderId,
+      details: {
+        fromFranchiseId: id,
+        toFranchiseId: destFranchise,
+        toBranchId: destBranch,
+        reason: reason || 'Operational reassignment'
+      }
+    });
+
+    res.json({
+      success: true,
+      message: `Rider successfully reassigned to branch ${destBranch}`,
+      franchiseId: destFranchise,
+      branchId: destBranch
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Failed to reassign delivery partner' });
   }
 });
 

@@ -391,6 +391,17 @@ export class FranchiseAccessService {
       } catch (dpPgErr: any) {
         console.warn('[FranchiseAccessService] PostgreSQL delivery_partners sync notice:', dpPgErr.message);
       }
+    } else {
+      try {
+        await query(
+          `UPDATE delivery_partners
+           SET status = 'DISABLED', is_online = false, updated_at = NOW()
+           WHERE id = $1`,
+          [targetUid]
+        );
+      } catch (dpPgErr: any) {
+        console.warn('[FranchiseAccessService] PostgreSQL delivery_partners disable notice:', dpPgErr.message);
+      }
     }
 
     // 8. Audit log
