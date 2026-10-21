@@ -2481,38 +2481,56 @@ router.get('/:id/access-accounts', requireRole(['owner', 'admin', 'developer', '
     const uSnap = await adminDb.collection('users').get();
     const fUsers = uSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
-      .filter(u => u.franchiseId === id || (id === 'fra_rajnandgaon' && (u.role === 'owner' || u.email === 'olivepizzarjn@gmail.com' || u.email === 'webhub2811@gmail.com')));
+      .filter(u => u.franchiseId === id || u.franchiseId === 'fra_primary' || (id === 'fra_rajnandgaon' && (u.isOwnerMode || u.role === 'owner' || u.email === 'olivepizzarjn@gmail.com' || u.email === 'webhub2811@gmail.com')));
 
     // 2. Fetch Restaurant Managers
     const mgrSnap = await adminDb.collection('restaurant_managers').get();
     const fManagers = mgrSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
-      .filter(m => m.franchiseId === id || (id === 'fra_rajnandgaon' && (!m.franchiseId || m.branchId === 'main_branch')));
+      .filter(m => m.franchiseId === id || m.franchiseId === 'fra_primary' || (id === 'fra_rajnandgaon' && (!m.franchiseId || m.branchId === 'main_branch')));
 
-    // 3. Fetch Delivery Partners
+    // 3. Fetch POS Accounts
+    const posSnap = await adminDb.collection('pos_accounts').get();
+    const fPos = posSnap.docs
+      .map(d => ({ id: d.id, ...(d.data() as any) }))
+      .filter(p => p.franchiseId === id || p.franchiseId === 'fra_primary' || (id === 'fra_rajnandgaon' && (!p.franchiseId || p.branchId === 'main_branch')));
+
+    // 4. Fetch Delivery Partners
     const riderSnap = await adminDb.collection('delivery_partners').get();
     const fRiders = riderSnap.docs
       .map(d => ({ id: d.id, ...(d.data() as any) }))
-      .filter(r => r.franchiseId === id || (id === 'fra_rajnandgaon' && (!r.franchiseId || r.branchId === 'main_branch')));
+      .filter(r => r.franchiseId === id || r.franchiseId === 'fra_primary' || (id === 'fra_rajnandgaon' && (!r.franchiseId || r.branchId === 'main_branch')));
 
-    // Aggregate accounts with structured application access
+    // Aggregate accounts with structured application access (deduplicated by email and id)
     const accounts: any[] = [];
+    const seenUids = new Set<string>();
+    const seenEmails = new Set<string>();
+
+    const addAccountIfUnique = (acc: any) => {
+      const emailKey = (acc.email || '').toLowerCase().trim();
+      if (acc.id && seenUids.has(acc.id)) return;
+      if (emailKey && seenEmails.has(emailKey)) return;
+      if (acc.id) seenUids.add(acc.id);
+      if (emailKey) seenEmails.add(emailKey);
+      accounts.push(acc);
+    };
 
     // Add Owner / Franchise Managers
     fUsers.forEach(u => {
       const perms = Array.isArray(u.permissions) ? u.permissions : [];
-      accounts.push({
+      const isOwner = u.role === 'owner' || u.isOwnerMode || u.isGlobalOwner || u.admin;
+      addAccountIfUnique({
         id: u.id,
-        name: u.name || u.displayName || 'Franchise Partner',
+        name: u.name || u.displayName || (isOwner ? 'Olive Pizza Owner' : 'Staff Member'),
         email: u.email,
-        role: u.role || 'franchise_manager',
-        branchId: u.branchId || 'all_branches',
-        accountStatus: u.isActive === false ? 'SUSPENDED' : 'ACTIVE',
+        role: u.role || (isOwner ? 'owner' : 'staff'),
+        branchId: u.branchId || 'main_branch',
+        accountStatus: u.isActive === false || u.status === 'REVOKED' || u.status === 'SUSPENDED' ? 'SUSPENDED' : 'ACTIVE',
         applicationAccess: {
-          app_franchise_management: Boolean(u.applicationAccess?.app_franchise_management ?? (perms.includes('app_franchise_management') || u.role === 'owner' || u.role === 'franchise_manager')),
-          app_restaurant_management: Boolean(u.applicationAccess?.app_restaurant_management ?? (perms.includes('app_restaurant_management') || u.role === 'owner')),
-          app_pos: Boolean(u.applicationAccess?.app_pos ?? (perms.includes('app_pos') || perms.includes('pos.billing') || u.role === 'owner')),
-          app_delivery: Boolean(u.applicationAccess?.app_delivery ?? (perms.includes('app_delivery') || u.role === 'delivery_partner' || u.role === 'owner'))
+          app_franchise_management: Boolean(u.applicationAccess?.app_franchise_management ?? (isOwner || perms.includes('app_franchise_management') || u.role === 'franchise_manager')),
+          app_restaurant_management: Boolean(u.applicationAccess?.app_restaurant_management ?? (isOwner || perms.includes('app_restaurant_management') || u.role === 'restaurant_manager')),
+          app_pos: Boolean(u.applicationAccess?.app_pos ?? (isOwner || perms.includes('app_pos') || perms.includes('pos.billing') || u.role === 'pos_operator')),
+          app_delivery: Boolean(u.applicationAccess?.app_delivery ?? (isOwner || perms.includes('app_delivery') || u.role === 'delivery_partner'))
         },
         permissions: perms,
         updatedAt: u.updatedAt || new Date().toISOString()
@@ -2522,13 +2540,13 @@ router.get('/:id/access-accounts', requireRole(['owner', 'admin', 'developer', '
     // Add Restaurant Managers
     fManagers.forEach(m => {
       const perms = Array.isArray(m.permissions) ? m.permissions : [];
-      accounts.push({
+      addAccountIfUnique({
         id: m.id,
         name: m.name || 'Restaurant Manager',
         email: m.email,
         role: 'restaurant_manager',
         branchId: m.branchId || 'main_branch',
-        accountStatus: m.isActive === false ? 'SUSPENDED' : 'ACTIVE',
+        accountStatus: m.isActive === false || m.status === 'DEACTIVATED' ? 'SUSPENDED' : 'ACTIVE',
         applicationAccess: {
           app_franchise_management: Boolean(m.applicationAccess?.app_franchise_management ?? perms.includes('app_franchise_management')),
           app_restaurant_management: Boolean(m.applicationAccess?.app_restaurant_management ?? true),
@@ -2540,17 +2558,38 @@ router.get('/:id/access-accounts', requireRole(['owner', 'admin', 'developer', '
       });
     });
 
+    // Add POS Accounts
+    fPos.forEach(p => {
+      const perms = Array.isArray(p.permissions) ? p.permissions : [];
+      addAccountIfUnique({
+        id: p.id,
+        name: p.name || p.displayName || 'POS Cashier / Operator',
+        email: p.email,
+        role: 'pos_operator',
+        branchId: p.branchId || 'main_branch',
+        accountStatus: p.isActive === false || p.status === 'REVOKED' ? 'SUSPENDED' : 'ACTIVE',
+        applicationAccess: {
+          app_franchise_management: Boolean(p.applicationAccess?.app_franchise_management ?? false),
+          app_restaurant_management: Boolean(p.applicationAccess?.app_restaurant_management ?? false),
+          app_pos: Boolean(p.applicationAccess?.app_pos ?? true),
+          app_delivery: Boolean(p.applicationAccess?.app_delivery ?? false)
+        },
+        permissions: perms,
+        updatedAt: p.updatedAt || new Date().toISOString()
+      });
+    });
+
     // Add Delivery Riders
     fRiders.forEach(r => {
       const perms = Array.isArray(r.permissions) ? r.permissions : [];
-      accounts.push({
+      addAccountIfUnique({
         id: r.id,
         name: r.name || 'Delivery Partner',
         email: r.email || r.phone || 'rider@olivepizza.in',
         phone: r.phone,
         role: 'delivery_partner',
         branchId: r.branchId || 'main_branch',
-        accountStatus: r.isActive === false ? 'SUSPENDED' : 'ACTIVE',
+        accountStatus: r.isActive === false || r.status === 'suspended' ? 'SUSPENDED' : 'ACTIVE',
         applicationAccess: {
           app_franchise_management: Boolean(r.applicationAccess?.app_franchise_management ?? false),
           app_restaurant_management: Boolean(r.applicationAccess?.app_restaurant_management ?? false),
@@ -2566,6 +2605,40 @@ router.get('/:id/access-accounts', requireRole(['owner', 'admin', 'developer', '
   } catch (error: any) {
     console.error('[FranchiseRoutes] Error loading access accounts:', error);
     res.status(500).json({ error: 'Failed to load access accounts' });
+  }
+});
+
+// ─── 16b. OWNER AUTHORIZE NEW STAFF / USER ACCOUNT (POST /:id/access/authorize-account) ───────────
+router.post('/:id/access/authorize-account', requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { email, name, role, applicationAccess, branchId, permissions } = req.body;
+    if (!email) {
+      res.status(400).json({ error: 'Email is required' });
+      return;
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    const result = await FranchiseAccessService.updateFranchiseAccess({
+      targetUserId: cleanEmail,
+      franchiseId: id,
+      branchId: branchId || 'main_branch',
+      targetRole: role || 'staff',
+      applicationAccess: applicationAccess || { app_pos: true },
+      accountStatus: 'ACTIVE',
+      permissions: Array.isArray(permissions) ? permissions : ['*'],
+      actorUid: req.user?.uid || 'owner',
+      actorEmail: req.user?.email || 'owner@olivepizza.in'
+    });
+
+    res.json({
+      success: true,
+      message: `Account ${cleanEmail} has been authorized successfully.`,
+      result
+    });
+  } catch (error: any) {
+    console.error('[FranchiseRoutes] Error authorizing account:', error);
+    res.status(500).json({ error: error.message || 'Failed to authorize account' });
   }
 });
 

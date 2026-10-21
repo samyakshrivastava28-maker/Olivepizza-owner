@@ -48,7 +48,8 @@ import {
   BarChart3,
   PieChart,
   UtensilsCrossed,
-  ArrowRight
+  ArrowRight,
+  UserCheck
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
@@ -101,7 +102,10 @@ export default function FranchiseWorkspace() {
     app_pos: false,
     app_delivery: false,
     accountStatus: 'ACTIVE',
-    assignedBranchId: ''
+    assignedBranchId: '',
+    email: '',
+    name: '',
+    role: 'staff'
   });
   const [actionLoading, setActionLoading] = useState<boolean>(false);
 
@@ -402,7 +406,10 @@ export default function FranchiseWorkspace() {
       app_pos: Boolean(account.applicationAccess?.app_pos),
       app_delivery: Boolean(account.applicationAccess?.app_delivery),
       accountStatus: account.accountStatus || 'ACTIVE',
-      assignedBranchId: account.branchId || (branches[0]?.id || 'main_branch')
+      assignedBranchId: account.branchId || (branches[0]?.id || 'main_branch'),
+      email: account.email || '',
+      name: account.name || '',
+      role: account.role || 'staff'
     });
     setShowEditAccessModal(true);
   };
@@ -413,31 +420,51 @@ export default function FranchiseWorkspace() {
     if (!franchise || !selectedAccountForAccess) return;
     setActionLoading(true);
     try {
-      const res = await fetchApi(`/api/franchises/${franchise.id}/access/edit`, {
+      const isNew = !selectedAccountForAccess.id;
+      const endpoint = isNew
+        ? `/api/franchises/${franchise.id}/access/authorize-account`
+        : `/api/franchises/${franchise.id}/access/edit`;
+
+      const payload = isNew
+        ? {
+            email: accessForm.email,
+            name: accessForm.name || accessForm.email.split('@')[0],
+            role: accessForm.role || 'staff',
+            applicationAccess: {
+              app_franchise_management: accessForm.app_franchise_management,
+              app_restaurant_management: accessForm.app_restaurant_management,
+              app_pos: accessForm.app_pos,
+              app_delivery: accessForm.app_delivery
+            },
+            branchId: accessForm.assignedBranchId || branches[0]?.id || 'main_branch'
+          }
+        : {
+            targetUserId: selectedAccountForAccess.id,
+            targetRole: selectedAccountForAccess.role,
+            applicationAccess: {
+              app_franchise_management: accessForm.app_franchise_management,
+              app_restaurant_management: accessForm.app_restaurant_management,
+              app_pos: accessForm.app_pos,
+              app_delivery: accessForm.app_delivery
+            },
+            accountStatus: accessForm.accountStatus,
+            assignedBranchId: accessForm.assignedBranchId
+          };
+
+      const res = await fetchApi(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          targetUserId: selectedAccountForAccess.id,
-          targetRole: selectedAccountForAccess.role,
-          applicationAccess: {
-            app_franchise_management: accessForm.app_franchise_management,
-            app_restaurant_management: accessForm.app_restaurant_management,
-            app_pos: accessForm.app_pos,
-            app_delivery: accessForm.app_delivery
-          },
-          accountStatus: accessForm.accountStatus,
-          assignedBranchId: accessForm.assignedBranchId
-        }),
+        body: JSON.stringify(payload),
       });
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to save access changes');
 
-      toast.success(`Application access updated for ${selectedAccountForAccess.name}!`);
+      toast.success(isNew ? `Account ${accessForm.email} authorized successfully!` : `Application access updated for ${selectedAccountForAccess.name}!`);
       setShowEditAccessModal(false);
       loadFranchiseWorkspace();
     } catch (err: any) {
-      toast.error(err.message || 'Access update failed');
+      toast.error(err.message || 'Failed to update access permissions');
     } finally {
       setActionLoading(false);
     }
@@ -2157,8 +2184,8 @@ export default function FranchiseWorkspace() {
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
             <div className="flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-bold text-white">Edit Application Access</h3>
-                <p className="text-xs text-amber-400 font-mono">{selectedAccountForAccess.name} ({selectedAccountForAccess.email})</p>
+                <h3 className="text-sm font-bold text-white">{!selectedAccountForAccess.id ? 'Authorize New Account / Staff' : 'Edit Application Access'}</h3>
+                <p className="text-xs text-amber-400 font-mono">{selectedAccountForAccess.email ? `${selectedAccountForAccess.name} (${selectedAccountForAccess.email})` : 'Grant multi-app access to any employee or operator'}</p>
               </div>
               <button onClick={() => setShowEditAccessModal(false)} className="text-slate-400 hover:text-white">✕</button>
             </div>
@@ -2168,6 +2195,47 @@ export default function FranchiseWorkspace() {
             </div>
 
             <form onSubmit={handleSaveAccessChanges} className="space-y-4 text-xs">
+              {!selectedAccountForAccess.id && (
+                <div className="space-y-3 pb-3 border-b border-slate-800">
+                  <div>
+                    <label className="text-slate-400 block mb-1 font-semibold">User Email Address *</label>
+                    <input
+                      type="email"
+                      required
+                      placeholder="e.g. staff@olivepizza.in or user@gmail.com"
+                      value={accessForm.email}
+                      onChange={(e) => setAccessForm({ ...accessForm, email: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 focus:border-amber-500 rounded-xl px-3 py-2 text-white outline-none"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-slate-400 block mb-1">Full Name</label>
+                      <input
+                        type="text"
+                        placeholder="Staff Name"
+                        value={accessForm.name}
+                        onChange={(e) => setAccessForm({ ...accessForm, name: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-400 block mb-1">Primary Role</label>
+                      <select
+                        value={accessForm.role}
+                        onChange={(e) => setAccessForm({ ...accessForm, role: e.target.value })}
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white outline-none"
+                      >
+                        <option value="staff">Staff / Cashier</option>
+                        <option value="pos_operator">POS Operator</option>
+                        <option value="restaurant_manager">Restaurant Manager</option>
+                        <option value="franchise_manager">Franchise Manager</option>
+                        <option value="delivery_partner">Delivery Partner</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="space-y-2">
                 <label className="text-slate-400 block font-semibold">Application Grants</label>
                 

@@ -107,22 +107,39 @@ export class FranchiseAccessService {
           userDocRef = adminDb.collection('users').doc(q.docs[0].id);
           userDocSnap = q.docs[0];
           targetUid = q.docs[0].id;
+        } else if (adminAuth) {
+          const authUser = await adminAuth.getUserByEmail(email).catch(() => null);
+          if (authUser) {
+            targetUid = authUser.uid;
+            userDocRef = adminDb.collection('users').doc(targetUid);
+            userDocSnap = await userDocRef.get();
+          }
         }
       } else {
-        // Try looking up in restaurant_managers or franchise_users
+        // Try looking up in restaurant_managers, pos_accounts, or franchise_users
         const rmDoc = await adminDb.collection('restaurant_managers').doc(targetUserId).get();
-        if (rmDoc.exists) {
+        if (rmDoc.exists && rmDoc.data()?.email) {
           email = (rmDoc.data()?.email || '').toLowerCase().trim();
+        } else {
+          const posDoc = await adminDb.collection('pos_accounts').doc(targetUserId).get();
+          if (posDoc.exists && posDoc.data()?.email) {
+            email = (posDoc.data()?.email || '').toLowerCase().trim();
+          }
         }
       }
     }
 
     // If still no user doc, look up via Firebase Auth
-    if (!email && adminAuth) {
+    if (!email && adminAuth && !targetUserId.includes('@')) {
       const authUser = await adminAuth.getUser(targetUserId).catch(() => null);
       if (authUser?.email) {
         email = authUser.email.toLowerCase().trim();
       }
+    }
+
+    // If user doc exists, ensure email is captured
+    if (userDocSnap.exists && !email && userDocSnap.data()?.email) {
+      email = (userDocSnap.data()?.email || '').toLowerCase().trim();
     }
 
     let effectiveBranchId = branchId || (userDocSnap.exists ? userDocSnap.data()?.branchId : undefined);
@@ -182,6 +199,19 @@ export class FranchiseAccessService {
     };
 
     if (email) userUpdates.email = email;
+    if (accountStatus === 'ACTIVE') {
+      userUpdates.status = 'ACTIVE';
+      userUpdates.isActive = true;
+      userUpdates.role = targetRole;
+      userUpdates.branchId = effectiveBranchId;
+      userUpdates.franchiseId = franchiseId;
+      if (accessEntry.applications.pos) {
+        userUpdates.terminalId = (userDocSnap.exists ? userDocSnap.data()?.terminalId : null) || 'POS-01';
+      }
+    } else {
+      userUpdates.status = accountStatus;
+      userUpdates.isActive = false;
+    }
 
     await userDocRef.set(userUpdates, { merge: true });
 
@@ -271,6 +301,77 @@ export class FranchiseAccessService {
     if (accountStatus !== 'ACTIVE' || allowedApps.length === 0) {
       if (adminAuth) {
         await adminAuth.revokeRefreshTokens(targetUid).catch(() => {});
+      }
+    } else if (adminAuth && targetUid && !targetUid.includes('@')) {
+      // Set active Firebase custom claims
+      try {
+        await adminAuth.setCustomUserClaims(targetUid, {
+          role: targetRole,
+          allowedApps,
+          branchId: effectiveBranchId,
+          franchiseId,
+          isOwnerMode: targetRole === 'owner',
+          admin: targetRole === 'owner' || targetRole === 'admin',
+          permissions: permissions.length > 0 ? permissions : ['*']
+        });
+      } catch (claimsErr: any) {
+        console.warn('[FranchiseAccessService] Error setting custom claims:', claimsErr.message);
+      }
+    }
+
+    // Synchronize to PostgreSQL app_users table
+    try {
+      await query(
+        `INSERT INTO app_users (id, email, role, status, franchise_id, branch_id, allowed_apps, is_active, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           email = COALESCE(EXCLUDED.email, app_users.email),
+           role = EXCLUDED.role,
+           status = EXCLUDED.status,
+           franchise_id = EXCLUDED.franchise_id,
+           branch_id = EXCLUDED.branch_id,
+           allowed_apps = EXCLUDED.allowed_apps,
+           is_active = EXCLUDED.is_active,
+           updated_at = NOW()`,
+        [
+          targetUid,
+          email || null,
+          targetRole,
+          accountStatus === 'ACTIVE' ? 'APPROVED' : 'DISABLED',
+          franchiseId,
+          effectiveBranchId,
+          allowedApps,
+          accountStatus === 'ACTIVE'
+        ]
+      );
+    } catch (pgSyncErr: any) {
+      console.warn('[FranchiseAccessService] PostgreSQL app_users sync notice:', pgSyncErr.message);
+    }
+
+    // Synchronize to PostgreSQL delivery_partners table if delivery granted
+    if (accessEntry.applications.delivery && accountStatus === 'ACTIVE') {
+      try {
+        await query(
+          `INSERT INTO delivery_partners (id, name, email, phone, status, is_online, branch_id, franchise_id, updated_at)
+           VALUES ($1, $2, $3, $4, 'APPROVED', true, $5, $6, NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             email = COALESCE(EXCLUDED.email, delivery_partners.email),
+             status = 'APPROVED',
+             is_online = true,
+             branch_id = EXCLUDED.branch_id,
+             franchise_id = EXCLUDED.franchise_id,
+             updated_at = NOW()`,
+          [
+            targetUid,
+            (userDocSnap.exists ? (userDocSnap.data()?.name || userDocSnap.data()?.displayName) : null) || 'Delivery Partner',
+            email || null,
+            (userDocSnap.exists ? (userDocSnap.data()?.phone || userDocSnap.data()?.phoneNumber) : null) || null,
+            effectiveBranchId,
+            franchiseId
+          ]
+        );
+      } catch (dpPgErr: any) {
+        console.warn('[FranchiseAccessService] PostgreSQL delivery_partners sync notice:', dpPgErr.message);
       }
     }
 
@@ -375,14 +476,21 @@ export class FranchiseAccessService {
       const isOwner = userRole === 'owner' || userRole === 'platform_owner';
       const isPosStaff = ['owner', 'platform_owner', 'admin', 'restaurant_manager', 'manager', 'store_manager', 'pos_operator', 'cashier', 'counter_staff', 'staff', 'franchise_manager', 'franchise_owner'].includes(userRole);
       const isManagerStaff = ['owner', 'platform_owner', 'admin', 'restaurant_manager', 'manager', 'store_manager', 'franchise_manager'].includes(userRole);
+      const isFranchiseStaff = ['owner', 'platform_owner', 'admin', 'franchise_manager', 'franchise_owner'].includes(userRole);
+      const isDeliveryStaff = ['delivery_partner', 'delivery', 'rider', 'owner', 'platform_owner'].includes(userRole);
       const hasAppAccess = isOwner || 
         allowedApps.some(a => (a || '').toString().trim().toUpperCase() === targetApp.toUpperCase()) ||
         (targetApp === 'POS' && isPosStaff) ||
-        (targetApp === 'RESTAURANT_MANAGER' && isManagerStaff);
+        (targetApp === 'RESTAURANT_MANAGER' && isManagerStaff) ||
+        (targetApp === 'FRANCHISE_MANAGER' && isFranchiseStaff) ||
+        (targetApp === 'DELIVERY' && isDeliveryStaff);
 
       if (hasAppAccess) {
         let resolvedBranch = requestedBranchId || pgUserData.branch_id;
         let resolvedFranchise = pgUserData.franchise_id;
+        if (resolvedFranchise === 'fra_primary' || resolvedFranchise === 'fra_rajnandgaon') {
+          resolvedFranchise = 'fra_rajnandgaon';
+        }
         if (!resolvedBranch) {
           try {
             const bRes = await query(`SELECT id, franchise_id FROM restaurant_branches WHERE is_active = true ORDER BY created_at ASC LIMIT 1`);
@@ -500,17 +608,6 @@ export class FranchiseAccessService {
       };
     }
 
-    // Owner app check: If not resolved as owner in PostgreSQL, reject immediately
-    if (targetApp === 'OWNER') {
-      return {
-        authorized: false,
-        code: 'ACCESS_DENIED',
-        reason: 'This account is not authorized to access the Olive Pizza Owner Command Center.'
-      };
-    }
-
-
-
     // 2. Normalize Phone Number and Fetch user profile
     const rawPhone = (phoneNumber || '').trim();
     const cleanPhone = rawPhone.replace(/[^0-9]/g, '');
@@ -559,12 +656,75 @@ export class FranchiseAccessService {
       }
     }
 
+    // Check if account has Owner permissions / isOwnerMode
+    const isOwnerByProfile = Boolean(
+      userData && (
+        userData.isOwnerMode === true ||
+        userData.isGlobalOwner === true ||
+        userData.admin === true ||
+        (userData.role || '').toLowerCase() === 'owner' ||
+        (userData.role || '').toLowerCase() === 'platform_owner'
+      )
+    );
+
+    if (isOwnerByProfile) {
+      let resolvedBranch = requestedBranchId || userData?.branchId || 'main_branch';
+      let resolvedFranchise = userData?.franchiseId || 'fra_rajnandgaon';
+      if (resolvedFranchise === 'fra_primary') resolvedFranchise = 'fra_rajnandgaon';
+
+      const roleMap: Record<string, string> = {
+        OWNER: 'owner',
+        RESTAURANT_MANAGER: 'restaurant_manager',
+        DELIVERY: 'delivery_partner',
+        POS: 'pos_operator',
+        FRANCHISE_MANAGER: 'franchise_manager',
+        CUSTOMER: 'customer'
+      };
+
+      return {
+        authorized: true,
+        requiresPin: false,
+        isProfileComplete: true,
+        user: {
+          uid: userData.uid || uid,
+          email: emailLower || userData.email || '',
+          name: userData.name || userData.displayName || 'Olive Pizza Owner',
+          role: roleMap[targetApp] || 'owner',
+          phone: userData.phone || userData.phoneNumber || '+919179944445',
+          phoneNumber: userData.phone || userData.phoneNumber || '+919179944445',
+          branchId: resolvedBranch,
+          branchName: 'Olive Pizza — Rajnandgaon HQ',
+          branchIds: ['all', resolvedBranch],
+          franchiseId: resolvedFranchise,
+          terminalId: userData.terminalId || terminalId || 'Counter 1',
+          permissions: ['*'],
+          allowedApps: ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'],
+          applicationAccess: {
+            app_restaurant_management: true,
+            app_delivery: true,
+            app_pos: true,
+            app_franchise_management: true,
+            app_owner: true
+          }
+        }
+      };
+    }
+
+    // Owner app check: Non-owners cannot access Owner command center
+    if (targetApp === 'OWNER') {
+      return {
+        authorized: false,
+        code: 'ACCESS_DENIED',
+        reason: 'This account is not authorized to access the Olive Pizza Owner Command Center.'
+      };
+    }
+
     // 4. Check if account is suspended / deactivated
-    if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended' || userData.status === 'SUSPENDED' || userData.status === 'REVOKED')) {
+    if (userData && (userData.isActive === false || userData.isBlocked === true || userData.status === 'suspended' || userData.status === 'SUSPENDED')) {
       return {
         authorized: false,
         code: 'ACCOUNT_DEACTIVATED',
-        reason: 'This account has been deactivated or revoked by the store owner.'
+        reason: 'This account has been deactivated by the store owner.'
       };
     }
 
@@ -613,18 +773,15 @@ export class FranchiseAccessService {
 
     if (requestedBranchId) {
       activeAccessEntry = activeAccessEntries.find(fa => fa.branchId === requestedBranchId || fa.franchiseId === requestedBranchId);
-    } else if (activeAccessEntries.length === 1) {
+    } else if (activeAccessEntries.length >= 1) {
       activeAccessEntry = activeAccessEntries[0];
-    } else if (activeAccessEntries.length > 1) {
-      return {
-        authorized: false,
-        code: 'SCOPE_AMBIGUOUS',
-        reason: 'User has multiple active franchise assignments. Please specify requestedBranchId.'
-      };
     }
 
-    const resolvedFranchiseId = activeAccessEntry?.franchiseId || assignedFranchiseDoc?.franchiseId || assignedFranchiseDoc?.id || userData?.franchiseId || '';
-    const resolvedBranchId = activeAccessEntry?.branchId || assignedFranchiseDoc?.mainBranchId || assignedFranchiseDoc?.id || userData?.branchId || requestedBranchId || '';
+    let resolvedFranchiseId = activeAccessEntry?.franchiseId || assignedFranchiseDoc?.franchiseId || assignedFranchiseDoc?.id || userData?.franchiseId || 'fra_rajnandgaon';
+    if (resolvedFranchiseId === 'fra_primary' || !resolvedFranchiseId) {
+      resolvedFranchiseId = 'fra_rajnandgaon';
+    }
+    let resolvedBranchId = activeAccessEntry?.branchId || assignedFranchiseDoc?.mainBranchId || assignedFranchiseDoc?.id || userData?.branchId || requestedBranchId || 'main_branch';
 
     // 7. Verify franchise status: NOT DELETED OR SUSPENDED
     // Only verify real franchise IDs (starting with fra_ or matched as franchiseId), avoiding branch IDs like 'main_branch'
