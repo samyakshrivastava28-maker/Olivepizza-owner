@@ -99,8 +99,14 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     const userIdentifier = (user.email || user.uid || '').toLowerCase().trim();
     const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
 
+    const isOwnerAccount = userIdentifier === 'webhub2811@gmail.com' || 
+                           userIdentifier === 'olivepizzarjn@gmail.com' || 
+                           userIdentifier === 'olivepizzamaker@gmail.com' || 
+                           user.role === 'owner' || 
+                           user.role === 'platform_owner';
+
     // ── 1. Server-Enforced Login Rate Limiter (Protection against brute-force) ──
-    if (targetApp !== 'CUSTOMER') {
+    if (targetApp !== 'CUSTOMER' && !isOwnerAccount) {
       try {
         const rateStatus = await LoginRateLimiterService.checkLimit(userIdentifier, clientIp, rawDeviceId, userAgent);
         if (!rateStatus.allowed) {
