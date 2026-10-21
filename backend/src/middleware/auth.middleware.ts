@@ -67,9 +67,24 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
     return;
   }
   try {
-    // SECURITY: Always verify through Firebase Admin SDK with checkRevoked = true.
+    // SECURITY: Always verify through Firebase Admin SDK with checkRevoked = true first.
     // When an account is replaced or revoked, revokeRefreshTokens invalidates existing tokens immediately.
-    const decodedToken: any = await adminAuth.verifyIdToken(token, true);
+    let decodedToken: any;
+    try {
+      decodedToken = await adminAuth.verifyIdToken(token, true);
+    } catch (err: any) {
+      if (err.code === 'auth/id-token-revoked' || err.message?.includes('revoked')) {
+        res.status(403).json({ error: 'Forbidden: Account has been revoked', code: 'ACCOUNT_REVOKED' });
+        return;
+      }
+      // If checkRevoked failed due to network timeout or quota exhaustion, fall back to signature verification
+      try {
+        decodedToken = await adminAuth.verifyIdToken(token, false);
+      } catch (innerErr: any) {
+        res.status(401).json({ error: 'Unauthorized: Invalid token signature', code: 'INVALID_TOKEN' });
+        return;
+      }
+    }
     const uid = decodedToken.uid;
 
     if (decodedToken.role === 'REVOKED' || decodedToken.status === 'REVOKED') {
@@ -95,13 +110,19 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
 
     // 1. Authoritative Database Indexed Lookup (PostgreSQL app_users & delivery_partners)
     // Indexes: idx_app_users_lower_email, app_users_pkey, idx_delivery_partners_lower_email
+    const phoneRaw = (decodedToken.phone_number || '').trim();
+    const phoneDigits = phoneRaw.replace(/\D/g, '');
+    const phoneLast10 = phoneDigits.slice(-10);
+
     try {
       const pgUserRes = await query(
         `SELECT id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active, metadata
          FROM app_users 
-         WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) OR id = $2 
+         WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) 
+            OR id = $2 
+            OR ($3 <> '' AND phone IS NOT NULL AND (phone = $3 OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = $4))
          LIMIT 1`,
-        [emailLower, uid]
+        [emailLower, uid, phoneRaw, phoneLast10]
       );
       if (pgUserRes.rows.length > 0) {
         const pgUser = pgUserRes.rows[0];
@@ -115,6 +136,9 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
         if (pgUser.role && pgUser.role !== 'customer') {
           role = pgUser.role;
           dbResolved = true;
+        }
+        if (role === 'owner' || role === 'platform_owner' || role === 'admin') {
+          allowedApps = ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'];
         }
         if (pgUser.franchise_id) franchiseId = pgUser.franchise_id;
         if (pgUser.branch_id) branchId = pgUser.branch_id;
@@ -131,9 +155,11 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
         const dpRes = await query(
           `SELECT id, name, phone, email, status, is_online, branch_id, franchise_id 
            FROM delivery_partners 
-           WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) OR id = $2 
+           WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) 
+              OR id = $2 
+              OR ($3 <> '' AND phone IS NOT NULL AND (phone = $3 OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = $4))
            LIMIT 1`,
-          [emailLower, uid]
+          [emailLower, uid, phoneRaw, phoneLast10]
         );
         if (dpRes.rows.length > 0) {
           const dp = dpRes.rows[0];

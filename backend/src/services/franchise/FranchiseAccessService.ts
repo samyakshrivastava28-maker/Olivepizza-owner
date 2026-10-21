@@ -448,7 +448,9 @@ export class FranchiseAccessService {
     const isMasterOwner =
       emailLower === 'webhub2811@gmail.com' ||
       emailLower === 'olivepizzarjn@gmail.com' ||
-      emailLower === 'olivepizzamaker@gmail.com';
+      emailLower === 'olivepizzamaker@gmail.com' ||
+      emailLower === 'samyakshrivastava28@gmail.com' ||
+      emailLower === 'samyaks695@gmail.com';
 
     if (isMasterOwner) {
       const defaultBranch = requestedBranchId || 'main_branch';
@@ -483,14 +485,20 @@ export class FranchiseAccessService {
     }
 
     // 1. Authoritative PostgreSQL Database Check (app_users & delivery_partners)
+    const phoneRaw = (phoneNumber || '').trim();
+    const phoneDigits = phoneRaw.replace(/\D/g, '');
+    const phoneLast10 = phoneDigits.slice(-10);
+
     let pgUserData: any = null;
     try {
       const pgUserRes = await query(
         `SELECT id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active 
          FROM app_users 
-         WHERE (email IS NOT NULL AND LOWER(email) = $1) OR id = $2 
+         WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) 
+            OR id = $2 
+            OR ($3 <> '' AND phone IS NOT NULL AND (phone = $3 OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = $4))
          LIMIT 1`,
-        [emailLower, uid]
+        [emailLower, uid, phoneRaw, phoneLast10]
       );
       if (pgUserRes.rows.length > 0) {
         pgUserData = pgUserRes.rows[0];
@@ -501,8 +509,11 @@ export class FranchiseAccessService {
 
     if (pgUserData && pgUserData.is_active !== false) {
       const userRole = (pgUserData.role || '').toLowerCase();
-      const allowedApps: string[] = Array.isArray(pgUserData.allowed_apps) ? pgUserData.allowed_apps : [];
-      const isOwner = userRole === 'owner' || userRole === 'platform_owner';
+      let allowedApps: string[] = Array.isArray(pgUserData.allowed_apps) ? pgUserData.allowed_apps : [];
+      const isOwner = userRole === 'owner' || userRole === 'platform_owner' || userRole === 'admin';
+      if (isOwner) {
+        allowedApps = ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'];
+      }
       const isPosStaff = ['owner', 'platform_owner', 'admin', 'restaurant_manager', 'manager', 'store_manager', 'pos_operator', 'cashier', 'counter_staff', 'staff', 'franchise_manager', 'franchise_owner'].includes(userRole);
       const isManagerStaff = ['owner', 'platform_owner', 'admin', 'restaurant_manager', 'manager', 'store_manager', 'franchise_manager'].includes(userRole);
       const isFranchiseStaff = ['owner', 'platform_owner', 'admin', 'franchise_manager', 'franchise_owner'].includes(userRole);
@@ -577,9 +588,11 @@ export class FranchiseAccessService {
         const riderRes = await query(
           `SELECT id, name, phone, email, status, is_online, branch_id, franchise_id, vehicle_type, vehicle_number 
            FROM delivery_partners 
-           WHERE (email IS NOT NULL AND LOWER(email) = $1) OR id = $2 
+           WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) 
+              OR id = $2 
+              OR ($3 <> '' AND phone IS NOT NULL AND (phone = $3 OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = $4))
            LIMIT 1`,
-          [emailLower, uid]
+          [emailLower, uid, phoneRaw, phoneLast10]
         );
         if (riderRes.rows.length > 0) {
           const dp = riderRes.rows[0];

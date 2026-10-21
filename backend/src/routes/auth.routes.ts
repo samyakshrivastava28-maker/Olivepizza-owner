@@ -101,7 +101,9 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
 
     const isOwnerAccount = userIdentifier === 'webhub2811@gmail.com' || 
                            userIdentifier === 'olivepizzarjn@gmail.com' || 
-                           userIdentifier === 'olivepizzamaker@gmail.com' || 
+                           userIdentifier === 'olivepizzamaker@gmail.com' ||
+                           userIdentifier === 'samyakshrivastava28@gmail.com' ||
+                           userIdentifier === 'samyaks695@gmail.com' || 
                            user.role === 'owner' || 
                            user.role === 'platform_owner' ||
                            (user as any)?.isOwnerMode === true ||
@@ -1112,7 +1114,21 @@ router.post('/desktop-login/complete', async (req: Request, res: Response): Prom
       return;
     }
 
-    const decoded = await adminAuth.verifyIdToken(idToken);
+    let decoded: any;
+    try {
+      decoded = await adminAuth.verifyIdToken(idToken, true);
+    } catch (err: any) {
+      if (err.code === 'auth/id-token-revoked' || err.message?.includes('revoked')) {
+        res.status(403).json({ success: false, authorized: false, code: 'ACCOUNT_REVOKED', message: 'Forbidden: Account has been revoked' });
+        return;
+      }
+      try {
+        decoded = await adminAuth.verifyIdToken(idToken, false);
+      } catch (innerErr: any) {
+        res.status(401).json({ success: false, message: 'Invalid identity token signature' });
+        return;
+      }
+    }
     const targetUid = decoded.uid;
     const targetEmail = (decoded.email || email || '').toLowerCase().trim();
 
