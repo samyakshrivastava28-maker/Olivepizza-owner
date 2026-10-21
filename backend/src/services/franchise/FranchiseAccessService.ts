@@ -335,11 +335,28 @@ export class FranchiseAccessService {
       const userRole = (pgUserData.role || '').toLowerCase();
       const allowedApps: string[] = Array.isArray(pgUserData.allowed_apps) ? pgUserData.allowed_apps : [];
       const isOwner = userRole === 'owner' || userRole === 'platform_owner';
-      const hasAppAccess = isOwner || allowedApps.some(a => (a || '').toString().trim().toUpperCase() === targetApp.toUpperCase());
+      const isPosStaff = ['owner', 'platform_owner', 'admin', 'restaurant_manager', 'manager', 'store_manager', 'pos_operator', 'cashier', 'counter_staff', 'staff', 'franchise_manager', 'franchise_owner'].includes(userRole);
+      const isManagerStaff = ['owner', 'platform_owner', 'admin', 'restaurant_manager', 'manager', 'store_manager', 'franchise_manager'].includes(userRole);
+      const hasAppAccess = isOwner || 
+        allowedApps.some(a => (a || '').toString().trim().toUpperCase() === targetApp.toUpperCase()) ||
+        (targetApp === 'POS' && isPosStaff) ||
+        (targetApp === 'RESTAURANT_MANAGER' && isManagerStaff);
 
       if (hasAppAccess) {
-        const resolvedBranch = requestedBranchId || pgUserData.branch_id || 'main_branch';
-        const resolvedFranchise = pgUserData.franchise_id || 'fra_rajnandgaon';
+        let resolvedBranch = requestedBranchId || pgUserData.branch_id;
+        let resolvedFranchise = pgUserData.franchise_id;
+        if (!resolvedBranch) {
+          try {
+            const bRes = await query(`SELECT id, franchise_id FROM restaurant_branches WHERE is_active = true ORDER BY created_at ASC LIMIT 1`);
+            if (bRes.rows.length > 0) {
+              resolvedBranch = bRes.rows[0].id;
+              resolvedFranchise = resolvedFranchise || bRes.rows[0].franchise_id;
+            }
+          } catch (_) {}
+        }
+        resolvedBranch = resolvedBranch || 'main_branch';
+        resolvedFranchise = resolvedFranchise || 'fra_rajnandgaon';
+
         const roleMap: Record<string, string> = {
           OWNER: 'owner',
           RESTAURANT_MANAGER: 'restaurant_manager',
@@ -366,7 +383,7 @@ export class FranchiseAccessService {
             franchiseId: resolvedFranchise,
             terminalId: terminalId || 'Counter 1',
             permissions: ['*'],
-            allowedApps: isOwner ? ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'] : allowedApps,
+            allowedApps: isOwner ? ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'] : (allowedApps.includes('POS') ? allowedApps : [...allowedApps, 'POS']),
             applicationAccess: {
               app_restaurant_management: true,
               app_delivery: true,
@@ -375,12 +392,6 @@ export class FranchiseAccessService {
               app_owner: isOwner
             }
           }
-        };
-      } else {
-        return {
-          authorized: false,
-          code: 'APP_NOT_PERMITTED',
-          reason: `Your account (${pgUserData.role}) is not authorized to use the ${targetApp} application.`
         };
       }
     }
@@ -471,7 +482,7 @@ export class FranchiseAccessService {
     const fastFirestore = async <T>(promise: Promise<T>, fallback: T): Promise<T> => {
       return Promise.race([
         promise,
-        new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 400))
+        new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 3000))
       ]).catch(() => fallback);
     };
 
@@ -718,9 +729,21 @@ export class FranchiseAccessService {
       // Check users doc role & status
       const userRole = (userData?.role || '').toLowerCase();
       const userStatus = (userData?.status || '').toUpperCase();
-      if ((userRole === 'pos_operator' || userRole === 'cashier' || userRole === 'pos' || userRole === 'manager' || userRole === 'restaurant_manager' || userRole === 'franchise_owner') && 
+      const posAllowedRoles = ['pos_operator', 'cashier', 'pos', 'manager', 'restaurant_manager', 'franchise_owner', 'store_manager', 'counter_staff', 'staff', 'admin', 'owner'];
+      if (posAllowedRoles.includes(userRole) && 
           (userStatus === 'APPROVED' || userStatus === 'ACTIVE' || userData?.isActive === true || !userData?.status)) {
         isApproved = true;
+      }
+      if (!isApproved) {
+        const rmDoc = await fastFirestore(adminDb.collection('restaurant_managers').doc(uid).get(), null);
+        if (rmDoc?.exists && (rmDoc.data()?.status === 'APPROVED' || rmDoc.data()?.isActive === true)) {
+          isApproved = true;
+        } else if (emailLower) {
+          const rmSnap = await fastFirestore(adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get(), { empty: true, docs: [] } as any);
+          if (!rmSnap.empty && (rmSnap.docs[0].data()?.status === 'APPROVED' || rmSnap.docs[0].data()?.isActive === true)) {
+            isApproved = true;
+          }
+        }
       }
 
       // Check users doc applicationAccess
@@ -779,6 +802,20 @@ export class FranchiseAccessService {
       // Dynamic PIN requirement
       const requiresPin = Boolean(userData?.pinHash || posData?.pinHash);
 
+      let finalPosBranch = resolvedBranchId;
+      let finalPosFranchise = resolvedFranchiseId;
+      if (!finalPosBranch || !finalPosFranchise) {
+        try {
+          const bRes = await query(`SELECT id, franchise_id FROM restaurant_branches WHERE is_active = true ORDER BY created_at ASC LIMIT 1`);
+          if (bRes.rows.length > 0) {
+            finalPosBranch = finalPosBranch || bRes.rows[0].id;
+            finalPosFranchise = finalPosFranchise || bRes.rows[0].franchise_id;
+          }
+        } catch (_) {}
+        finalPosBranch = finalPosBranch || 'main_branch';
+        finalPosFranchise = finalPosFranchise || 'fra_rajnandgaon';
+      }
+
       return {
         authorized: true,
         requiresPin,
@@ -788,10 +825,10 @@ export class FranchiseAccessService {
           email: emailLower,
           name: userData?.name || posData?.name || 'POS Operator',
           role: 'pos_operator',
-          branchId: resolvedBranchId,
+          branchId: finalPosBranch,
           branchName: assignedFranchiseDoc?.name || 'Olive Pizza Branch',
-          branchIds: [resolvedBranchId],
-          franchiseId: resolvedFranchiseId,
+          branchIds: [finalPosBranch],
+          franchiseId: finalPosFranchise,
           terminalId: terminalId || 'Counter 1',
           permissions: ['pos.billing', 'orders.create', 'orders.view'],
           allowedApps: ['POS'],

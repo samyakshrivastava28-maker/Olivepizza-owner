@@ -57,7 +57,7 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
   }
 
   // 2. Staff Accounts Authorized by Owner
-  const allowedRoles = ['pos_operator', 'cashier', 'franchise_manager', 'franchise_owner', 'store_manager', 'manager', 'staff'];
+  const allowedRoles = ['pos_operator', 'cashier', 'restaurant_manager', 'franchise_manager', 'franchise_owner', 'store_manager', 'manager', 'staff', 'admin'];
   let isAuthorized = allowedRoles.includes(user.role);
 
   // Check user.allowedApps or applicationAccess
