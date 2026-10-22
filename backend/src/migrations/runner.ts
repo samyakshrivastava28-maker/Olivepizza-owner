@@ -23,9 +23,16 @@ export async function runMigrations(customPool?: any): Promise<{ applied: string
     }
   }
 
+  const isLocal = Boolean(
+    dbUrl?.includes('localhost') || 
+    dbUrl?.includes('127.0.0.1') || 
+    process.env.PG_SSL === 'false' ||
+    process.env.NODE_ENV === 'test'
+  );
+
   const pool = customPool || new Pool({
     connectionString: dbUrl,
-    ssl: { rejectUnauthorized: false },
+    ssl: isLocal ? false : { rejectUnauthorized: false },
     connectionTimeoutMillis: 15000,
   });
 
@@ -85,4 +92,16 @@ export async function runMigrations(customPool?: any): Promise<{ applied: string
   }
 
   return { applied, skipped };
+}
+
+if (process.argv[1] && (process.argv[1].endsWith('runner.ts') || process.argv[1].endsWith('runner.js'))) {
+  runMigrations()
+    .then((res) => {
+      console.log(`[Migrations CLI] Completed. Applied: ${res.applied.length}, Skipped: ${res.skipped.length}`);
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error('[Migrations CLI] Migration failed:', err);
+      process.exit(1);
+    });
 }

@@ -37,6 +37,8 @@ jobs:
       DATABASE_URL: postgres://test_user:test_password@localhost:5432/olive_pizza_test
       PORT: 5175
       NODE_ENV: test
+      PG_SSL: 'false'
+      DATABASE_ENV: testing
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -56,6 +58,16 @@ jobs:
         run: npm run build
         working-directory: backend
 
+      - name: Run database migrations
+        run: npx tsx src/migrations/runner.ts
+        working-directory: backend
+        env:
+          PG_SSL: 'false'
+          DATABASE_ENV: testing
+
       - name: Run backend tests
         run: npm test
         working-directory: backend
+        env:
+          PG_SSL: 'false'
+          DATABASE_ENV: testing

@@ -33,6 +33,12 @@ if (dbUrl && dbUrl.includes('.supabase.co')) {
 
 const isRenderPostgres = Boolean(dbUrl?.includes('render.com') || dbUrl?.includes('dpg-'));
 const isCloudPostgres = Boolean(isRenderPostgres || dbUrl?.includes('supabase.co') || dbUrl?.includes('pooler.supabase.com'));
+const isLocalPostgres = Boolean(
+  dbUrl?.includes('localhost') || 
+  dbUrl?.includes('127.0.0.1') || 
+  process.env.PG_SSL === 'false' ||
+  (!isCloudPostgres && process.env.NODE_ENV === 'test')
+);
 
 const maxConnections = parseInt(process.env.POSTGRES_POOL_MAX || '20', 10);
 const idleTimeoutMillis = parseInt(process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS || '30000', 10);
@@ -43,11 +49,13 @@ export const pgPool = new Pool({
   max: maxConnections,
   idleTimeoutMillis: idleTimeoutMillis,
   connectionTimeoutMillis: connectionTimeoutMillis,
-  ssl: process.env.PG_SSL_REJECT_UNAUTHORIZED === 'true'
-    ? { rejectUnauthorized: true, ca: process.env.PG_SSL_CA }
-    : process.env.PG_SSL_REJECT_UNAUTHORIZED === 'false' || isCloudPostgres
-      ? { rejectUnauthorized: false }
-      : { rejectUnauthorized: process.env.NODE_ENV === 'production' },
+  ssl: isLocalPostgres
+    ? false
+    : process.env.PG_SSL_REJECT_UNAUTHORIZED === 'true'
+      ? { rejectUnauthorized: true, ca: process.env.PG_SSL_CA }
+      : process.env.PG_SSL_REJECT_UNAUTHORIZED === 'false' || isCloudPostgres
+        ? { rejectUnauthorized: false }
+        : false,
   statement_timeout: 15000, // 15 seconds per statement limit
 });
 
