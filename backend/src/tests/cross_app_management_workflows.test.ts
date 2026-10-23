@@ -10,6 +10,7 @@
  * - Scenario F: Dual-Database Reconciliation & Archival Idempotency
  */
 
+import test from 'node:test';
 import assert from 'assert';
 import { FranchiseAccessService } from '../services/franchise/FranchiseAccessService.js';
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
@@ -183,7 +184,7 @@ async function runScenarioF(franchiseId: string, branchId: string) {
   console.log('✅ Scenario F completed successfully.');
 }
 
-async function runAllScenarios() {
+test('Master Workflow Scenarios A through F', async () => {
   console.log('🚀 Running Olive Pizza Master Workflow Scenarios A through F...\n');
   const { testFranchiseId, testBranchId } = await runScenarioA();
   await runScenarioB(testFranchiseId, testBranchId);
@@ -195,9 +196,4 @@ async function runAllScenarios() {
   console.log('\n======================================================');
   console.log('🎉 ALL SCENARIOS (A through F) PASSED WITH ZERO ERRORS');
   console.log('======================================================\n');
-}
-
-runAllScenarios().catch(err => {
-  console.error('❌ Scenario failure:', err);
-  process.exit(1);
 });

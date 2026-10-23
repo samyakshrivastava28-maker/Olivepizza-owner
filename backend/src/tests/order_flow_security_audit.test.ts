@@ -1,7 +1,8 @@
+import test from 'node:test';
 import assert from 'assert';
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 
-async function runSecurityAuditTests() {
+test('Order Flow Security & Read-Only Audit', async () => {
   console.log('====================================================');
   console.log('OLIVE PIZZA ORDER FLOW SECURITY & READ-ONLY AUDIT');
   console.log('====================================================\n');
@@ -63,9 +64,4 @@ async function runSecurityAuditTests() {
   console.log('\n====================================================');
   console.log('ALL ORDER FLOW SECURITY & READ-ONLY AUDIT TESTS PASSED');
   console.log('====================================================\n');
-}
-
-runSecurityAuditTests().catch((err) => {
-  console.error('\n❌ Security audit test failed:', err);
-  throw err;
 });
