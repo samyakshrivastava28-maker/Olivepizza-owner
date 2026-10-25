@@ -169,7 +169,7 @@ export default function CommandCenter() {
     `;
 
     try {
-      const res = await fetchApi('/graphql', {
+      const res = await fetchApi('/api/graphql', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -228,7 +228,7 @@ export default function CommandCenter() {
       }
     `;
     try {
-      const res = await fetchApi('/graphql', {
+      const res = await fetchApi('/api/graphql', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: mutation, variables: { id } })
@@ -259,7 +259,7 @@ export default function CommandCenter() {
       }
     `;
     try {
-      const res = await fetchApi('/graphql', {
+      const res = await fetchApi('/api/graphql', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: mutation, variables: { id, resolutionNote: note || 'Resolved via Command Center' } })

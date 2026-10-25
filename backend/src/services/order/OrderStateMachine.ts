@@ -292,6 +292,37 @@ export class OrderStateMachine {
         }
       }
 
+      // Explicit fulfillment validation: Takeaway / Dine-in vs Delivery
+      const fulfillment = (orderData.orderType || orderData.fulfillmentType || orderData.orderSource || '').toLowerCase();
+      const isDeliveryOrder = fulfillment.includes('delivery');
+
+      if (isDeliveryOrder && ['ready', 'preparing'].includes(fromState) && toState === 'delivered') {
+        // Delivery orders cannot skip rider stages unless performed by system or platform admin override
+        if (!['system', 'platform_owner', 'admin'].includes(normalizedActorRole)) {
+          if (client) await client.query('ROLLBACK').catch(() => {});
+          return {
+            success: false,
+            orderId,
+            previousStatus: fromState,
+            currentStatus: fromState,
+            version: orderData.notification_version || 1,
+            error: `Delivery order cannot transition directly from '${fromState}' to 'delivered'. Delivery orders require rider dispatch and pickup.`,
+          };
+        }
+      }
+
+      if (!isDeliveryOrder && ['partner_assigned', 'picked_up', 'out_for_delivery'].includes(toState)) {
+        if (client) await client.query('ROLLBACK').catch(() => {});
+        return {
+          success: false,
+          orderId,
+          previousStatus: fromState,
+          currentStatus: fromState,
+          version: orderData.notification_version || 1,
+          error: `Non-delivery order (${fulfillment || 'takeaway/dine-in'}) cannot transition to rider delivery state '${toState}'.`,
+        };
+      }
+
       const currentVersion = Number(orderData.notification_version || 1);
       const newVersion = currentVersion + 1;
       const nowIso = new Date().toISOString();

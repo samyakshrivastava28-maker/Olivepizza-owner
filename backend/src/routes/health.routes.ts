@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { checkPostgresHealth, pgPool } from '../config/postgres.js';
 import { checkSupabaseHealth } from '../config/supabase.js';
-import { adminDb } from '../config/firebase.js';
+import { adminDb, isFirebaseAdminAuthenticated } from '../config/firebase.js';
 import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
 import { execSync } from 'child_process';
 
@@ -27,9 +27,10 @@ router.get('/health/ping', (_req, res) => {
 });
 
 // Liveness Probe: Minimal status without disclosing process internals
-router.get(['/health', '/health/liveness'], (_req, res) => {
+router.get(['/health', '/health/liveness', '/live', '/api/live'], (_req, res) => {
   res.json({
     status: 'ok',
+    uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString()
   });
 });
@@ -46,24 +47,52 @@ router.get('/version', (req, res) => {
  * Readiness Probe:
  * Returns simple pass/fail status without exposing internal infrastructure topology or connection metrics.
  */
-router.get(['/ready', '/health/readiness'], async (req, res) => {
+router.get(['/ready', '/health/readiness', '/api/ready'], async (req, res) => {
+  let firestoreStatus = 'healthy';
+  let postgresStatus = 'healthy';
+  let firestoreError: string | undefined;
+  let postgresError: string | undefined;
+
   try {
-    const pgHealth = await checkPostgresHealth();
-    let firestoreConnected = false;
-
-    if (adminDb) {
-      await adminDb.collection('settings').limit(1).get();
-      firestoreConnected = true;
+    if (!adminDb || !isFirebaseAdminAuthenticated) {
+      firestoreStatus = 'unhealthy';
+      firestoreError = !isFirebaseAdminAuthenticated
+        ? 'Firebase Admin unauthenticated: Missing valid service account credentials'
+        : 'Firebase Admin DB instance not initialized';
+    } else {
+      await Promise.race([
+        adminDb.collection('settings').limit(1).get(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore probe timed out after 5000ms')), 5000))
+      ]);
     }
-
-    const isCoreReady = pgHealth.connected && firestoreConnected;
-
-    res.status(isCoreReady ? 200 : 503).json({
-      status: isCoreReady ? 'ready' : 'unready'
-    });
-  } catch (err: any) {
-    res.status(503).json({ status: 'unready' });
+  } catch (e: any) {
+    firestoreStatus = 'unhealthy';
+    firestoreError = e.message;
   }
+
+  try {
+    await Promise.race([
+      pgPool.query('SELECT 1'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('PostgreSQL probe timed out after 5000ms')), 5000))
+    ]);
+  } catch (e: any) {
+    postgresStatus = 'unhealthy';
+    postgresError = e.message;
+  }
+
+  const isReady = firestoreStatus === 'healthy' && postgresStatus === 'healthy';
+  res.status(isReady ? 200 : 503).json({
+    status: isReady ? 'ready' : 'not_ready',
+    firestore: firestoreStatus,
+    postgres: postgresStatus,
+    checks: {
+      server: 'ready',
+      firestore: firestoreStatus,
+      postgres: postgresStatus
+    },
+    errors: isReady ? undefined : { firestore: firestoreError, postgres: postgresError },
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Admin metrics endpoint

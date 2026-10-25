@@ -9,6 +9,7 @@ import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 import { computeEffectiveStatus } from './restaurant.routes.js';
 import { DataExpiryJob } from '../jobs/DataExpiryJob.js';
 import { redisService } from '../services/redis/RedisService.js';
+import { verifyTrackingToken } from '../utils/trackingToken.js';
 
 const router = Router();
 
@@ -633,9 +634,14 @@ router.get(['/orders/:orderId/tracking/bootstrap', '/v1/orders/:orderId/tracking
       try {
         const client = await pgPool.connect();
         try {
-          const pgRes = await client.query('SELECT * FROM orders WHERE id = $1 OR order_number = $1 LIMIT 1', [orderId]);
-          if (pgRes.rows.length > 0) {
+          const pgRes = await client.query('SELECT * FROM canonical_orders WHERE id = $1 LIMIT 1', [orderId]).catch(() => ({ rows: [] } as any));
+          if (pgRes.rows && pgRes.rows.length > 0) {
             orderData = pgRes.rows[0];
+          } else {
+            const fallbackRes = await client.query('SELECT * FROM orders WHERE id = $1 OR order_number = $1 LIMIT 1', [orderId]).catch(() => ({ rows: [] } as any));
+            if (fallbackRes.rows && fallbackRes.rows.length > 0) {
+              orderData = fallbackRes.rows[0];
+            }
           }
         } finally {
           client.release();
@@ -647,6 +653,20 @@ router.get(['/orders/:orderId/tracking/bootstrap', '/v1/orders/:orderId/tracking
 
     if (!orderData) {
       res.status(404).json({ success: false, error: `Order ${orderId} not found` });
+      return;
+    }
+
+    // Security & BOLA/IDOR Guard: Verify caller is authorized to view this order tracking data
+    const isOwner = req.user?.role === 'owner' || req.user?.role === 'admin' || req.user?.role === 'developer';
+    const isAssignedPartner = req.user?.uid && (req.user.uid === orderData.deliveryPartnerId || req.user.uid === orderData.delivery_partner_id);
+    const isCustomer = req.user?.uid && (req.user.uid === orderData.userId || req.user.uid === orderData.customerId);
+
+    const rawToken = req.query.trackingToken;
+    const tokenOrderId = typeof rawToken === 'string' ? verifyTrackingToken(rawToken) : null;
+    const hasValidToken = tokenOrderId === orderId;
+
+    if (!isOwner && !isAssignedPartner && !isCustomer && !hasValidToken) {
+      res.status(403).json({ success: false, error: 'Forbidden: You do not have permission to track this order' });
       return;
     }
 

@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import apiApp from './src/app.ts';
+import healthRoutes from './src/routes/health.routes.ts';
 import { DataRetentionJob } from './src/jobs/DataRetentionJob.ts';
 import './src/services/DataLifecycleService.ts';
 import './src/services/notification/NotificationQueueService.ts';
@@ -39,7 +40,9 @@ validateEnvironmentVariables();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.get(['/health', '/health/live', '/api/health', '/api/health/ping', '/ping'], (req, res) => {
+app.use(healthRoutes);
+app.use('/api', healthRoutes);
+/* legacy */ app.get(['/legacy-health-unused'], (req, res) => {
   res.json({
     status: 'ok',
     uptime: process.uptime(),
@@ -49,31 +52,43 @@ app.get(['/health', '/health/live', '/api/health', '/api/health/ping', '/ping'],
   });
 });
 
-app.get('/ready', async (req, res) => {
-  const checks: Record<string, string> = {
-    server: 'ready',
-    firebase: 'checking',
-    postgres: 'checking'
-  };
+/* legacy */ app.get(['/legacy-ready-unused'], async (req, res) => {
+  let firestoreStatus = 'healthy';
+  let postgresStatus = 'healthy';
+  let firestoreError: string | undefined;
+  let postgresError: string | undefined;
 
   try {
-    await adminDb.collection('settings').limit(1).get();
-    checks.firebase = 'healthy';
+    await Promise.race([
+      adminDb.collection('settings').limit(1).get(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore probe timed out after 5000ms')), 5000))
+    ]);
   } catch (e: any) {
-    checks.firebase = 'degraded';
+    firestoreStatus = 'unhealthy';
+    firestoreError = e.message;
   }
 
   try {
-    await pgPool.query('SELECT 1');
-    checks.postgres = 'healthy';
+    await Promise.race([
+      pgPool.query('SELECT 1'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('PostgreSQL probe timed out after 5000ms')), 5000))
+    ]);
   } catch (e: any) {
-    checks.postgres = 'degraded';
+    postgresStatus = 'unhealthy';
+    postgresError = e.message;
   }
 
-  const isReady = checks.server === 'ready';
+  const isReady = firestoreStatus === 'healthy' && postgresStatus === 'healthy';
   res.status(isReady ? 200 : 503).json({
     status: isReady ? 'ready' : 'not_ready',
-    checks,
+    firestore: firestoreStatus,
+    postgres: postgresStatus,
+    checks: {
+      server: 'ready',
+      firestore: firestoreStatus,
+      postgres: postgresStatus
+    },
+    errors: isReady ? undefined : { firestore: firestoreError, postgres: postgresError },
     timestamp: new Date().toISOString()
   });
 });

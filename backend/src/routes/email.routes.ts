@@ -10,6 +10,19 @@ import {
   buildOrderDeliveredEmail
 } from '../services/emailTemplates.service.js';
 import { sanitizeEmailHtml } from '../utils/htmlSanitizer.js';
+import { verifyToken, requireRole, AuthRequest } from '../middleware/auth.middleware.js';
+
+// Internal service or staff authorization guard for sensitive email actions
+const requireInternalOrAdmin = (req: any, res: any, next: any) => {
+  const secretHeader = req.headers['x-internal-auth'] || req.headers['x-service-token'];
+  const expectedSecret = process.env.INTERNAL_SERVICE_TOKEN || process.env.JWT_SECRET || 'olive-internal-service-secret';
+  if (secretHeader && secretHeader === expectedSecret) {
+    return next();
+  }
+  return verifyToken(req, res, () => {
+    requireRole(['owner', 'admin', 'developer', 'system'])(req, res, next);
+  });
+};
 
 dotenv.config();
 
@@ -94,7 +107,7 @@ const wrapper = (content: string) => `
 const router = express.Router();
 
 // 1. Transactional Triggers
-router.post('/transactional', async (req, res) => {
+router.post('/transactional', requireInternalOrAdmin, async (req, res) => {
   const startTime = Date.now();
   try {
     const { event, data } = req.body;
@@ -181,7 +194,7 @@ router.post('/transactional', async (req, res) => {
 });
 
 // 2. AI Alerts
-router.post('/ai-alert', async (req, res) => {
+router.post('/ai-alert', requireInternalOrAdmin, async (req, res) => {
   try {
     const { to, subject, htmlBody } = req.body;
     
@@ -207,7 +220,7 @@ router.post('/ai-alert', async (req, res) => {
 
 // ─── Owner Tools ──────────────────────────────────────────────────────────────
 
-router.get('/debug', async (req, res) => {
+router.get('/debug', verifyToken, requireRole(['owner', 'admin', 'developer']), async (req: AuthRequest, res) => {
   try {
     const isReady = transporter ? true : false;
     let smtpConnected = false;
@@ -252,7 +265,7 @@ router.get('/debug', async (req, res) => {
   }
 });
 
-router.post('/preview', (req, res) => {
+router.post('/preview', verifyToken, requireRole(['owner', 'admin', 'developer']), (req: AuthRequest, res) => {
   try {
     const { htmlContent } = req.body;
     const sanitizedHtml = sanitizeEmailHtml(htmlContent || '<p>No content provided</p>');
@@ -263,7 +276,7 @@ router.post('/preview', (req, res) => {
   }
 });
 
-router.post('/test', async (req, res) => {
+router.post('/test', verifyToken, requireRole(['owner', 'admin', 'developer']), async (req: AuthRequest, res) => {
   const startTime = Date.now();
   const { htmlContent, subject, recipient } = req.body;
   const testRecipient = recipient || 'olivepizzarjn@gmail.com';
@@ -307,7 +320,7 @@ router.post('/test', async (req, res) => {
 });
 
 // ─── Direct Send ──────────────────────────────────────────────────────────────
-router.post('/auth/welcome', async (req, res) => {
+router.post('/auth/welcome', requireInternalOrAdmin, async (req, res) => {
   const startTime = Date.now();
   const { email, name, isReturning } = req.body;
   try {
@@ -324,7 +337,7 @@ router.post('/auth/welcome', async (req, res) => {
   }
 });
 
-router.post('/auth/reset', async (req, res) => {
+router.post('/auth/reset', requireInternalOrAdmin, async (req, res) => {
   const startTime = Date.now();
   const { email } = req.body;
   try {
@@ -342,7 +355,7 @@ router.post('/auth/reset', async (req, res) => {
   }
 });
 
-router.post('/auth/verify', async (req, res) => {
+router.post('/auth/verify', requireInternalOrAdmin, async (req, res) => {
   const startTime = Date.now();
   const { email } = req.body;
   try {
@@ -361,7 +374,7 @@ router.post('/auth/verify', async (req, res) => {
 });
 
 // 2. Fetch Templates
-router.get('/templates', async (req, res) => {
+router.get('/templates', verifyToken, requireRole(['owner', 'admin', 'developer']), async (req: AuthRequest, res) => {
   try {
     const result = await pgPool.query('SELECT * FROM email_templates ORDER BY created_at DESC');
     res.json({ success: true, templates: result.rows });
@@ -372,7 +385,7 @@ router.get('/templates', async (req, res) => {
 });
 
 // 3. Create Campaign
-router.post('/send-campaign', async (req, res) => {
+router.post('/send-campaign', verifyToken, requireRole(['owner', 'admin', 'developer']), async (req: AuthRequest, res) => {
   const startTime = Date.now();
   let campaignName: string = '', targetAudience: string = '', subject: string = '';
   
@@ -465,7 +478,7 @@ router.post('/send-campaign', async (req, res) => {
 });
 
 // 4. Analytics
-router.get('/analytics', async (req, res) => {
+router.get('/analytics', verifyToken, requireRole(['owner', 'admin', 'developer']), async (req: AuthRequest, res) => {
   try {
     const metricsResult = await pgPool.query(`
       SELECT 
@@ -493,7 +506,7 @@ router.get('/analytics', async (req, res) => {
 });
 
 // 4.5 Logs (Transactional & Marketing)
-router.get('/logs', async (req, res) => {
+router.get('/logs', verifyToken, requireRole(['owner', 'admin', 'developer']), async (req: AuthRequest, res) => {
   try {
     const { type, limit = 50, offset = 0, search = '' } = req.query;
     

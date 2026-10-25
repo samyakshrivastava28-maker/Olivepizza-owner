@@ -18,8 +18,17 @@ router.get('/master-catalog', async (req: Request, res: Response): Promise<void>
     const products = await redisService.fetchWithStampedeProtection<any[]>(
       'cache:master_catalog',
       async () => {
-        const pSnap = await adminDb.collection('products').get();
-        let prods = pSnap.docs.map(doc => {
+        let pDocs: any[] = [];
+        try {
+          const pSnap = await Promise.race([
+            adminDb.collection('products').get(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 2000))
+          ]);
+          pDocs = (pSnap as any)?.docs || [];
+        } catch (fsErr: any) {
+          console.warn('[MenuRoutes] Firestore products fetch error:', fsErr.message);
+        }
+        let prods = pDocs.map((doc: any) => {
           const data = doc.data();
           return {
             id: doc.id,
@@ -274,8 +283,16 @@ router.get('/branch/:branchId', async (req: Request, res: Response): Promise<voi
     const branchProducts = await redisService.fetchWithStampedeProtection<any[]>(
       cacheKey,
       async () => {
-        const pSnap = await adminDb.collection('products').get();
-        let masterProducts = pSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+        let masterProducts: any[] = [];
+        try {
+          const pSnap = await Promise.race([
+            adminDb.collection('products').get(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 2000))
+          ]);
+          masterProducts = ((pSnap as any)?.docs || []).map((d: any) => ({ id: d.id, ...(d.data() as any) }));
+        } catch (fsErr: any) {
+          console.warn('[MenuRoutes] Firestore branch products fetch error:', fsErr.message);
+        }
         if (masterProducts.length === 0) {
           masterProducts = [
             { id: 'prod_margherita', name: 'Classic Margherita', category: 'Pizzas', basePrice: 199, variants: ['Regular (7")', 'Medium (10")', 'Large (12")'], crusts: ['Classic Hand Tossed', 'Thin Crust'], addons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }], channelAvailability: { online: true, dineIn: true, takeaway: true, posDelivery: true } },
@@ -358,8 +375,16 @@ router.get('/branch/:branchId', async (req: Request, res: Response): Promise<voi
 router.get('/branch/:branchId/management', verifyToken, requireRole(['restaurant_manager', 'franchise_owner', 'franchise_manager', 'owner', 'admin', 'developer', 'platform_owner', 'pos_operator', 'cashier']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { branchId } = req.params;
-    const pSnap = await adminDb.collection('products').get();
-    let masterProducts = pSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    let masterProducts: any[] = [];
+    try {
+      const pSnap = await Promise.race([
+        adminDb.collection('products').get(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 2000))
+      ]);
+      masterProducts = ((pSnap as any)?.docs || []).map((d: any) => ({ id: d.id, ...(d.data() as any) }));
+    } catch (fsErr: any) {
+      console.warn('[MenuRoutes] Firestore management products fetch error:', fsErr.message);
+    }
     if (masterProducts.length === 0) {
       masterProducts = [
         { id: 'prod_margherita', name: 'Classic Margherita', category: 'Pizzas', basePrice: 199, variants: ['Regular (7")', 'Medium (10")', 'Large (12")'], crusts: ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst'], addons: [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }], channelAvailability: { online: true, dineIn: true, takeaway: true, posDelivery: true } },

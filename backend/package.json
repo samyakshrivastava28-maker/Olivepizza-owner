@@ -60,6 +60,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11",
     "@types/adm-zip": "^0.5.8",
     "@types/bcrypt": "^6.0.0",
     "@types/cors": "^2.8.17",

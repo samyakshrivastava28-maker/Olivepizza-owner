@@ -14,6 +14,23 @@ import { CustomerOrderingContextService } from '../services/order/CustomerOrderi
 
 const router = Router();
 
+async function generateUniquePosActivationCode(reservedCodes: Set<string> = new Set<string>()): Promise<string> {
+  // POS activation looks up a terminal by this code, so it must be unique across the collection.
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const candidate = String(crypto.randomInt(100000, 1000000));
+    if (reservedCodes.has(candidate)) continue;
+    const duplicate = await adminDb.collection('pos_terminals')
+      .where('activationCode', '==', candidate)
+      .limit(1)
+      .get();
+    if (duplicate.empty) {
+      reservedCodes.add(candidate);
+      return candidate;
+    }
+  }
+  throw new Error('Could not allocate a unique POS activation code. Retry terminal provisioning.');
+}
+
 // ============================================================================
 // PUBLIC ORDERING CONTEXT & DELIVERY RADIUS RESOLUTION (CUSTOMER APP)
 // ============================================================================
@@ -1922,63 +1939,96 @@ router.get('/:id/pos-terminals', requireRole(['owner', 'admin', 'developer', 'fr
 router.post('/:id/pos-terminals/register', requireRole(['owner', 'admin', 'developer', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const { terminalName, branchId } = req.body;
+    const terminalName = typeof req.body?.terminalName === 'string' ? req.body.terminalName.trim() : '';
+    const branchId = typeof req.body?.branchId === 'string' ? req.body.branchId.trim() : '';
 
-    if (!terminalName || !branchId) {
-      res.status(400).json({ error: 'Terminal name and branch assignment are required' });
+    if (!terminalName || terminalName.length > 40 || !branchId) {
+      res.status(400).json({ success: false, error: 'A terminal name (1–40 characters) and branch assignment are required.' });
       return;
     }
 
-    // Atomic Uniqueness Constraint: Max 1 active/pending POS terminal per franchise
+    const branchSnap = await adminDb.collection('franchises').doc(branchId).get();
+    if (!branchSnap.exists || branchSnap.data()?.franchiseId !== id) {
+      res.status(400).json({ success: false, code: 'BRANCH_NOT_IN_FRANCHISE', error: 'Select an existing branch belonging to this franchise.' });
+      return;
+    }
+
+    // A franchise may have up to ten active/pending counters, matching the creation wizard.
     const posSnap = await adminDb.collection('pos_terminals').where('franchiseId', '==', id).get();
     const activeTerminals = posSnap.docs.filter(d => {
       const data = d.data();
-      return data.isActive !== false && data.activationStatus !== 'REVOKED';
+      const state = String(data.status || data.activationStatus || '').toUpperCase();
+      return data.isActive !== false && state !== 'REVOKED' && state !== 'DEACTIVATED';
     });
 
-    if (activeTerminals.length >= 1) {
+    if (activeTerminals.length >= 10) {
       res.status(409).json({
-        error: 'A POS terminal is already provisioned for this franchise. Maximum 1 POS terminal permitted.',
+        success: false,
+        error: 'This franchise has reached the limit of 10 active or pending POS terminals. Revoke an unused terminal before registering another.',
         code: 'LIMIT_EXCEEDED'
       });
       return;
     }
 
-    const termId = `pos_${branchId}_${Date.now().toString().slice(-4)}`;
-    const activationCode = FranchisePinService.generateSecureActivationCode();
-    const now = new Date().toISOString();
+    const termId = `POS-${branchId.toUpperCase().slice(0, 18)}-${crypto.randomInt(1000, 10000)}`;
+    const termRef = adminDb.collection('pos_terminals').doc(termId);
+    if ((await termRef.get()).exists) {
+      res.status(409).json({ success: false, code: 'TERMINAL_ID_CONFLICT', error: 'Terminal ID collision. Retry registration.' });
+      return;
+    }
 
+    const activationCode = await generateUniquePosActivationCode();
+    const activationCodeExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const now = new Date().toISOString();
     const terminalData = {
       id: termId,
-      terminalName: terminalName.trim(),
+      terminalId: termId,
+      terminalName,
       organizationId: FranchiseScopeService.DEFAULT_ORG_ID,
       franchiseId: id,
       branchId,
+      branchName: branchSnap.data()?.name || branchId,
       activationCode,
+      activationCodeExpiresAt,
+      status: 'PENDING_ACTIVATION',
       activationStatus: 'PENDING_ACTIVATION',
       isActive: true,
       isOnline: false,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
+      createdBy: req.user?.uid
     };
 
-    await adminDb.collection('pos_terminals').doc(termId).set(terminalData, { merge: true });
+    await termRef.create(terminalData);
 
-    await FranchiseScopeService.logFranchiseAudit({
-      organizationId: terminalData.organizationId,
-      franchiseId: id,
-      branchId,
-      actorUid: req.user?.uid || 'owner',
-      actorEmail: req.user?.email || 'owner@olivepizza.in',
-      actionType: 'POS_REGISTERED',
-      entityType: 'pos_terminal',
-      entityId: termId,
-      details: { terminalName, activationCode }
+    const warnings: string[] = [];
+    try {
+      await FranchiseScopeService.logFranchiseAudit({
+        organizationId: terminalData.organizationId,
+        franchiseId: id,
+        branchId,
+        actorUid: req.user?.uid || 'owner',
+        actorEmail: req.user?.email || 'owner@olivepizza.in',
+        actionType: 'POS_REGISTERED',
+        entityType: 'pos_terminal',
+        entityId: termId,
+        details: { terminalName, activationExpiresAt: activationCodeExpiresAt }
+      });
+    } catch (auditError: any) {
+      console.error('[POSRegister] Audit write failed after terminal creation:', auditError?.message);
+      warnings.push('Terminal registered, but its audit event could not be saved. Review backend audit storage.');
+    }
+
+    res.status(201).json({
+      success: true,
+      terminal: { ...terminalData, activationCode: undefined },
+      activationCode,
+      activationCodeExpiresAt,
+      warnings
     });
-
-    res.status(201).json({ success: true, terminal: terminalData });
   } catch (error: any) {
-    res.status(500).json({ error: error.message || 'Failed to register POS terminal' });
+    const status = Number.isInteger(error?.status) ? error.status : 500;
+    res.status(status).json({ success: false, error: error.message || 'Failed to register POS terminal' });
   }
 });
 
@@ -2300,199 +2350,403 @@ router.patch('/:id/settings', requireRole(['owner', 'admin', 'developer', 'platf
   }
 });
 
-// ─── 12. PROVISIONING WIZARD (EXISTING FULL MULTI-STEP PROVISION) ───────────
+// ─── 12. FRANCHISE PROVISIONING WIZARD ────────────────────────────────────────
 router.post('/provision', requireRole(['owner', 'admin', 'developer', 'platform_admin', 'platform_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const {
+    const body = req.body || {};
+    const cleanString = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
+    const validEmail = (value: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 254;
+    const validTime = (value: string): boolean => /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+    const problems: string[] = [];
+
+    const name = cleanString(body.name);
+    const city = cleanString(body.city);
+    const state = cleanString(body.state);
+    const address = cleanString(body.address);
+    const phone = cleanString(body.phone);
+    const contactEmail = cleanString(body.email).toLowerCase();
+    const requestedCode = cleanString(body.code).toUpperCase();
+    const franchiseOwnerEmail = cleanString(body.franchiseOwnerEmail).toLowerCase();
+    const restaurantManagerEmail = cleanString(body.restaurantManagerEmail).toLowerCase();
+    const franchiseOwnerName = cleanString(body.franchiseOwnerName);
+    const restaurantManagerName = cleanString(body.restaurantManagerName);
+    const openingTime = cleanString(body.openingTime);
+    const closingTime = cleanString(body.closingTime);
+    const acceptingOrders = body.acceptingOrders === true;
+    const radiusInput = body.maxDeliveryRadiusKm === undefined ? 12 : Number(body.maxDeliveryRadiusKm);
+    const deliveryFee = body.deliveryFee === undefined ? 30 : Number(body.deliveryFee);
+    const freeDeliveryThreshold = body.freeDeliveryThreshold === undefined ? 299 : Number(body.freeDeliveryThreshold);
+    const minOrderAmount = body.minOrderAmount === undefined ? 99 : Number(body.minOrderAmount);
+    const terminalCount = body.posTerminalCount === undefined ? 1 : Number(body.posTerminalCount);
+    const lat = Number(body.lat);
+    const lng = Number(body.lng);
+
+    if (!name || name.length > 120) problems.push('Franchise name is required and must be at most 120 characters.');
+    if (!city || city.length > 80) problems.push('City is required and must be at most 80 characters.');
+    if (!state || state.length > 80) problems.push('State is required and must be at most 80 characters.');
+    if (address.length < 5 || address.length > 280) problems.push('A full street address is required (5–280 characters).');
+    if (body.lat === undefined || body.lat === null || !Number.isFinite(lat) || lat < -90 || lat > 90) problems.push('A valid map latitude is required.');
+    if (body.lng === undefined || body.lng === null || !Number.isFinite(lng) || lng < -180 || lng > 180) problems.push('A valid map longitude is required.');
+    if (phone && (!/^[+\d()\-\s]{7,24}$/.test(phone) || phone.replace(/\D/g, '').length < 7 || phone.replace(/\D/g, '').length > 15)) problems.push('Store phone must contain 7–15 digits and only standard phone punctuation.');
+    if (contactEmail && !validEmail(contactEmail)) problems.push('Store contact email is invalid.');
+    if (franchiseOwnerEmail && !validEmail(franchiseOwnerEmail)) problems.push('Franchise-owner email is invalid.');
+    if (restaurantManagerEmail && !validEmail(restaurantManagerEmail)) problems.push('Restaurant-manager email is invalid.');
+    if (franchiseOwnerEmail && restaurantManagerEmail && franchiseOwnerEmail === restaurantManagerEmail) problems.push('Use different accounts for franchise owner and restaurant manager.');
+    if (!validTime(openingTime) || !validTime(closingTime)) problems.push('Opening and closing times must use valid 24-hour HH:MM values.');
+    if (!Number.isFinite(radiusInput) || radiusInput < 1 || radiusInput > 50) problems.push('Delivery radius must be between 1 and 50 km.');
+    if (![deliveryFee, freeDeliveryThreshold, minOrderAmount].every(value => Number.isFinite(value) && value >= 0 && value <= 1000000)) problems.push('Delivery fee, free-delivery threshold, and minimum order must be finite values from ₹0 to ₹10,00,000.');
+    if (!Number.isInteger(terminalCount) || terminalCount < 1 || terminalCount > 10) problems.push('POS terminal count must be an integer between 1 and 10.');
+
+    const terminalNames = Array.isArray(body.posTerminalNames) ? body.posTerminalNames.map((value: unknown) => cleanString(value)) : [];
+    if (terminalNames.length && (terminalNames.length !== terminalCount || terminalNames.some((value: string) => !value || value.length > 40))) {
+      problems.push('Provide one non-empty POS terminal name (maximum 40 characters) for every terminal.');
+    }
+    if (terminalNames.length && new Set(terminalNames.map((value: string) => value.toLowerCase())).size !== terminalNames.length) {
+      problems.push('POS terminal names must be unique within the new franchise.');
+    }
+    if (requestedCode && !/^[A-Z0-9][A-Z0-9_-]{2,19}$/.test(requestedCode)) {
+      problems.push('Franchise code must be 3–20 letters, digits, hyphens, or underscores.');
+    }
+
+    if (problems.length) {
+      res.status(400).json({ success: false, code: 'INVALID_FRANCHISE_INPUT', error: problems[0], errors: problems });
+      return;
+    }
+
+    // Organization tenancy is server-owned; never accept it from the browser.
+    const orgId = FranchiseScopeService.DEFAULT_ORG_ID;
+    const cleanCode = requestedCode || `OP-${city.normalize('NFKD').replace(/[^a-zA-Z0-9]/g, '').slice(0, 3).toUpperCase().padEnd(3, 'X')}-${crypto.randomInt(1000, 10000)}`;
+    const franchiseId = `fra_${cleanCode.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '')}`;
+    const branchId = `${franchiseId}_main_branch`;
+    const citySlug = city.toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'location';
+    const slug = `${citySlug}-${cleanCode.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+    const branchCode = `${cleanCode}-B01`;
+    const now = new Date().toISOString();
+    const radius = radiusInput;
+    const posNames = terminalNames.length
+      ? terminalNames
+      : Array.from({ length: terminalCount }, (_, index) => `Counter ${index + 1}`);
+
+    // Validate optional access grants before writing any franchise data. Do not fabricate
+    // Firestore "users" documents from email addresses; they are not Firebase identities.
+    const resolvedAccounts: { uid: string; email: string; role: 'franchise_owner' | 'restaurant_manager'; name: string }[] = [];
+    for (const candidate of [
+      franchiseOwnerEmail ? { email: franchiseOwnerEmail, role: 'franchise_owner' as const, name: franchiseOwnerName || 'Franchise Owner' } : null,
+      restaurantManagerEmail ? { email: restaurantManagerEmail, role: 'restaurant_manager' as const, name: restaurantManagerName || 'Restaurant Manager' } : null
+    ]) {
+      if (!candidate) continue;
+      if (!adminAuth) {
+        res.status(503).json({ success: false, error: 'Firebase Authentication is unavailable. No franchise records have been created; retry after authentication service recovers.' });
+        return;
+      }
+      try {
+        const authUser = await adminAuth.getUserByEmail(candidate.email);
+        if (authUser.disabled) {
+          res.status(422).json({ success: false, code: 'STAFF_ACCOUNT_DISABLED', error: `The account ${candidate.email} is disabled in Firebase Authentication.` });
+          return;
+        }
+        if (!authUser.emailVerified) {
+          res.status(422).json({ success: false, code: 'STAFF_EMAIL_NOT_VERIFIED', error: `Verify ${candidate.email} in Firebase Authentication before assigning franchise access, or leave the account field blank and assign it later.` });
+          return;
+        }
+        const userSnap = await adminDb.collection('users').doc(authUser.uid).get();
+        const userRecord = userSnap.data() || {};
+        const currentRole = String(userRecord.role || '').toLowerCase();
+        const claimRole = String((authUser.customClaims as Record<string, unknown> | undefined)?.role || '').toLowerCase();
+        const protectedRoles = new Set(['owner', 'platform_owner', 'admin', 'developer', 'platform_admin']);
+        if (
+          authUser.uid === req.user?.uid ||
+          protectedRoles.has(currentRole) ||
+          protectedRoles.has(claimRole) ||
+          userRecord.isOwnerMode === true ||
+          userRecord.isGlobalOwner === true ||
+          userRecord.admin === true
+        ) {
+          res.status(409).json({
+            success: false,
+            code: 'PROTECTED_ACCOUNT_CANNOT_BE_ASSIGNED',
+            error: `${candidate.email} is a platform-level or current owner account and cannot be reassigned as franchise staff. Use a separate verified staff account.`
+          });
+          return;
+        }
+        resolvedAccounts.push({ uid: authUser.uid, email: candidate.email, role: candidate.role, name: candidate.name });
+      } catch (authError: any) {
+        if (authError?.code === 'auth/user-not-found') {
+          res.status(422).json({ success: false, code: 'STAFF_ACCOUNT_NOT_FOUND', error: `No Firebase sign-in account exists for ${candidate.email}. Create and verify that account first, or leave the field blank and assign it later.` });
+          return;
+        }
+        throw authError;
+      }
+    }
+
+    // Explicit and generated codes must be unique across canonical franchise and branch records.
+    const [entityCodeSnap, branchCodeSnap] = await Promise.all([
+      adminDb.collection('franchise_entities').where('code', '==', cleanCode).limit(1).get(),
+      adminDb.collection('franchises').where('code', '==', branchCode).limit(1).get()
+    ]);
+    if (!entityCodeSnap.empty || !branchCodeSnap.empty) {
+      res.status(409).json({ success: false, code: 'FRANCHISE_CODE_CONFLICT', error: 'This franchise code is already in use. Choose a different code.' });
+      return;
+    }
+
+    const deliverySettings = {
+      maxDeliveryRadiusKm: radius,
+      deliveryFee,
+      freeDeliveryThreshold,
+      minOrderAmount
+    };
+    const businessHours = { openingTime, closingTime, isOpenToday: true };
+    const franchiseEntity: FranchiseEntity & Record<string, any> = {
+      id: franchiseId,
+      slug,
+      organizationId: orgId,
       name,
-      code,
+      code: cleanCode,
+      region: state,
+      city,
+      contactEmail,
+      contactPhone: phone,
+      franchiseOwnerName: franchiseOwnerName || undefined,
+      franchiseOwnerEmail: franchiseOwnerEmail || undefined,
+      restaurantManagerName: restaurantManagerName || undefined,
+      restaurantManagerEmail: restaurantManagerEmail || undefined,
+      address,
+      lat,
+      lng,
+      mainBranchId: branchId,
+      isActive: true,
+      status: 'ACTIVE',
+      businessHours,
+      deliverySettings,
+      createdAt: now,
+      updatedAt: now,
+      createdBy: req.user?.uid
+    };
+    const branchData: Record<string, any> = {
+      id: branchId,
+      franchiseId,
+      organizationId: orgId,
+      name: `${name} (Main Branch)`,
+      code: branchCode,
+      franchiseCode: cleanCode,
       city,
       state,
       address,
       lat,
       lng,
       phone,
-      email,
-      franchiseOwnerEmail,
-      franchiseOwnerName,
-      restaurantManagerEmail,
-      restaurantManagerName,
-      maxDeliveryRadiusKm,
+      email: contactEmail,
+      franchiseOwnerName: franchiseOwnerName || undefined,
+      franchiseOwnerEmail: franchiseOwnerEmail || undefined,
+      restaurantManagerName: restaurantManagerName || undefined,
+      restaurantManagerEmail: restaurantManagerEmail || undefined,
+      maxDeliveryRadiusKm: radius,
+      deliveryFee,
+      freeDeliveryThreshold,
+      minOrderAmount,
+      deliverySettings,
       openingTime,
       closingTime,
-      posTerminalCount,
-      posTerminalNames,
-      organizationId
-    } = req.body;
-
-    if (!name || !city) {
-      res.status(400).json({ error: 'Franchise name and city are required' });
-      return;
-    }
-
-    const orgId = organizationId || FranchiseScopeService.DEFAULT_ORG_ID;
-    const cleanCity = city.trim();
-    const slug = cleanCity.toLowerCase().replace(/[^a-z0-9]/g, '-');
-    const cleanCode = code ? code.trim().toUpperCase() : `FRA-${cleanCity.slice(0, 3).toUpperCase()}-01`;
-    const franchiseId = `fra_${cleanCity.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
-    const branchId = `${cleanCity.toLowerCase().replace(/[^a-z0-9]/g, '_')}_branch`;
-    const now = new Date().toISOString();
-
-    // 1. Franchise Entity Record
-    const franchiseEntity: FranchiseEntity = {
-      id: franchiseId,
-      slug,
-      organizationId: orgId,
-      name: name.trim(),
-      code: cleanCode,
-      region: state || 'Chhattisgarh',
-      city: cleanCity,
-      contactEmail: email || `franchise.${slug}@olivepizza.in`,
-      contactPhone: phone || '+91 91799 44445',
-      franchiseOwnerName: franchiseOwnerName || 'Franchise Partner',
-      franchiseOwnerEmail: franchiseOwnerEmail ? franchiseOwnerEmail.trim().toLowerCase() : undefined,
-      mainBranchId: branchId,
-      isActive: true,
+      acceptingOrders,
+      isOpen: acceptingOrders,
+      closeReason: acceptingOrders ? '' : 'Pending franchise launch checks',
       status: 'ACTIVE',
-      businessHours: {
-        openingTime: openingTime || '12:00',
-        closingTime: closingTime || '23:59',
-        isOpenToday: true
-      },
-      deliverySettings: {
-        maxDeliveryRadiusKm: Number(maxDeliveryRadiusKm) || 12,
-        deliveryFee: 30,
-        freeDeliveryThreshold: 299,
-        minOrderAmount: 99
-      },
-      createdAt: now,
-      updatedAt: now
-    };
-
-    await adminDb.collection('franchise_entities').doc(franchiseId).set(franchiseEntity, { merge: true });
-
-    // 2. Primary Branch Record
-    const branchData = {
-      id: branchId,
-      franchiseId,
-      organizationId: orgId,
-      name: `${name.trim()} (Main Branch)`,
-      code: `OP-${cleanCity.slice(0, 3).toUpperCase()}-01`,
-      city: cleanCity,
-      state: state ? state.trim() : 'Chhattisgarh',
-      address: address ? address.trim() : `${cleanCity}, Chhattisgarh`,
-      lat: Number(lat) || 21.0810244,
-      lng: Number(lng) || 81.0123793,
-      phone: phone || '+91 91799 44445',
-      email: email || `branch.${slug}@olivepizza.in`,
-      franchiseOwnerEmail: franchiseOwnerEmail ? franchiseOwnerEmail.trim().toLowerCase() : undefined,
-      restaurantManagerEmail: restaurantManagerEmail ? restaurantManagerEmail.trim().toLowerCase() : undefined,
-      maxDeliveryRadiusKm: Number(maxDeliveryRadiusKm) || 12,
-      openingTime: openingTime || '12:00',
-      closingTime: closingTime || '23:59',
       isActive: true,
       isHeadquarters: false,
-      posTerminalCount: Number(posTerminalCount) || 1,
+      posTerminalCount: terminalCount,
       createdAt: now,
       updatedAt: now,
-      createdBy: req.user?.uid || 'owner'
+      createdBy: req.user?.uid
     };
-
-    await adminDb.collection('franchises').doc(branchId).set(branchData, { merge: true });
-
-    // 3. Provision Franchise Owner Account if provided
-    if (franchiseOwnerEmail) {
-      const foEmail = franchiseOwnerEmail.trim().toLowerCase();
-      const foId = `user_fo_${foEmail.replace(/[^a-z0-9]/g, '_')}`;
-      await adminDb.collection('users').doc(foId).set({
-        uid: foId,
-        email: foEmail,
-        name: franchiseOwnerName || 'Franchise Owner',
-        role: 'franchise_owner',
-        organizationId: orgId,
-        franchiseId,
-        branchIds: [branchId],
-        isActive: true,
-        updatedAt: now,
-        createdAt: now
-      }, { merge: true });
+    const dailyHours = {
+      sunday: { open: openingTime, close: closingTime, isOpen: true },
+      monday: { open: openingTime, close: closingTime, isOpen: true },
+      tuesday: { open: openingTime, close: closingTime, isOpen: true },
+      wednesday: { open: openingTime, close: closingTime, isOpen: true },
+      thursday: { open: openingTime, close: closingTime, isOpen: true },
+      friday: { open: openingTime, close: closingTime, isOpen: true },
+      saturday: { open: openingTime, close: closingTime, isOpen: true }
+    };
+    const entityRef = adminDb.collection('franchise_entities').doc(franchiseId);
+    const branchRef = adminDb.collection('franchises').doc(branchId);
+    const settingsRef = adminDb.collection('restaurant_settings').doc(branchId);
+    const activationCodeExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const reservedActivationCodes = new Set<string>();
+    const terminalRefs: Array<{ id: string; name: string; activationCode: string }> = [];
+    for (let index = 0; index < posNames.length; index += 1) {
+      terminalRefs.push({
+        id: `POS-${branchId.toUpperCase().slice(0, 18)}-${crypto.randomInt(1000, 10000)}-${index + 1}`,
+        name: posNames[index],
+        activationCode: await generateUniquePosActivationCode(reservedActivationCodes)
+      });
     }
+    const warnings: string[] = [];
 
-    // 4. Provision Restaurant Manager Account if provided
-    if (restaurantManagerEmail) {
-      const rmEmail = restaurantManagerEmail.trim().toLowerCase();
-      const rmId = `mgr_${rmEmail.replace(/[^a-z0-9]/g, '_')}`;
-      await adminDb.collection('restaurant_managers').doc(rmId).set({
-        id: rmId,
-        email: rmEmail,
-        name: restaurantManagerName || 'Restaurant Manager',
-        role: 'restaurant_manager',
-        organizationId: orgId,
-        franchiseId,
+    // All core records are created together. A duplicate ID/race cannot merge over an existing franchise.
+    await adminDb.runTransaction(async (transaction) => {
+      const [entitySnap, branchSnap, settingsSnap] = await Promise.all([
+        transaction.get(entityRef),
+        transaction.get(branchRef),
+        transaction.get(settingsRef)
+      ]);
+      if (entitySnap.exists || branchSnap.exists || settingsSnap.exists) {
+        const conflict: any = new Error('A franchise with this ID already exists. Choose a different franchise code.');
+        conflict.status = 409;
+        conflict.code = 'FRANCHISE_ID_CONFLICT';
+        throw conflict;
+      }
+      transaction.create(entityRef, franchiseEntity);
+      transaction.create(branchRef, branchData);
+      transaction.create(settingsRef, {
         branchId,
-        branchName: branchData.name,
-        permissions: ['dashboard.view', 'orders.live', 'orders.history', 'inventory.view', 'notifications.send', 'delivery.view'],
-        isActive: true,
-        updatedAt: now,
-        createdAt: now
-      }, { merge: true });
-    }
-
-    // 5. Provision POS Terminals with secure 6-digit activation codes
-    const terminalCount = Math.max(1, Number(posTerminalCount) || 1);
-    const terminalNamesList = Array.isArray(posTerminalNames) && posTerminalNames.length > 0 
-      ? posTerminalNames 
-      : Array.from({ length: terminalCount }, (_, i) => `${cleanCode} Counter ${i + 1}`);
-
-    for (let i = 0; i < terminalCount; i++) {
-      const termId = `pos_${branchId}_${i + 1}`;
-      const activationCode = FranchisePinService.generateSecureActivationCode();
-      await adminDb.collection('pos_terminals').doc(termId).set({
-        id: termId,
-        organizationId: orgId,
         franchiseId,
-        branchId,
-        branchName: branchData.name,
-        terminalName: terminalNamesList[i] || `Counter ${i + 1}`,
-        activationCode,
-        activationStatus: 'ACTIVATED',
-        isActive: true,
-        createdAt: now
-      }, { merge: true });
+        organizationId: orgId,
+        restaurantName: branchData.name,
+        isOpen: acceptingOrders,
+        acceptingOrders,
+        isManualClose: !acceptingOrders,
+        closeReason: acceptingOrders ? '' : 'Pending franchise launch checks',
+        currentPrepTime: 25,
+        operatingHours: dailyHours,
+        services: { delivery: true, takeaway: true, dineIn: true },
+        deliverySettings,
+        createdAt: now,
+        updatedAt: now,
+        createdBy: req.user?.uid
+      });
+    });
+
+    // Staff access is attached to real Firebase UIDs; the platform never invents users from email text.
+    for (const account of resolvedAccounts) {
+      try {
+        await FranchiseAccessService.updateFranchiseAccess({
+          targetUserId: account.uid,
+          franchiseId,
+          branchId,
+          targetRole: account.role,
+          applicationAccess: account.role === 'franchise_owner'
+            ? { app_franchise_management: true, app_pos: body.franchiseOwnerGrantPos === true }
+            : { app_restaurant_management: true, app_pos: body.restaurantManagerGrantPos === true },
+          accountStatus: 'ACTIVE',
+          actorUid: req.user?.uid || 'owner',
+          actorEmail: req.user?.email || 'owner@olivepizza.in',
+          permissions: account.role === 'restaurant_manager'
+            ? ['dashboard.view', 'orders.live', 'orders.history', 'inventory.view', 'delivery.view']
+            : []
+        });
+      } catch (accessError: any) {
+        console.error('[FranchiseProvision] Staff access sync failed', { franchiseId, uid: account.uid, role: account.role, message: accessError?.message });
+        warnings.push(`Franchise created, but ${account.role.replace(/_/g, ' ')} access for ${account.email} needs to be assigned again from Owner > Access Management.`);
+      }
     }
 
-    // 6. Asynchronously trigger automatic Franchise Google Spreadsheet provisioning
+    // Create terminals in pending activation state. Codes are disclosed once in the creation response.
+    try {
+      const batch = adminDb.batch();
+      for (const terminal of terminalRefs) {
+        batch.create(adminDb.collection('pos_terminals').doc(terminal.id), {
+          id: terminal.id,
+          terminalId: terminal.id,
+          organizationId: orgId,
+          franchiseId,
+          branchId,
+          branchName: branchData.name,
+          terminalName: terminal.name,
+          activationCode: terminal.activationCode,
+          activationCodeExpiresAt,
+          status: 'PENDING_ACTIVATION',
+          activationStatus: 'PENDING_ACTIVATION',
+          isActive: true,
+          isOnline: false,
+          createdAt: now,
+          createdBy: req.user?.uid
+        });
+      }
+      await batch.commit();
+    } catch (terminalError: any) {
+      console.error('[FranchiseProvision] POS terminal setup failed', { franchiseId, message: terminalError?.message });
+      warnings.push('Franchise created, but POS terminal records need to be created from the POS Terminals section before counters can be used.');
+    }
+
+    // Recompute active delivery/service-area branches immediately after a new branch is created.
+    try {
+      const { CustomerOrderingContextService } = await import('../services/order/CustomerOrderingContextService.js');
+      CustomerOrderingContextService.invalidateBranchesSnapshot();
+    } catch (cacheError: any) {
+      console.warn('[FranchiseProvision] Branch snapshot cache invalidation notice:', cacheError?.message);
+    }
+
     let sheetsProvisioning: any = { status: 'PROVISIONING_PENDING' };
     try {
       sheetsProvisioning = await FranchiseGoogleSheetsService.provisionFranchiseSpreadsheet(franchiseId, name, state);
-    } catch (sheetsErr: any) {
-      console.warn('[FranchiseProvision] Google Sheets initial creation notice:', sheetsErr.message);
+      if (sheetsProvisioning?.success === false || sheetsProvisioning?.error) {
+        warnings.push('Google Sheets setup did not complete. Retry it from the franchise reporting / Sheets controls.');
+      }
+    } catch (sheetsError: any) {
+      console.warn('[FranchiseProvision] Google Sheets setup needs retry:', sheetsError?.message);
+      warnings.push('Google Sheets setup did not complete. Retry it from the franchise reporting / Sheets controls.');
+      sheetsProvisioning = { status: 'PROVISIONING_PENDING' };
     }
 
-    // 7. Log Audit Event
-    await FranchiseScopeService.logFranchiseAudit({
-      organizationId: orgId,
-      franchiseId,
-      branchId,
-      actorUid: req.user?.uid || 'owner',
-      actorEmail: req.user?.email || 'owner@olivepizza.in',
-      actionType: 'FRANCHISE_PROVISIONED',
-      entityType: 'franchise_full_provision',
-      entityId: franchiseId,
-      details: { franchiseEntity, branchData, terminalCount }
-    });
+    try {
+      await FranchiseScopeService.logFranchiseAudit({
+        organizationId: orgId,
+        franchiseId,
+        branchId,
+        actorUid: req.user?.uid || 'owner',
+        actorEmail: req.user?.email || 'owner@olivepizza.in',
+        actionType: 'FRANCHISE_PROVISIONED',
+        entityType: 'franchise_full_provision',
+        entityId: franchiseId,
+        details: {
+          code: cleanCode,
+          branchCode,
+          terminalCount,
+          assignedAccounts: resolvedAccounts.map(account => ({ uid: account.uid, role: account.role, apps: account.role === 'franchise_owner'
+            ? ['FRANCHISE_MANAGER', ...(body.franchiseOwnerGrantPos === true ? ['POS'] : [])]
+            : ['RESTAURANT_MANAGER', ...(body.restaurantManagerGrantPos === true ? ['POS'] : [])] })),
+          acceptingOrders,
+          warnings
+        }
+      });
+    } catch (auditError: any) {
+      console.error('[FranchiseProvision] Audit write failed after successful core creation:', auditError?.message);
+      warnings.push('Franchise was created, but the provisioning audit event could not be saved. Review backend audit storage.');
+    }
 
     res.status(201).json({
       success: true,
-      message: 'Franchise, primary branch, manager accounts, and POS terminals provisioned successfully',
+      message: warnings.length
+        ? 'Franchise and branch created; review the setup warnings before launch.'
+        : 'Franchise and branch created successfully. POS terminals still require activation.',
       franchise: franchiseEntity,
       branch: branchData,
-      terminalsProvisioned: terminalCount,
-      sheetsProvisioning
+      terminalsProvisioned: warnings.some(warning => warning.includes('POS terminal')) ? 0 : terminalCount,
+      // One-time codes are returned only in the successful creation response; terminal-list
+      // endpoints omit activationCode. Codes expire after 24 hours and are single-use.
+      posActivationCodes: warnings.some(warning => warning.includes('POS terminal'))
+        ? []
+        : terminalRefs.map(terminal => ({
+            terminalId: terminal.id,
+            terminalName: terminal.name,
+            activationCode: terminal.activationCode,
+            expiresAt: activationCodeExpiresAt
+          })),
+      sheetsProvisioning: {
+        status: sheetsProvisioning?.success === false || sheetsProvisioning?.error ? 'PROVISIONING_PENDING' : (sheetsProvisioning?.status || 'PROVISIONED'),
+        spreadsheetUrl: sheetsProvisioning?.spreadsheetUrl,
+        spreadsheetId: sheetsProvisioning?.spreadsheetId
+      },
+      warnings
     });
   } catch (error: any) {
-    console.error('[Franchises] Error provisioning franchise:', error);
-    res.status(500).json({ error: error?.message || 'Failed to provision franchise' });
+    const status = Number.isInteger(error?.status) ? error.status : 500;
+    if (status >= 500) console.error('[FranchiseProvision] Provisioning failed:', error);
+    res.status(status).json({
+      success: false,
+      code: error?.code || 'FRANCHISE_PROVISION_FAILED',
+      error: error?.message || 'Failed to provision franchise'
+    });
   }
 });
 

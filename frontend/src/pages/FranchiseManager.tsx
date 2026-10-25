@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import {
   Building2,
   Plus,
+  Copy,
   MapPin,
   Phone,
   Mail,
@@ -33,7 +34,7 @@ import {
   Archive
 } from 'lucide-react';
 import { db } from '../lib/firebase';
-import { collection, getDocs, doc, setDoc, updateDoc } from 'firebase/firestore';
+import { collection, getDocs, doc, updateDoc } from 'firebase/firestore';
 import { fetchApi } from '../lib/api';
 import toast from 'react-hot-toast';
 import { FranchiseLocationPicker } from '../components/franchise/FranchiseLocationPicker';
@@ -104,6 +105,8 @@ export default function FranchiseManager() {
   const [isProvisionWizardOpen, setIsProvisionWizardOpen] = useState(false);
   const [wizardStep, setWizardStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showPosActivationCodes, setShowPosActivationCodes] = useState(false);
+  const [provisionedActivationCodes, setProvisionedActivationCodes] = useState<Array<{ terminalId: string; terminalName: string; activationCode: string; expiresAt: string }>>([]);
 
   // Wizard Fields
   const [wizName, setWizName] = useState('');
@@ -111,15 +114,22 @@ export default function FranchiseManager() {
   const [wizCity, setWizCity] = useState('');
   const [wizState, setWizState] = useState('Chhattisgarh');
   const [wizAddress, setWizAddress] = useState('');
-  const [wizLat, setWizLat] = useState('21.0810244');
-  const [wizLng, setWizLng] = useState('81.0123793');
-  const [wizPhone, setWizPhone] = useState('+91 91799 44445');
+  const [wizLat, setWizLat] = useState('');
+  const [wizLng, setWizLng] = useState('');
+  const [wizLocationConfirmed, setWizLocationConfirmed] = useState(false);
+  const [wizPhone, setWizPhone] = useState('');
   const [wizEmail, setWizEmail] = useState('');
   const [wizFranchiseOwnerEmail, setWizFranchiseOwnerEmail] = useState('');
   const [wizFranchiseOwnerName, setWizFranchiseOwnerName] = useState('');
+  const [wizOwnerGrantPos, setWizOwnerGrantPos] = useState(false);
   const [wizRestaurantManagerEmail, setWizRestaurantManagerEmail] = useState('');
   const [wizRestaurantManagerName, setWizRestaurantManagerName] = useState('');
+  const [wizManagerGrantPos, setWizManagerGrantPos] = useState(false);
   const [wizMaxRadius, setWizMaxRadius] = useState(12);
+  const [wizDeliveryFee, setWizDeliveryFee] = useState(30);
+  const [wizFreeDeliveryThreshold, setWizFreeDeliveryThreshold] = useState(299);
+  const [wizMinOrderAmount, setWizMinOrderAmount] = useState(99);
+  const [wizAcceptingOrders, setWizAcceptingOrders] = useState(false);
   const [wizOpenTime, setWizOpenTime] = useState('12:00');
   const [wizCloseTime, setWizCloseTime] = useState('23:59');
   const [wizPosCount, setWizPosCount] = useState(1);
@@ -438,36 +448,131 @@ export default function FranchiseManager() {
     }
   };
 
+  const validateProvisionStep = (step: number): boolean => {
+    const validEmail = (value: string) => !value.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+    if (step === 1 && (!wizName.trim() || !wizCity.trim() || !wizState.trim())) {
+      toast.error('Enter franchise name, city, and state before continuing.');
+      return false;
+    }
+    if (step === 2 && (!validEmail(wizFranchiseOwnerEmail))) {
+      toast.error('Enter a valid franchise-owner email or leave it blank to assign later.');
+      return false;
+    }
+    if (step === 3) {
+      if (wizPhone.trim() && (!/^[+\d()\-\s]{7,24}$/.test(wizPhone.trim()) || wizPhone.replace(/\D/g, '').length < 7 || wizPhone.replace(/\D/g, '').length > 15)) {
+        toast.error('Enter a valid store phone number or leave it blank.');
+        return false;
+      }
+      if (!validEmail(wizEmail) || !validEmail(wizRestaurantManagerEmail)) {
+        toast.error('Enter valid email addresses or leave optional fields blank.');
+        return false;
+      }
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(wizOpenTime) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(wizCloseTime)) {
+        toast.error('Opening and closing times must be valid 24-hour times.');
+        return false;
+      }
+      if (!Number.isFinite(wizMaxRadius) || wizMaxRadius < 1 || wizMaxRadius > 50) {
+        toast.error('Delivery radius must be between 1 and 50 km.');
+        return false;
+      }
+      if ([wizDeliveryFee, wizFreeDeliveryThreshold, wizMinOrderAmount].some(v => !Number.isFinite(v) || v < 0)) {
+        toast.error('Delivery and minimum-order values cannot be negative.');
+        return false;
+      }
+    }
+    if (step === 4 && !validEmail(wizRestaurantManagerEmail)) {
+      toast.error('Enter a valid restaurant-manager email or leave it blank to assign later.');
+      return false;
+    }
+    if (step === 5) {
+      const lat = Number(wizLat);
+      const lng = Number(wizLng);
+      if (!wizAddress.trim() || !wizLocationConfirmed || !Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+        toast.error('Enter the street address and confirm the exact map pin before continuing.');
+        return false;
+      }
+    }
+    if (step === 6) {
+      if (!Number.isInteger(wizPosCount) || wizPosCount < 1 || wizPosCount > 10) {
+        toast.error('Choose between 1 and 10 POS terminals.');
+        return false;
+      }
+      if (wizPosNames.length !== wizPosCount || wizPosNames.some(name => !name.trim() || name.trim().length > 40)) {
+        toast.error('Give every POS terminal a name of at most 40 characters.');
+        return false;
+      }
+      if (new Set(wizPosNames.map(name => name.trim().toLowerCase())).size !== wizPosNames.length) {
+        toast.error('Each POS terminal must have a unique name.');
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const resetProvisionWizard = () => {
+    setWizardStep(1);
+    setWizName('');
+    setWizCode('');
+    setWizCity('');
+    setWizState('Chhattisgarh');
+    setWizAddress('');
+    setWizLat('');
+    setWizLng('');
+    setWizLocationConfirmed(false);
+    setWizPhone('');
+    setWizEmail('');
+    setWizFranchiseOwnerEmail('');
+    setWizFranchiseOwnerName('');
+    setWizOwnerGrantPos(false);
+    setWizRestaurantManagerEmail('');
+    setWizRestaurantManagerName('');
+    setWizManagerGrantPos(false);
+    setWizMaxRadius(12);
+    setWizDeliveryFee(30);
+    setWizFreeDeliveryThreshold(299);
+    setWizMinOrderAmount(99);
+    setWizAcceptingOrders(false);
+    setWizOpenTime('12:00');
+    setWizCloseTime('23:59');
+    setWizPosCount(1);
+    setWizPosNames(['Counter 1']);
+  };
+
   const handleProvisionFranchise = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!wizName.trim() || !wizCity.trim()) {
-      toast.error('Franchise name and city are required');
-      return;
+    for (let step = 1; step <= 6; step += 1) {
+      if (!validateProvisionStep(step)) {
+        setWizardStep(step);
+        return;
+      }
     }
 
     setIsSubmitting(true);
-    const cleanCode = wizCode ? wizCode.trim().toUpperCase() : `OP-${wizCity.slice(0, 3).toUpperCase()}-01`;
-    const branchId = `${wizCity.toLowerCase().replace(/[^a-z0-9]/g, '_')}_branch`;
-
     const payload = {
       name: wizName.trim(),
-      code: cleanCode,
+      code: wizCode.trim().toUpperCase(),
       city: wizCity.trim(),
       state: wizState.trim(),
-      address: wizAddress.trim() || `${wizCity}, Chhattisgarh`,
-      lat: Number(wizLat) || 21.0810244,
-      lng: Number(wizLng) || 81.0123793,
-      phone: wizPhone.trim() || '+91 91799 44445',
-      email: wizEmail.trim() || `branch.${wizCity.toLowerCase()}@olivepizza.in`,
-      franchiseOwnerEmail: wizFranchiseOwnerEmail.trim(),
-      franchiseOwnerName: wizFranchiseOwnerName.trim() || 'Franchise Owner',
-      restaurantManagerEmail: wizRestaurantManagerEmail.trim(),
-      restaurantManagerName: wizRestaurantManagerName.trim() || 'Restaurant Manager',
-      maxDeliveryRadiusKm: Number(wizMaxRadius) || 12,
-      openingTime: wizOpenTime || '12:00',
-      closingTime: wizCloseTime || '23:59',
-      posTerminalCount: Number(wizPosCount) || 1,
-      posTerminalNames: wizPosNames
+      address: wizAddress.trim(),
+      lat: Number(wizLat),
+      lng: Number(wizLng),
+      phone: wizPhone.trim(),
+      email: wizEmail.trim().toLowerCase(),
+      franchiseOwnerEmail: wizFranchiseOwnerEmail.trim().toLowerCase(),
+      franchiseOwnerName: wizFranchiseOwnerName.trim(),
+      franchiseOwnerGrantPos: wizOwnerGrantPos,
+      restaurantManagerEmail: wizRestaurantManagerEmail.trim().toLowerCase(),
+      restaurantManagerName: wizRestaurantManagerName.trim(),
+      restaurantManagerGrantPos: wizManagerGrantPos,
+      maxDeliveryRadiusKm: wizMaxRadius,
+      deliveryFee: wizDeliveryFee,
+      freeDeliveryThreshold: wizFreeDeliveryThreshold,
+      minOrderAmount: wizMinOrderAmount,
+      acceptingOrders: wizAcceptingOrders,
+      openingTime: wizOpenTime,
+      closingTime: wizCloseTime,
+      posTerminalCount: wizPosCount,
+      posTerminalNames: wizPosNames.map(name => name.trim())
     };
 
     try {
@@ -477,55 +582,27 @@ export default function FranchiseManager() {
       });
       const data = await res.json().catch(() => null);
 
-      if (res.ok || data?.success) {
-        toast.success('Franchise, Staff Accounts & POS Terminals Provisioned!');
-      } else {
-        const slug = wizCity.toLowerCase().replace(/[^a-z0-9]/g, '-');
-        const franchiseId = `fra_${wizCity.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
-        const now = new Date().toISOString();
-
-        await setDoc(doc(db, 'franchise_entities', franchiseId), {
-          id: franchiseId,
-          slug,
-          organizationId: 'org_olive_pizza',
-          name: payload.name,
-          code: payload.code,
-          region: payload.state,
-          city: payload.city,
-          contactEmail: payload.email,
-          contactPhone: payload.phone,
-          franchiseOwnerName: payload.franchiseOwnerName,
-          franchiseOwnerEmail: payload.franchiseOwnerEmail || undefined,
-          restaurantManagerName: payload.restaurantManagerName || undefined,
-          restaurantManagerEmail: payload.restaurantManagerEmail || undefined,
-          mainBranchId: branchId,
-          isActive: true,
-          status: 'ACTIVE',
-          createdAt: now,
-          updatedAt: now
-        }, { merge: true });
-
-        await setDoc(doc(db, 'franchises', branchId), {
-          id: branchId,
-          franchiseId,
-          slug,
-          ...payload,
-          isActive: true,
-          createdAt: now,
-          updatedAt: now
-        }, { merge: true });
-        toast.success('Franchise created successfully');
+      if (!res.ok || !data?.success) {
+        const details = Array.isArray(data?.errors) ? data.errors.join(' ') : data?.error;
+        throw new Error(details || `Provisioning failed (HTTP ${res.status}). No browser-side database fallback was attempted.`);
       }
 
+      const warnings: string[] = Array.isArray(data.warnings) ? data.warnings : [];
+      const activationCodes = Array.isArray(data.posActivationCodes)
+        ? data.posActivationCodes.filter((item: any) => item && typeof item.activationCode === 'string' && typeof item.terminalId === 'string')
+        : [];
+      setProvisionedActivationCodes(activationCodes);
+      setShowPosActivationCodes(activationCodes.length > 0);
+      if (warnings.length) {
+        toast.error(`Franchise created with ${warnings.length} setup warning(s). Review the launch checklist and any missing access before opening orders.`, { duration: 7000 });
+      } else {
+        toast.success('Franchise and branch created. POS activation codes are available for copying for the next 24 hours.');
+      }
       setIsProvisionWizardOpen(false);
-      setWizardStep(1);
-      setWizName('');
-      setWizCode('');
-      setWizCity('');
-      setWizAddress('');
-      loadBranches();
+      resetProvisionWizard();
+      await Promise.all([loadBranches(), loadDeletedFranchises()]);
     } catch (err: any) {
-      toast.error('Provisioning error: ' + err?.message);
+      toast.error('Provisioning failed: ' + (err?.message || 'Unknown error'));
     } finally {
       setIsSubmitting(false);
     }
@@ -576,7 +653,7 @@ export default function FranchiseManager() {
 
           <button
             onClick={() => {
-              setWizardStep(1);
+              resetProvisionWizard();
               setIsProvisionWizardOpen(true);
             }}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-xs shadow-lg shadow-orange-500/20 transition-all cursor-pointer"
@@ -1019,7 +1096,7 @@ export default function FranchiseManager() {
             </div>
 
             {/* Wizard Forms */}
-            <form onSubmit={handleProvisionFranchise} className="space-y-4">
+            <form noValidate onSubmit={handleProvisionFranchise} className="space-y-4">
               {wizardStep === 1 && (
                 <div className="space-y-4">
                   <h3 className="text-sm font-bold text-white">Step 1: Franchise Information</h3>
@@ -1028,7 +1105,6 @@ export default function FranchiseManager() {
                       <label className="text-xs text-slate-400 block mb-1">Franchise Name *</label>
                       <input
                         type="text"
-                        required
                         value={wizName}
                         onChange={(e) => setWizName(e.target.value)}
                         placeholder="e.g. Olive Pizza — Raipur"
@@ -1036,7 +1112,7 @@ export default function FranchiseManager() {
                       />
                     </div>
                     <div>
-                      <label className="text-xs text-slate-400 block mb-1">Franchise Code *</label>
+                      <label className="text-xs text-slate-400 block mb-1">Franchise Code (optional; unique code will be generated)</label>
                       <input
                         type="text"
                         value={wizCode}
@@ -1049,9 +1125,11 @@ export default function FranchiseManager() {
                       <label className="text-xs text-slate-400 block mb-1">City *</label>
                       <input
                         type="text"
-                        required
                         value={wizCity}
-                        onChange={(e) => setWizCity(e.target.value)}
+                        onChange={(e) => {
+                          setWizCity(e.target.value);
+                          setWizLocationConfirmed(false);
+                        }}
                         placeholder="e.g. Raipur"
                         className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500"
                       />
@@ -1061,7 +1139,10 @@ export default function FranchiseManager() {
                       <input
                         type="text"
                         value={wizState}
-                        onChange={(e) => setWizState(e.target.value)}
+                        onChange={(e) => {
+                          setWizState(e.target.value);
+                          setWizLocationConfirmed(false);
+                        }}
                         className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500"
                       />
                     </div>
@@ -1073,11 +1154,11 @@ export default function FranchiseManager() {
                 <div className="space-y-4">
                   <h3 className="text-sm font-bold text-white">Step 2: Franchise Owner Account Assignment</h3>
                   <p className="text-xs text-slate-400">
-                    The Franchise Owner account receives restricted access to the Franchise Suite for this franchise only.
+                    Assign an existing Firebase sign-in account. New identities are not fabricated from an email address. Leave blank to create the franchise first and assign access later.
                   </p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
-                      <label className="text-xs text-slate-400 block mb-1">Franchise Owner Email *</label>
+                      <label className="text-xs text-slate-400 block mb-1">Franchise Owner Email (optional)</label>
                       <input
                         type="email"
                         value={wizFranchiseOwnerEmail}
@@ -1096,6 +1177,18 @@ export default function FranchiseManager() {
                         className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500"
                       />
                     </div>
+                    <label className="sm:col-span-2 flex items-start gap-3 p-3 rounded-xl bg-slate-950 border border-slate-800 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={wizOwnerGrantPos}
+                        onChange={(e) => setWizOwnerGrantPos(e.target.checked)}
+                        className="mt-0.5 accent-orange-500"
+                      />
+                      <span>
+                        <span className="block text-xs font-bold text-white">Also authorize this account for POS</span>
+                        <span className="block text-[11px] text-slate-400 mt-1">The account remains limited to this franchise and its assigned branch.</span>
+                      </span>
+                    </label>
                   </div>
                 </div>
               )}
@@ -1145,11 +1238,58 @@ export default function FranchiseManager() {
                       <label className="text-xs text-slate-400 block mb-1">Delivery Radius (km)</label>
                       <input
                         type="number"
+                        min="1"
+                        max="50"
                         value={wizMaxRadius}
                         onChange={(e) => setWizMaxRadius(Number(e.target.value))}
                         className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500"
                       />
                     </div>
+                    <div>
+                      <label className="text-xs text-slate-400 block mb-1">Base Delivery Fee (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={wizDeliveryFee}
+                        onChange={(e) => setWizDeliveryFee(Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-400 block mb-1">Free Delivery Above (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={wizFreeDeliveryThreshold}
+                        onChange={(e) => setWizFreeDeliveryThreshold(Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="text-xs text-slate-400 block mb-1">Minimum Order Amount (₹)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={wizMinOrderAmount}
+                        onChange={(e) => setWizMinOrderAmount(Number(e.target.value))}
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500"
+                      />
+                    </div>
+                    <label className="sm:col-span-2 flex items-start gap-3 p-3 rounded-xl bg-slate-950 border border-slate-800 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={wizAcceptingOrders}
+                        onChange={(e) => setWizAcceptingOrders(e.target.checked)}
+                        className="mt-0.5 accent-orange-500"
+                      />
+                      <span>
+                        <span className="block text-xs font-bold text-white">Accept customer orders immediately</span>
+                        <span className="block text-[11px] text-slate-400 mt-1">Leave off until menu, payments, staff access, and delivery coverage have been checked.</span>
+                      </span>
+                    </label>
                   </div>
                 </div>
               )}
@@ -1162,7 +1302,7 @@ export default function FranchiseManager() {
                   </p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
-                      <label className="text-xs text-slate-400 block mb-1">Manager Email *</label>
+                      <label className="text-xs text-slate-400 block mb-1">Manager Email (optional)</label>
                       <input
                         type="email"
                         value={wizRestaurantManagerEmail}
@@ -1181,6 +1321,18 @@ export default function FranchiseManager() {
                         className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-orange-500"
                       />
                     </div>
+                    <label className="sm:col-span-2 flex items-start gap-3 p-3 rounded-xl bg-slate-950 border border-slate-800 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={wizManagerGrantPos}
+                        onChange={(e) => setWizManagerGrantPos(e.target.checked)}
+                        className="mt-0.5 accent-orange-500"
+                      />
+                      <span>
+                        <span className="block text-xs font-bold text-white">Also authorize this account for POS</span>
+                        <span className="block text-[11px] text-slate-400 mt-1">POS access is optional and scoped to this franchise branch.</span>
+                      </span>
+                    </label>
                   </div>
                 </div>
               )}
@@ -1199,8 +1351,11 @@ export default function FranchiseManager() {
                     <input
                       type="text"
                       value={wizAddress}
-                      onChange={(e) => setWizAddress(e.target.value)}
-                      placeholder="e.g. Dongargaon Rd, near Saraswati school, Rajnandgaon, CG 491441"
+                      onChange={(e) => {
+                        setWizAddress(e.target.value);
+                        setWizLocationConfirmed(false);
+                      }}
+                      placeholder="e.g. street, landmark, city, postal code"
                       className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white focus:outline-none focus:border-amber-500"
                     />
                   </div>
@@ -1212,11 +1367,17 @@ export default function FranchiseManager() {
                     onChange={(newLat, newLng, newAddr) => {
                       setWizLat(newLat.toFixed(7));
                       setWizLng(newLng.toFixed(7));
-                      if (newAddr && (!wizAddress || wizAddress.length < 5)) {
+                      setWizLocationConfirmed(true);
+                      if (newAddr) {
                         setWizAddress(newAddr);
                       }
                     }}
                   />
+                  <p className={`text-xs font-semibold ${wizLocationConfirmed ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {wizLocationConfirmed
+                      ? `Location selected: ${Number(wizLat).toFixed(6)}, ${Number(wizLng).toFixed(6)}`
+                      : 'Location not confirmed. Search for an address or click/drag the map pin to set the actual branch location.'}
+                  </p>
                 </div>
               )}
 
@@ -1283,9 +1444,21 @@ export default function FranchiseManager() {
                       <span className="text-slate-400">POS Terminals:</span>
                       <span className="text-white">{wizPosCount} Counters</span>
                     </div>
+                    <div className="flex justify-between py-1 border-b border-slate-800/80">
+                      <span className="text-slate-400">Delivery:</span>
+                      <span className="text-white">₹{wizDeliveryFee} fee · Free above ₹{wizFreeDeliveryThreshold} · Radius {wizMaxRadius} km</span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-slate-800/80">
+                      <span className="text-slate-400">Minimum Order:</span>
+                      <span className="text-white">₹{wizMinOrderAmount}</span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-slate-800/80">
+                      <span className="text-slate-400">Customer Orders:</span>
+                      <span className={wizAcceptingOrders ? 'text-emerald-400' : 'text-amber-400'}>{wizAcceptingOrders ? 'Enabled at creation' : 'Disabled until reviewed'}</span>
+                    </div>
                     <div className="flex justify-between py-1">
-                      <span className="text-slate-400">GPS Coordinates:</span>
-                      <span className="text-white font-mono">{wizLat}, {wizLng}</span>
+                      <span className="text-slate-400">Confirmed Location:</span>
+                      <span className="text-white font-mono">{Number(wizLat).toFixed(6)}, {Number(wizLng).toFixed(6)}</span>
                     </div>
                   </div>
                 </div>
@@ -1306,7 +1479,9 @@ export default function FranchiseManager() {
                 {wizardStep < 7 ? (
                   <button
                     type="button"
-                    onClick={() => setWizardStep(wizardStep + 1)}
+                    onClick={() => {
+                      if (validateProvisionStep(wizardStep)) setWizardStep(wizardStep + 1);
+                    }}
                     className="px-5 py-2 rounded-xl bg-orange-500 hover:bg-orange-600 text-white font-bold text-xs shadow-lg shadow-orange-500/20 transition-all flex items-center gap-1.5"
                   >
                     <span>Next Step</span>
@@ -1899,6 +2074,81 @@ export default function FranchiseManager() {
                 className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs"
               >
                 Close Inspector
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── ONE-TIME POS ACTIVATION CODES ─── */}
+      {showPosActivationCodes && provisionedActivationCodes.length > 0 && (
+        <div className="fixed inset-0 z-[70] bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="w-full max-w-xl bg-slate-900 border border-amber-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start gap-3">
+              <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                <Monitor className="w-6 h-6" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-lg font-black text-white">POS terminal activation codes</h3>
+                <p className="text-xs text-slate-400 mt-1">Copy these codes now and deliver them securely to the franchise. Each code is single-use and expires 24 hours after creation.</p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/20 text-xs text-amber-200">
+              These codes are shown only in this creation result. The terminal list intentionally hides activation codes.
+            </div>
+
+            <div className="space-y-2">
+              {provisionedActivationCodes.map((terminal) => (
+                <div key={terminal.terminalId} className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 rounded-xl bg-slate-950 border border-slate-800">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-bold text-white">{terminal.terminalName}</p>
+                    <p className="text-[10px] text-slate-500 font-mono break-all">{terminal.terminalId}</p>
+                    <p className="text-2xl font-black tracking-[0.25em] text-amber-400 font-mono mt-1">{terminal.activationCode}</p>
+                    <p className="text-[10px] text-slate-500">Expires {new Date(terminal.expiresAt).toLocaleString()}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(terminal.activationCode);
+                        toast.success(`Copied activation code for ${terminal.terminalName}`);
+                      } catch {
+                        toast.error('Clipboard unavailable here. Select and copy the code manually.');
+                      }
+                    }}
+                    className="shrink-0 flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold"
+                  >
+                    <Copy className="w-3.5 h-3.5" /> Copy code
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex flex-col sm:flex-row justify-between gap-2 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(provisionedActivationCodes.map(item => `${item.terminalName}: ${item.activationCode} (expires ${new Date(item.expiresAt).toLocaleString()})`).join('\n'));
+                    toast.success('All terminal codes copied');
+                  } catch {
+                    toast.error('Clipboard unavailable here. Copy the codes individually.');
+                  }
+                }}
+                className="flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold"
+              >
+                <Copy className="w-3.5 h-3.5" /> Copy all codes
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPosActivationCodes(false);
+                  setProvisionedActivationCodes([]);
+                }}
+                className="px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black"
+              >
+                Done — codes copied/saved
               </button>
             </div>
           </div>

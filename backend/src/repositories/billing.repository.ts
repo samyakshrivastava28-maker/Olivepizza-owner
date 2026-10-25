@@ -323,8 +323,8 @@ export class PostgresBillingRepository implements IBillingRepository {
   }
 
   async saveBill(record: PermanentBillRecord): Promise<void> {
-    // 1. Authoritative PostgreSQL write
-    await query(`
+    // 1. Authoritative PostgreSQL write with conflict diagnostic
+    const res = await query(`
       INSERT INTO canonical_bills (
         id, permanent_bill_no, order_id, bill_date,
         subtotal, discount, tax, net_amount,
@@ -335,9 +335,19 @@ export class PostgresBillingRepository implements IBillingRepository {
         $9, $10, $11::timestamptz
       )
       ON CONFLICT (permanent_bill_no) DO UPDATE SET
-        payment_method = EXCLUDED.payment_method,
-        payment_status = EXCLUDED.payment_status,
-        net_amount = EXCLUDED.net_amount;
+        payment_method = CASE
+          WHEN canonical_bills.payment_status IN ('PAID', 'REFUNDED') THEN canonical_bills.payment_method
+          ELSE EXCLUDED.payment_method
+        END,
+        payment_status = CASE
+          WHEN canonical_bills.payment_status = 'PAID' AND EXCLUDED.payment_status IN ('PENDING', 'FAILED') THEN canonical_bills.payment_status
+          WHEN canonical_bills.payment_status = 'REFUNDED' THEN canonical_bills.payment_status
+          ELSE EXCLUDED.payment_status
+        END
+      WHERE canonical_bills.order_id = EXCLUDED.order_id
+        AND canonical_bills.is_cancelled = FALSE
+        AND canonical_bills.net_amount = EXCLUDED.net_amount
+      RETURNING canonical_bills.id, canonical_bills.order_id, canonical_bills.payment_status;
     `, [
       `bill_${record.permanentBillNumber}`,
       record.permanentBillNumber,
@@ -350,13 +360,31 @@ export class PostgresBillingRepository implements IBillingRepository {
       record.paymentMethod,
       record.paymentStatus,
       record.createdAt
-    ]).catch((err) => {
-      console.warn('[PostgresBillingRepository] Postgres saveBill notice:', err.message);
-    });
+    ]);
+
+    if (res.rowCount === 0) {
+      // Diagnosing why the row was not inserted or updated:
+      const check = await query(
+        `SELECT order_id, net_amount, is_cancelled, payment_status FROM canonical_bills WHERE permanent_bill_no = $1`,
+        [record.permanentBillNumber]
+      );
+      if (check.rows.length > 0) {
+        const existing = check.rows[0];
+        if (existing.order_id !== record.orderId) {
+          throw new Error(`Conflict: Permanent bill number ${record.permanentBillNumber} is permanently assigned to order '${existing.order_id}'. Cannot be reused for order '${record.orderId}'.`);
+        }
+        if (existing.is_cancelled) {
+          throw new Error(`Conflict: Permanent bill number ${record.permanentBillNumber} belongs to a cancelled bill and cannot be mutated.`);
+        }
+        if (Number(existing.net_amount) !== Number(record.totalAmount)) {
+          throw new Error(`Conflict: Finalized bill ${record.permanentBillNumber} financial snapshot is immutable (existing net_amount=${existing.net_amount}, requested=${record.totalAmount}).`);
+        }
+      }
+    }
 
     // 2. Non-blocking Firestore projection mirror
     const billDocRef = adminDb.collection('bills').doc(`bill_${record.permanentBillNumber}`);
-    await billDocRef.set({
+    billDocRef.set({
       ...record,
       updatedAt: new Date().toISOString()
     }).catch(() => {});

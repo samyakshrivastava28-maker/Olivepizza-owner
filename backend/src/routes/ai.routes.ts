@@ -423,7 +423,7 @@ router.post('/session-clear', optionalAuth, async (req: AuthRequest, res) => {
 import { DeepSeekV4FlashGenerator } from '../services/ai/DeepSeekV4FlashGenerator.js';
 
 // ─── Email Generation (DeepSeek V4 Flash) ──────────────────────────────────────
-router.post('/generate-email', async (req, res) => {
+router.post('/generate-email', requireAuth, requireRole(['owner', 'admin', 'developer', 'restaurant_manager', 'franchise_owner']), async (req: AuthRequest, res) => {
   try {
     const { prompt, selectedProducts, audienceType } = req.body;
     if (!prompt) return res.status(400).json({ success: false, error: 'Prompt is required' });
@@ -438,7 +438,7 @@ router.post('/generate-email', async (req, res) => {
   }
 });
 
-router.post('/generate-image', async (req, res) => {
+router.post('/generate-image', requireAuth, requireRole(['owner', 'admin', 'developer', 'restaurant_manager', 'franchise_owner']), async (req: AuthRequest, res) => {
   try {
     const { prompt, context, modelName, baseImageUrl } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
@@ -453,7 +453,7 @@ router.post('/generate-image', async (req, res) => {
 });
 
 // ─── Product & Combo Description Generator (DeepSeek V4 Flash) ──────────────────
-router.post('/product-description', async (req, res) => {
+router.post('/product-description', requireAuth, requireRole(['owner', 'admin', 'developer', 'restaurant_manager', 'franchise_owner']), async (req: AuthRequest, res) => {
   try {
     const { name, productName, category, type, items, messages } = req.body;
     const itemName = name || productName || (Array.isArray(messages) ? messages.map((m: any) => m.content).join(' ') : 'Special Food Item');
@@ -469,7 +469,7 @@ router.post('/product-description', async (req, res) => {
   }
 });
 
-router.post('/generate-description', async (req, res) => {
+router.post('/generate-description', requireAuth, requireRole(['owner', 'admin', 'developer', 'restaurant_manager', 'franchise_owner']), async (req: AuthRequest, res) => {
   try {
     const { name, productName, category, type, items } = req.body;
     const itemName = name || productName || 'Special Food Item';
@@ -486,7 +486,7 @@ router.post('/generate-description', async (req, res) => {
 });
 
 // ─── Interactive Assistant Chatbox (DeepSeek V4 Flash) ──────────────────────────
-router.post('/interactive-assistant', async (req, res) => {
+router.post('/interactive-assistant', requireAuth, requireRole(['owner', 'admin', 'developer', 'restaurant_manager', 'franchise_owner']), async (req: AuthRequest, res) => {
   try {
     const { mode, message, history, contextData } = req.body;
     if (!message) return res.status(400).json({ success: false, error: 'Message is required' });

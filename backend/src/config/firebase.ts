@@ -56,6 +56,11 @@ try {
   console.error('[Firebase Admin] Could not get Firestore/Auth/Messaging instance:', e);
 }
 
+export const isFirebaseAdminAuthenticated = Boolean(
+  process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 ||
+  (FIREBASE_CLIENT_EMAIL && FIREBASE_PRIVATE_KEY)
+);
+
 // Export with fallback to avoid null crashes downstream
 export const adminDb = adminDbInstance!;
 export const adminAuth = adminAuthInstance!;

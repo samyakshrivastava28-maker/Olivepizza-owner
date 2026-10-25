@@ -1272,13 +1272,30 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
         updatedAt: new Date(),
       };
 
+      // STEP 3: Persist to canonical PostgreSQL relational ledger first (Authoritative ACID Transaction)
+      // Durable projection obligation: Written as PROJECTION_PENDING so that any crash before/during Firestore write is captured
+      (orderFirestoreDoc as any).live_lifecycle = 'PROJECTION_PENDING';
+      try {
+        await OrderPersistenceArchiveService.syncLiveOrderToPostgres(newOrderId, orderFirestoreDoc);
+        trace.steps.push({ step: 'Canonical PostgreSQL Persistence', status: 'success', orderId: newOrderId, dailyOrderNumber, permanentBillNo });
+      } catch (syncErr: any) {
+        console.error(`[Orders] Canonical PostgreSQL sync failed for order ${newOrderId}:`, syncErr.message);
+        trace.steps.push({ step: 'Canonical PostgreSQL Persistence', status: 'error', error: syncErr.message });
+        res.status(500).json({ error: 'Failed to persist order to canonical ledger. Transaction aborted.' });
+        return;
+      }
+
+      // STEP 4: Project order document to Firestore for live operational consumers
       try {
         await adminDb.collection('orders').doc(newOrderId).set(orderFirestoreDoc);
+
+        // Mark projection resolved in PostgreSQL canonical store
+        await query("UPDATE canonical_orders SET live_lifecycle = 'ACTIVE' WHERE id = $1 AND live_lifecycle = 'PROJECTION_PENDING'", [newOrderId]).catch(() => {});
 
         // Mark order as already processed in FirestoreListener to prevent duplicate new-order alert
         FirestoreListener.markOrderProcessed(newOrderId);
 
-        trace.steps.push({ step: 'Firestore Write', status: 'success', orderId: newOrderId, dailyOrderNumber, permanentBillNo, billReference });
+        trace.steps.push({ step: 'Firestore Projection', status: 'success', orderId: newOrderId, dailyOrderNumber, permanentBillNo, billReference });
 
         // Reset user's active cart upon successful order placement (prevents abandoned cart reminder)
         adminDb.collection('user_carts').doc(userId).set({
@@ -1316,20 +1333,14 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
           createdAt: new Date()
         }).catch(e => console.warn('[OnlineOrderSheetSync] Notice:', e.message));
       } catch (err: any) {
-        console.warn('[Orders] Firestore write failed:', err);
-        trace.steps.push({ step: 'Firestore Write', status: 'error', error: err.message });
-        res.status(500).json({ error: 'Failed to save order' });
-        return;
+        console.warn(`[Orders] Firestore operational projection degraded for order ${newOrderId}:`, err.message);
+        trace.steps.push({ step: 'Firestore Projection', status: 'degraded', error: err.message });
+        // Order is committed in PostgreSQL; flag projection for background reconciliation
+        await query(
+          `UPDATE canonical_orders SET live_lifecycle = 'PROJECTION_PENDING' WHERE id = $1`,
+          [newOrderId]
+        ).catch(() => {});
       }
-
-      // STEP 4: Asynchronously sync order to PostgreSQL without blocking customer or failing live order
-      setImmediate(async () => {
-        try {
-          await OrderPersistenceArchiveService.syncLiveOrderToPostgres(newOrderId, orderFirestoreDoc);
-        } catch (syncErr: any) {
-          console.error(`[Orders] Background PostgreSQL sync failed for order ${newOrderId}:`, syncErr.message);
-        }
-      });
 
     trace.processingTime = Date.now() - startTime;
     res.status(201).json({ 

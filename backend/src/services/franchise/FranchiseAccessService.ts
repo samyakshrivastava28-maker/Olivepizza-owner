@@ -452,7 +452,8 @@ export class FranchiseAccessService {
       emailLower === 'samyakshrivastava28@gmail.com' ||
       emailLower === 'samyaks695@gmail.com';
 
-    if (isMasterOwner) {
+    // 0. Master Owner Instant Authorization: strictly for OWNER command center
+    if (targetApp === 'OWNER' && isMasterOwner) {
       const defaultBranch = requestedBranchId || 'main_branch';
       const defaultFranchise = 'fra_rajnandgaon';
       return {
@@ -472,12 +473,12 @@ export class FranchiseAccessService {
           franchiseId: defaultFranchise,
           terminalId: terminalId || 'Counter 1',
           permissions: ['*'],
-          allowedApps: ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'],
+          allowedApps: ['OWNER'],
           applicationAccess: {
-            app_restaurant_management: true,
-            app_delivery: true,
-            app_pos: true,
-            app_franchise_management: true,
+            app_restaurant_management: false,
+            app_delivery: false,
+            app_pos: false,
+            app_franchise_management: false,
             app_owner: true
           }
         }
@@ -511,14 +512,46 @@ export class FranchiseAccessService {
       const userRole = (pgUserData.role || '').toLowerCase();
       let allowedApps: string[] = Array.isArray(pgUserData.allowed_apps) ? pgUserData.allowed_apps : [];
       const isOwner = userRole === 'owner' || userRole === 'platform_owner' || userRole === 'admin';
-      if (isOwner) {
-        allowedApps = ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'];
+
+      if (targetApp === 'OWNER') {
+        if (isOwner) {
+          return {
+            authorized: true,
+            requiresPin: false,
+            isProfileComplete: true,
+            user: {
+              uid: pgUserData.id || uid,
+              email: pgUserData.email || emailLower,
+              name: pgUserData.name || 'Olive Pizza Owner',
+              role: 'owner',
+              phone: pgUserData.phone || '+919179944445',
+              phoneNumber: pgUserData.phone || '+919179944445',
+              branchId: pgUserData.branch_id || 'main_branch',
+              branchName: 'Olive Pizza — Rajnandgaon HQ',
+              branchIds: ['all'],
+              franchiseId: pgUserData.franchise_id || 'fra_rajnandgaon',
+              terminalId: terminalId || 'Counter 1',
+              permissions: ['*'],
+              allowedApps: ['OWNER'],
+              applicationAccess: {
+                app_restaurant_management: false,
+                app_delivery: false,
+                app_pos: false,
+                app_franchise_management: false,
+                app_owner: true
+              }
+            }
+          };
+        }
       }
-      const isPosStaff = ['owner', 'platform_owner', 'admin', 'restaurant_manager', 'manager', 'store_manager', 'pos_operator', 'cashier', 'counter_staff', 'staff', 'franchise_manager', 'franchise_owner'].includes(userRole);
-      const isManagerStaff = ['owner', 'platform_owner', 'admin', 'restaurant_manager', 'manager', 'store_manager', 'franchise_manager'].includes(userRole);
-      const isFranchiseStaff = ['owner', 'platform_owner', 'admin', 'franchise_manager', 'franchise_owner'].includes(userRole);
-      const isDeliveryStaff = ['delivery_partner', 'delivery', 'rider', 'owner', 'platform_owner'].includes(userRole);
-      const hasAppAccess = isOwner || 
+
+      // Staff apps: platform owner role must NOT automatically imply staff-app access.
+      // Must hold explicit allowed_apps grant or specific staff operational role.
+      const isPosStaff = ['restaurant_manager', 'manager', 'store_manager', 'pos_operator', 'cashier', 'counter_staff', 'staff'].includes(userRole);
+      const isManagerStaff = ['restaurant_manager', 'manager', 'store_manager'].includes(userRole);
+      const isFranchiseStaff = ['franchise_manager', 'franchise_owner'].includes(userRole);
+      const isDeliveryStaff = ['delivery_partner', 'delivery', 'rider'].includes(userRole);
+      const hasAppAccess =
         allowedApps.some(a => (a || '').toString().trim().toUpperCase() === targetApp.toUpperCase()) ||
         (targetApp === 'POS' && isPosStaff) ||
         (targetApp === 'RESTAURANT_MANAGER' && isManagerStaff) ||
@@ -659,7 +692,7 @@ export class FranchiseAccessService {
     const fastFirestore = async <T>(promise: Promise<T>, fallback: T): Promise<T> => {
       return Promise.race([
         promise,
-        new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 3000))
+        new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 800))
       ]).catch(() => fallback);
     };
 
@@ -709,52 +742,43 @@ export class FranchiseAccessService {
       )
     );
 
-    if (isOwnerByProfile) {
-      let resolvedBranch = requestedBranchId || userData?.branchId || 'main_branch';
-      let resolvedFranchise = userData?.franchiseId || 'fra_rajnandgaon';
-      if (resolvedFranchise === 'fra_primary' || !resolvedFranchise) resolvedFranchise = 'fra_rajnandgaon';
-      if (resolvedBranch === 'fra_primary' || !resolvedBranch) resolvedBranch = 'main_branch';
-
-      const roleMap: Record<string, string> = {
-        OWNER: 'owner',
-        RESTAURANT_MANAGER: 'restaurant_manager',
-        DELIVERY: 'delivery_partner',
-        POS: 'pos_operator',
-        FRANCHISE_MANAGER: 'franchise_manager',
-        CUSTOMER: 'customer'
-      };
-
-      return {
-        authorized: true,
-        requiresPin: false,
-        isProfileComplete: true,
-        user: {
-          uid: userData.uid || uid,
-          email: emailLower || userData.email || '',
-          name: userData.name || userData.displayName || 'Olive Pizza Owner',
-          role: roleMap[targetApp] || 'owner',
-          phone: userData.phone || userData.phoneNumber || '+919179944445',
-          phoneNumber: userData.phone || userData.phoneNumber || '+919179944445',
-          branchId: resolvedBranch,
-          branchName: 'Olive Pizza — Rajnandgaon HQ',
-          branchIds: ['all', resolvedBranch],
-          franchiseId: resolvedFranchise,
-          terminalId: userData.terminalId || terminalId || 'Counter 1',
-          permissions: ['*'],
-          allowedApps: ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'],
-          applicationAccess: {
-            app_restaurant_management: true,
-            app_delivery: true,
-            app_pos: true,
-            app_franchise_management: true,
-            app_owner: true
-          }
-        }
-      };
-    }
-
-    // Owner app check: Non-owners cannot access Owner command center
     if (targetApp === 'OWNER') {
+      if (isOwnerByProfile) {
+        let resolvedBranch = requestedBranchId || userData?.branchId || 'main_branch';
+        let resolvedFranchise = userData?.franchiseId || 'fra_rajnandgaon';
+        if (resolvedFranchise === 'fra_primary' || !resolvedFranchise) resolvedFranchise = 'fra_rajnandgaon';
+        if (resolvedBranch === 'fra_primary' || !resolvedBranch) resolvedBranch = 'main_branch';
+
+        return {
+          authorized: true,
+          requiresPin: false,
+          isProfileComplete: true,
+          user: {
+            uid: userData.uid || uid,
+            email: emailLower || userData.email || '',
+            name: userData.name || userData.displayName || 'Olive Pizza Owner',
+            role: 'owner',
+            phone: userData.phone || userData.phoneNumber || '+919179944445',
+            phoneNumber: userData.phone || userData.phoneNumber || '+919179944445',
+            branchId: resolvedBranch,
+            branchName: 'Olive Pizza — Rajnandgaon HQ',
+            branchIds: ['all', resolvedBranch],
+            franchiseId: resolvedFranchise,
+            terminalId: userData.terminalId || terminalId || 'Counter 1',
+            permissions: ['*'],
+            allowedApps: ['OWNER'],
+            applicationAccess: {
+              app_restaurant_management: false,
+              app_delivery: false,
+              app_pos: false,
+              app_franchise_management: false,
+              app_owner: true
+            }
+          }
+        };
+      }
+
+      // Owner app check: Non-owners cannot access Owner command center
       return {
         authorized: false,
         code: 'ACCESS_DENIED',
@@ -833,8 +857,8 @@ export class FranchiseAccessService {
     // Only verify real franchise IDs (starting with fra_ or matched as franchiseId), avoiding branch IDs like 'main_branch'
     const franchiseCheckIds = Array.from(new Set([resolvedFranchiseId].filter(Boolean)));
     for (const checkId of franchiseCheckIds) {
-      const fCheckDoc = await adminDb.collection('franchises').doc(checkId).get().catch(() => null);
-      const feCheckDoc = await adminDb.collection('franchise_entities').doc(checkId).get().catch(() => null);
+      const fCheckDoc = await fastFirestore(adminDb.collection('franchises').doc(checkId).get(), null);
+      const feCheckDoc = await fastFirestore(adminDb.collection('franchise_entities').doc(checkId).get(), null);
       const fData = fCheckDoc?.exists ? fCheckDoc.data() : (feCheckDoc?.exists ? feCheckDoc.data() : null);
 
       if (fData) {
@@ -884,10 +908,10 @@ export class FranchiseAccessService {
       }
 
       // Check restaurant_managers collection
-      const rmDoc = await adminDb.collection('restaurant_managers').doc(uid).get().catch(() => null);
+      const rmDoc = await fastFirestore(adminDb.collection('restaurant_managers').doc(uid).get(), null);
       let rmData = rmDoc?.exists ? rmDoc.data() : null;
       if (!rmData && emailLower) {
-        const rmSnap = await adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+        const rmSnap = await fastFirestore(adminDb.collection('restaurant_managers').where('email', '==', emailLower).limit(1).get(), { empty: true, docs: [] } as any);
         if (!rmSnap.empty) {
           rmData = rmSnap.docs[0].data();
         }
@@ -895,12 +919,12 @@ export class FranchiseAccessService {
       if (!rmData && (phoneWithPlus91 || phone10Digit)) {
         const phoneVariants = [phoneWithPlus91, phone10Digit].filter(Boolean);
         for (const p of phoneVariants) {
-          const rmSnap = await adminDb.collection('restaurant_managers').where('phone', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          const rmSnap = await fastFirestore(adminDb.collection('restaurant_managers').where('phone', '==', p).limit(1).get(), { empty: true, docs: [] } as any);
           if (!rmSnap.empty) {
             rmData = rmSnap.docs[0].data();
             break;
           }
-          const rmSnap2 = await adminDb.collection('restaurant_managers').where('phoneNumber', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          const rmSnap2 = await fastFirestore(adminDb.collection('restaurant_managers').where('phoneNumber', '==', p).limit(1).get(), { empty: true, docs: [] } as any);
           if (!rmSnap2.empty) {
             rmData = rmSnap2.docs[0].data();
             break;
@@ -924,6 +948,13 @@ export class FranchiseAccessService {
       }
 
       if (!isApproved) {
+        if (isMasterOwner || isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
+          return {
+            authorized: false,
+            code: 'STAFF_GRANT_REQUIRED',
+            reason: 'Platform owner account requires an explicit staff assignment and branch scope to access Restaurant Management.'
+          };
+        }
         return {
           authorized: false,
           code: 'NOT_REGISTERED',
@@ -973,7 +1004,7 @@ export class FranchiseAccessService {
       // Check users doc role & status
       const userRole = (userData?.role || '').toLowerCase();
       const userStatus = (userData?.status || '').toUpperCase();
-      const posAllowedRoles = ['pos_operator', 'cashier', 'pos', 'manager', 'restaurant_manager', 'franchise_owner', 'store_manager', 'counter_staff', 'staff', 'admin', 'owner'];
+      const posAllowedRoles = ['pos_operator', 'cashier', 'pos', 'manager', 'restaurant_manager', 'franchise_owner', 'store_manager', 'counter_staff', 'staff'];
       if (posAllowedRoles.includes(userRole) && 
           (userStatus === 'APPROVED' || userStatus === 'ACTIVE' || userData?.isActive === true || !userData?.status)) {
         isApproved = true;
@@ -1054,10 +1085,17 @@ export class FranchiseAccessService {
       }
 
       if (!isApproved) {
+        if (isMasterOwner || isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
+          return {
+            authorized: false,
+            code: 'STAFF_GRANT_REQUIRED',
+            reason: 'Platform owner account requires an explicit staff assignment and branch scope to access the POS terminal.'
+          };
+        }
         return {
           authorized: false,
           code: 'NOT_AUTHORIZED_FOR_POS',
-          reason: 'Access denied. Only the Franchise Manager and authorized POS accounts are permitted to access POS.'
+          reason: 'Access denied. Only authorized POS operators and branch staff are permitted to access POS.'
         };
       }
 
@@ -1120,10 +1158,10 @@ export class FranchiseAccessService {
         isApproved = true;
       }
 
-      const fuDoc = await adminDb.collection('franchise_users').doc(uid).get().catch(() => null);
+      const fuDoc = await fastFirestore(adminDb.collection('franchise_users').doc(uid).get(), null);
       let fuData = fuDoc?.exists ? fuDoc.data() : null;
       if (!fuData && emailLower) {
-        const fuSnap = await adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+        const fuSnap = await fastFirestore(adminDb.collection('franchise_users').where('email', '==', emailLower).limit(1).get(), { empty: true, docs: [] } as any);
         if (!fuSnap.empty) {
           fuData = fuSnap.docs[0].data();
         }
@@ -1142,6 +1180,13 @@ export class FranchiseAccessService {
       }
 
       if (!isApproved) {
+        if (isMasterOwner || isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
+          return {
+            authorized: false,
+            code: 'STAFF_GRANT_REQUIRED',
+            reason: 'Platform owner account requires an explicit franchise assignment and branch scope to access Franchise Management.'
+          };
+        }
         return {
           authorized: false,
           code: 'NOT_REGISTERED',
@@ -1199,10 +1244,10 @@ export class FranchiseAccessService {
         isApproved = true;
       }
 
-      const dpDoc = await adminDb.collection('delivery_partners').doc(uid).get().catch(() => null);
+      const dpDoc = await fastFirestore(adminDb.collection('delivery_partners').doc(uid).get(), null);
       let dpData = dpDoc?.exists ? dpDoc.data() : null;
       if (!dpData && emailLower) {
-        const dpSnap = await adminDb.collection('delivery_partners').where('email', '==', emailLower).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+        const dpSnap = await fastFirestore(adminDb.collection('delivery_partners').where('email', '==', emailLower).limit(1).get(), { empty: true, docs: [] } as any);
         if (!dpSnap.empty) {
           dpData = dpSnap.docs[0].data();
         }
@@ -1210,12 +1255,12 @@ export class FranchiseAccessService {
       if (!dpData && (phoneWithPlus91 || phone10Digit)) {
         const phoneVariants = [phoneWithPlus91, phone10Digit].filter(Boolean);
         for (const p of phoneVariants) {
-          const dpSnap = await adminDb.collection('delivery_partners').where('phone', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          const dpSnap = await fastFirestore(adminDb.collection('delivery_partners').where('phone', '==', p).limit(1).get(), { empty: true, docs: [] } as any);
           if (!dpSnap.empty) {
             dpData = dpSnap.docs[0].data();
             break;
           }
-          const dpSnap2 = await adminDb.collection('delivery_partners').where('phoneNumber', '==', p).limit(1).get().catch(() => ({ empty: true, docs: [] } as any));
+          const dpSnap2 = await fastFirestore(adminDb.collection('delivery_partners').where('phoneNumber', '==', p).limit(1).get(), { empty: true, docs: [] } as any);
           if (!dpSnap2.empty) {
             dpData = dpSnap2.docs[0].data();
             break;
@@ -1244,6 +1289,13 @@ export class FranchiseAccessService {
       }
 
       if (!isApproved) {
+        if (isMasterOwner || isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
+          return {
+            authorized: false,
+            code: 'STAFF_GRANT_REQUIRED',
+            reason: 'Platform owner account requires an explicit delivery partner record to access the Delivery application.'
+          };
+        }
         return {
           authorized: false,
           code: 'NOT_REGISTERED',

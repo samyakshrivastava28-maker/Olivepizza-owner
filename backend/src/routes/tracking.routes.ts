@@ -174,10 +174,22 @@ router.post('/location/update', verifyToken, requireRole(['delivery', 'delivery_
 });
 
 
-// Returns current location of a partner
-router.get('/location/:partnerId', async (req: Request, res: Response) => {
+// Returns current location of a partner (Authorized for that partner, managers, or owners)
+router.get('/location/:partnerId', verifyToken, async (req: AuthRequest, res: Response) => {
   try {
     const { partnerId } = req.params;
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const isSelf = user.uid === partnerId;
+    const isStaffOrOwner = ['owner', 'admin', 'developer', 'restaurant_manager', 'manager', 'franchise_owner', 'platform_owner'].includes(user.role || '');
+
+    if (!isSelf && !isStaffOrOwner) {
+      return res.status(403).json({ error: 'Forbidden: You do not have permission to view this partner location' });
+    }
+
     const loc = await SupabaseGpsService.getLatestLocation(partnerId);
     if (!loc) {
       return res.status(404).json({ error: 'Partner location not found' });
@@ -446,8 +458,8 @@ router.post('/boundary-check', async (req: Request, res: Response) => {
   }
 });
 
-// Get real-time driver active fleet status
-router.get('/active-drivers', async (_req: Request, res: Response) => {
+// Get real-time driver active fleet status (Staff & Owner only)
+router.get('/active-drivers', verifyToken, requireRole(['owner', 'admin', 'developer', 'restaurant_manager', 'manager', 'franchise_owner', 'platform_owner']), async (_req: AuthRequest, res: Response) => {
   try {
     const activeDrivers = webSocketServer.getActiveDriverLocations();
     res.json({ success: true, count: activeDrivers.length, data: activeDrivers });
@@ -457,7 +469,7 @@ router.get('/active-drivers', async (_req: Request, res: Response) => {
 });
 
 // Get active driver locations for owner / manager tracking (Single Source of Truth: Supabase)
-router.get('/locations/active', async (req: Request, res: Response) => {
+router.get('/locations/active', verifyToken, requireRole(['owner', 'admin', 'developer', 'restaurant_manager', 'manager', 'franchise_owner', 'platform_owner']), async (req: AuthRequest, res: Response) => {
   try {
     const activeLocations = await SupabaseGpsService.getActiveLocations();
     const locations = activeLocations.map((loc: any) => ({

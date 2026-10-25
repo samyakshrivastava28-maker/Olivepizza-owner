@@ -44,10 +44,22 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
     user.role === 'admin' ||
     user.role === 'developer';
 
-  // 1. Owner & Admin Accounts: Full operational and terminal oversight across all branches
+  // 1. Owner & Admin Accounts: Operational and terminal access requiring explicit POS grant
   if (isOwnerRole) {
-    const requestedBranchId = (req.headers['x-branch-id'] || req.query.branchId || req.body?.branchId || user.branchId || 'main_branch') as string;
-    const requestedFranchiseId = (req.headers['x-franchise-id'] || req.query.franchiseId || req.body?.franchiseId || user.franchiseId || 'fra_primary') as string;
+    const allowedApps = Array.isArray((user as any).allowedApps) ? (user as any).allowedApps : [];
+    const hasPosAppGrant = isMasterOwner || allowedApps.map((a: any) => String(a).toUpperCase()).includes('POS');
+    if (!hasPosAppGrant) {
+      res.status(403).json({ error: 'Forbidden: POS operational access requires an explicit active POS app grant.', code: 'APP_ACCESS_DENIED' });
+      return;
+    }
+
+    const requestedBranchId = (req.headers['x-branch-id'] || req.query.branchId || req.body?.branchId || user.branchId) as string;
+    const requestedFranchiseId = (req.headers['x-franchise-id'] || req.query.franchiseId || req.body?.franchiseId || user.franchiseId) as string;
+
+    if (!requestedBranchId || !requestedFranchiseId) {
+      res.status(400).json({ error: 'Bad Request: Missing branchId or franchiseId scope for POS session.', code: 'MISSING_POS_SCOPE' });
+      return;
+    }
 
     req.user.franchiseId = requestedFranchiseId;
     req.user.branchId = requestedBranchId;
@@ -1389,44 +1401,72 @@ router.post('/terminals/activate', verifyToken, requirePOSRole, async (req: Auth
     }
 
     const doc = snap.docs[0];
-    const data = doc.data();
+    let activatedData: any;
+    try {
+      // Make activation single-use under concurrency: only the transaction that still sees
+      // this exact live code may consume it and bind the terminal.
+      activatedData = await adminDb.runTransaction(async (transaction) => {
+        const latestSnap = await transaction.get(doc.ref);
+        if (!latestSnap.exists) {
+          const missing: any = new Error('POS terminal no longer exists.');
+          missing.status = 404;
+          throw missing;
+        }
+        const latest = latestSnap.data() || {};
+        if (latest.activationCode !== cleanCode) {
+          const consumed: any = new Error('This activation code has already been used or replaced. Generate a new code from the management portal.');
+          consumed.status = 409;
+          throw consumed;
+        }
 
-    if (data.status === 'REVOKED') {
-      res.status(403).json({ success: false, error: 'This POS terminal has been deactivated by franchise management' });
+        const currentStatus = String(latest.status || latest.activationStatus || '').toUpperCase();
+        if (currentStatus === 'REVOKED' || currentStatus === 'DEACTIVATED' || latest.isActive === false) {
+          const revoked: any = new Error('This POS terminal has been deactivated by franchise management.');
+          revoked.status = 403;
+          throw revoked;
+        }
+        if (currentStatus === 'ACTIVE' || currentStatus === 'ACTIVATED') {
+          const active: any = new Error('This POS terminal has already been activated.');
+          active.status = 409;
+          throw active;
+        }
+        if (latest.activationCodeExpiresAt && new Date(latest.activationCodeExpiresAt).getTime() < Date.now()) {
+          const expired: any = new Error('This activation code has expired. Generate a new code from the management portal.');
+          expired.status = 400;
+          throw expired;
+        }
+
+        const activatedAt = new Date().toISOString();
+        transaction.update(doc.ref, {
+          status: 'ACTIVE',
+          activationStatus: 'ACTIVATED',
+          isActive: true,
+          activationCode: null,
+          activationCodeExpiresAt: null,
+          activatedByUid: req.user?.uid || 'authenticated_cashier',
+          activatedByEmail: req.user?.email || '',
+          deviceFingerprint: deviceFingerprint || 'DESKTOP-WIN-POS',
+          activatedAt,
+          lastActiveAt: activatedAt
+        });
+        return { ...latest, activatedAt };
+      });
+    } catch (activationError: any) {
+      res.status(Number.isInteger(activationError?.status) ? activationError.status : 500).json({
+        success: false,
+        error: activationError?.message || 'Unable to activate this terminal.'
+      });
       return;
     }
-
-    if (data.status === 'ACTIVE') {
-      res.status(400).json({ success: false, error: 'This POS terminal has already been activated' });
-      return;
-    }
-
-    // Expiration check
-    if (data.activationCodeExpiresAt && new Date(data.activationCodeExpiresAt).getTime() < Date.now()) {
-      res.status(400).json({ success: false, error: 'This activation code has expired. Please generate a new code from management portal.' });
-      return;
-    }
-
-    // Single-use: invalidate activationCode upon successful activation
-    await doc.ref.update({
-      status: 'ACTIVE',
-      activationCode: null,
-      activationCodeExpiresAt: null,
-      activatedByUid: req.user?.uid || 'authenticated_cashier',
-      activatedByEmail: req.user?.email || '',
-      deviceFingerprint: deviceFingerprint || 'DESKTOP-WIN-POS',
-      activatedAt: new Date().toISOString(),
-      lastActiveAt: new Date().toISOString()
-    });
 
     res.json({
       success: true,
       message: 'POS Terminal activated successfully',
       terminal: {
-        terminalId: data.terminalId,
-        terminalName: data.terminalName,
-        franchiseId: data.franchiseId,
-        branchId: data.branchId,
+        terminalId: activatedData.terminalId || doc.id,
+        terminalName: activatedData.terminalName,
+        franchiseId: activatedData.franchiseId,
+        branchId: activatedData.branchId,
         status: 'ACTIVE'
       }
     });

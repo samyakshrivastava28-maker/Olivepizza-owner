@@ -20,10 +20,15 @@ import { pgPool } from '../config/postgres.js';
 import { DatabaseManagerService } from '../services/devOps/DatabaseManagerService.js';
 import { DatabaseProviderRegistry } from '../services/devOps/DatabaseProviderRegistry.js';
 import { requireDeveloper, DevRequest } from '../middleware/requireDeveloper.js';
+import { verifyToken, requireRole } from '../middleware/auth.middleware.js';
 import { DevAuditService } from '../services/devOps/DevAuditService.js';
 import { expensiveLimiter, adminLimiter } from '../config/security.config.js';
 
 const router = express.Router();
+
+// Strict Authentication & Privilege Guard for all Data Manager routes
+router.use(verifyToken);
+router.use(requireRole(['owner', 'admin', 'developer', 'platform_owner']));
 
 // ─── 1. Real-time Multi-Database Overview ────────────────────────────────────
 router.get('/overview', async (req, res) => {

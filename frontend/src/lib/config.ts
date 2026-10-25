@@ -78,7 +78,7 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
     }
     const currentUser = auth.currentUser;
     if (currentUser && !headers.has('Authorization')) {
-      const token = await currentUser.getIdToken(true);
+      const token = await currentUser.getIdToken(false);
       if (token) {
         headers.set('Authorization', `Bearer ${token}`);
       }
@@ -92,32 +92,61 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
     headers.set('X-Device-Id', ownerDeviceId);
   }
 
+  const isNativeOrProd =
+    Capacitor.isNativePlatform() ||
+    (typeof window !== 'undefined' && (
+      window.location.protocol === 'file:' ||
+      window.location.protocol === 'capacitor:' ||
+      window.location.protocol === 'ionic:' ||
+      navigator.userAgent.includes('Electron')
+    )) ||
+    import.meta.env.PROD;
+
+  const method = (init?.method || 'GET').toUpperCase();
+  const isIdempotent = ['GET', 'HEAD', 'OPTIONS'].includes(method);
+
+  const controller = new AbortController();
+  const timeoutMs = 20000; // 20s bounded timeout accommodates Render cold starts
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  // Link caller signal if provided
+  if (init?.signal) {
+    init.signal.addEventListener('abort', () => controller.abort());
+  }
+
   const config: RequestInit = {
     ...init,
     headers,
+    signal: controller.signal,
   };
 
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch(primaryUrl, { ...config, signal: controller.signal });
+    const res = await fetch(primaryUrl, config);
     clearTimeout(timeoutId);
-    if (res.ok) return res;
 
-    // If primary URL failed (404/401/etc) or is relative, try fallback to backend host
-    if (primaryUrl.startsWith('/')) {
-      const directDevUrl = `http://localhost:5000${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
-      const devRes = await fetch(directDevUrl, config);
-      if (devRes.ok) return devRes;
+    // If request succeeded or status is an expected client auth/validation response (400, 401, 403, 429), preserve it directly
+    if (res.ok || res.status === 401 || res.status === 403 || res.status === 400 || res.status === 422) {
+      return res;
+    }
+
+    // In local dev with relative URL and idempotent methods, fallback to local backend if proxy encountered 502/503/404
+    if (!isNativeOrProd && primaryUrl.startsWith('/') && isIdempotent && (res.status >= 500 || res.status === 404)) {
+      try {
+        const directDevUrl = `http://localhost:5000${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+        const devRes = await fetch(directDevUrl, { ...config, signal: undefined });
+        if (devRes.ok) return devRes;
+      } catch {}
     }
 
     return res;
-  } catch (err) {
-    try {
-      const directDevUrl = `http://localhost:5000${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
-      return await fetch(directDevUrl, config);
-    } catch {
-      throw err;
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (!isNativeOrProd && primaryUrl.startsWith('/') && isIdempotent) {
+      try {
+        const directDevUrl = `http://localhost:5000${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+        return await fetch(directDevUrl, { ...config, signal: undefined });
+      } catch {}
     }
+    throw err;
   }
 };

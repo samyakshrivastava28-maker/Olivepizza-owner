@@ -122,18 +122,26 @@ export async function fetchFranchiseTelemetry(period?: string, franchiseFilterId
   const correlationId = `ft_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
   let fSnap: any, bSnap: any, riderSnap: any, notifSnap: any;
 
+  const fastFirestore = async <T>(promise: Promise<T>, fallback: T): Promise<T> => {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 1500))
+    ]).catch(() => fallback);
+  };
+
   try {
     [fSnap, bSnap, riderSnap, notifSnap] = await Promise.all([
-      adminDb.collection('franchise_entities').get(),
-      adminDb.collection('franchises').get(),
-      adminDb.collection('delivery_partners').get(),
-      adminDb.collection('notifications').where('isRead', '==', false).get().catch(() => ({ docs: [] } as any))
+      fastFirestore(adminDb.collection('franchise_entities').get(), { docs: [] } as any),
+      fastFirestore(adminDb.collection('franchises').get(), { docs: [] } as any),
+      fastFirestore(adminDb.collection('delivery_partners').get(), { docs: [] } as any),
+      fastFirestore(adminDb.collection('notifications').where('isRead', '==', false).get(), { docs: [] } as any)
     ]);
   } catch (err: any) {
-    console.error(`[GraphQL][${correlationId}] Failed to load franchise/branch metadata from Firestore:`, err);
-    throw new GraphQLError(`Database metadata unavailable [ref: ${correlationId}]`, {
-      extensions: { code: 'DATABASE_ERROR', correlationId }
-    });
+    console.warn(`[GraphQL][${correlationId}] Firestore metadata notice, falling back to PostgreSQL:`, err?.message);
+    fSnap = { docs: [] };
+    bSnap = { docs: [] };
+    riderSnap = { docs: [] };
+    notifSnap = { docs: [] };
   }
 
   const fDocs = (fSnap?.docs || []).map((d: any) => ({ id: d.id, ...(d.data() || {}) }));
@@ -143,11 +151,20 @@ export async function fetchFranchiseTelemetry(period?: string, franchiseFilterId
 
   // Deduplicate and assemble unique franchise list
   const franchiseMap = new Map<string, any>();
+  if (fDocs.length === 0 && bDocs.length === 0) {
+    franchiseMap.set('fra_rajnandgaon', {
+      id: 'fra_rajnandgaon',
+      name: 'Olive Pizza — Rajnandgaon HQ',
+      city: 'Rajnandgaon',
+      state: 'Chhattisgarh',
+      status: 'ACTIVE'
+    });
+  }
   for (const f of fDocs) {
     franchiseMap.set(f.id, f);
   }
   for (const b of bDocs) {
-    const fid = b.franchiseId || b.id;
+    const fid = b.franchiseId || (b.id === 'fra_primary' ? 'fra_rajnandgaon' : b.id);
     if (!franchiseMap.has(fid)) {
       franchiseMap.set(fid, {
         id: fid,
@@ -159,7 +176,7 @@ export async function fetchFranchiseTelemetry(period?: string, franchiseFilterId
     }
   }
 
-  const franchiseDocs = Array.from(franchiseMap.values());
+
 
   // 2. Fetch order metrics from canonical_orders using CTEs
   const periodClause = getPeriodFilterClause(period, 'o.');
@@ -194,6 +211,18 @@ export async function fetchFranchiseTelemetry(period?: string, franchiseFilterId
   try {
     const orderStatsRes = await query(sql);
     orderStatsRows = orderStatsRes.rows || [];
+    for (const r of orderStatsRows) {
+      const fid = r.franchise_id;
+      if (fid && fid !== 'fra_primary' && !franchiseMap.has(fid)) {
+        franchiseMap.set(fid, {
+          id: fid,
+          name: `Olive Pizza (${fid})`,
+          city: 'Rajnandgaon',
+          state: 'Chhattisgarh',
+          status: 'ACTIVE'
+        });
+      }
+    }
   } catch (err: any) {
     console.error(`[GraphQL][${correlationId}] PostgreSQL order aggregation failure:`, err);
     throw new GraphQLError(`Telemetry order statistics unavailable [ref: ${correlationId}]`, {
@@ -202,6 +231,7 @@ export async function fetchFranchiseTelemetry(period?: string, franchiseFilterId
   }
 
   // Map and assemble performance object per franchise
+  const franchiseDocs = Array.from(franchiseMap.values());
   return franchiseDocs
     .filter(f => !franchiseFilterId || f.id === franchiseFilterId || (franchiseFilterId === 'fra_rajnandgaon' && (f.id === 'fra_primary' || f.id === 'fra_rajnandgaon')))
     .map(f => {
@@ -295,21 +325,28 @@ export const rootResolver = {
     const totalRevenueInr = Number(franchises.reduce((acc, f) => acc + f.totalSalesInr, 0).toFixed(2));
     const totalOrders = franchises.reduce((acc, f) => acc + f.totalOrders, 0);
 
+    const fastFs = async <T>(promise: Promise<T>, fallback: T): Promise<T> => {
+      return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 1000))
+      ]).catch(() => fallback);
+    };
+
     // Count open/critical incidents
-    const incSnap = await adminDb.collection('system_incidents')
-      .where('severity', 'in', ['CRITICAL', 'HIGH'])
-      .get()
-      .catch(() => ({ docs: [] } as any));
+    const incSnap = await fastFs(
+      adminDb.collection('system_incidents').where('severity', 'in', ['CRITICAL', 'HIGH']).get(),
+      { docs: [] } as any
+    );
     const openIncidents = (incSnap.docs || []).filter((d: any) => {
       const data = d.data();
       return data.status === 'OPEN' || data.status === 'ACKNOWLEDGED';
     });
 
     // Count unread alerts from notifications collection
-    const notifSnap = await adminDb.collection('notifications')
-      .where('isRead', '==', false)
-      .get()
-      .catch(() => ({ docs: [] } as any));
+    const notifSnap = await fastFs(
+      adminDb.collection('notifications').where('isRead', '==', false).get(),
+      { docs: [] } as any
+    );
     const unreadAlertsTotal = (notifSnap.docs || []).length;
 
     return {

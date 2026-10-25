@@ -68,7 +68,44 @@ pgPool.on('error', (err) => {
 /**
  * Execute parameterized query with automatic timing and error logging
  */
+/**
+ * Asserts that the database connection target is safe for the active environment.
+ * If running under test mode, prevents connecting to cloud PostgreSQL hosts before any socket opens.
+ */
+export function assertSafeDatabaseTarget(): void {
+  if (process.env.NODE_ENV === 'test' || process.env.TEST_SAFETY_FAILSAFE === 'strict') {
+    if (isCloudPostgres && process.env.ALLOW_CLOUD_TEST_CONNECTION !== 'true') {
+      throw new Error(
+        `[DATABASE TARGET BLOCKED] Test execution cannot target cloud PostgreSQL host. ` +
+        `Use disposable in-memory PGlite instance or local PostgreSQL container.`
+      );
+    }
+  }
+}
+
+/**
+ * Fail-safe guard: Refuses to run mutating queries against cloud databases during test execution.
+ * Covers direct queries, transaction clients, writable CTEs (WITH ... INSERT/UPDATE/DELETE), MERGE, and DDL.
+ */
+export function assertSafeDatabaseForMutation(sqlText: string): void {
+  if (process.env.NODE_ENV === 'test' || process.env.TEST_SAFETY_FAILSAFE === 'strict') {
+    if (isCloudPostgres) {
+      const normalized = sqlText.trim().replace(/\/\*[\s\S]*?\*\/|--.*$/gm, '').trim();
+      const isDirectMutation = /^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|MERGE)\b/i.test(normalized);
+      const isWritableCTE = /^\s*WITH\b[\s\S]*?\b(INSERT|UPDATE|DELETE|MERGE)\b/i.test(normalized);
+
+      if (isDirectMutation || isWritableCTE) {
+        throw new Error(
+          `[DATABASE SAFETY BLOCKER] Mutation query blocked against cloud PostgreSQL during test execution. ` +
+          `Direct write attempted: "${sqlText.substring(0, 60)}...". All mutation tests must use the disposable in-memory PGlite test provider.`
+        );
+      }
+    }
+  }
+}
+
 export async function query<T = any>(text: string, params: any[] = []): Promise<QueryResult<T>> {
+  assertSafeDatabaseForMutation(text);
   const start = Date.now();
   try {
     const res = await pgPool.query<T>(text, params);
@@ -84,10 +121,21 @@ export async function query<T = any>(text: string, params: any[] = []): Promise<
 }
 
 /**
- * Execute an atomic transaction block with automatic BEGIN, COMMIT, and ROLLBACK
+ * Execute an atomic transaction block with automatic BEGIN, COMMIT, and ROLLBACK.
+ * Every client query executed within the transaction is guarded against cloud mutation during tests.
  */
 export async function withTransaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pgPool.connect();
+  const originalClientQuery = client.query.bind(client);
+
+  (client as any).query = (queryTextOrConfig: any, values?: any) => {
+    const text = typeof queryTextOrConfig === 'string' ? queryTextOrConfig : queryTextOrConfig?.text;
+    if (text) {
+      assertSafeDatabaseForMutation(text);
+    }
+    return (originalClientQuery as any)(queryTextOrConfig, values);
+  };
+
   try {
     await client.query('BEGIN');
     const result = await callback(client);

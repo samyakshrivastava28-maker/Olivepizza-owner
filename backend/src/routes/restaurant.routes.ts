@@ -89,10 +89,20 @@ router.get('/status', async (req: Request, res: Response) => {
     const statusData = await redisService.fetchWithStampedeProtection(
       `cache:restaurant_status:${branchId}`,
       async () => {
-        const docRef = adminDb.collection('restaurant_settings').doc(branchId);
-        const snap = await docRef.get();
+        const docRef = adminDb?.collection('restaurant_settings').doc(branchId);
+        let snap = null;
+        try {
+          if (docRef) {
+            snap = await Promise.race([
+              docRef.get(),
+              new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 2000))
+            ]);
+          }
+        } catch (fsErr) {
+          console.warn('[RestaurantRoutes] Firestore read failed or timed out:', fsErr?.message);
+        }
 
-        if (!snap.exists) {
+        if (!snap || !snap.exists) {
           // Default initial operational state
           const defaultState = {
             branchId,
@@ -139,7 +149,7 @@ router.get('/status', async (req: Request, res: Response) => {
             updatedBy: 'system'
           };
 
-          await docRef.set(defaultState);
+          if (docRef) { docRef.set(defaultState).catch(() => {}); }
           const effective = computeEffectiveStatus(defaultState);
           return { ...defaultState, effective };
         }
@@ -237,8 +247,29 @@ router.put('/status', async (req: AuthRequest, res: Response) => {
     if (acceptingOrders !== undefined) updates.acceptingOrders = Boolean(acceptingOrders);
     if (closeReason !== undefined) updates.closeReason = String(closeReason);
     if (currentPrepTime !== undefined) updates.currentPrepTime = Number(currentPrepTime);
+    const nextIsOpen = updates.isOpen ?? (prevData.isOpen !== false);
+    const nextAcceptingOrders = updates.acceptingOrders ?? (prevData.acceptingOrders !== false);
+    if (closeReason === undefined && nextIsOpen && nextAcceptingOrders) updates.closeReason = '';
 
-    await docRef.set(updates, { merge: true });
+    // Keep the branch record used by order creation in sync with restaurant settings.
+    // Otherwise an owner-created branch marked closed for launch checks could remain
+    // permanently blocked in orders even after a manager opens it from the restaurant app.
+    const branchRef = adminDb.collection('franchises').doc(branchId);
+    await adminDb.runTransaction(async (transaction) => {
+      const branchSnap = await transaction.get(branchRef);
+      transaction.set(docRef, updates, { merge: true });
+      if (branchSnap.exists) {
+        const branchUpdates: Record<string, any> = {
+          updatedAt: updates.updatedAt,
+          updatedBy: updates.updatedBy
+        };
+        if (isOpen !== undefined) branchUpdates.isOpen = Boolean(isOpen);
+        if (acceptingOrders !== undefined) branchUpdates.acceptingOrders = Boolean(acceptingOrders);
+        if (closeReason !== undefined) branchUpdates.closeReason = String(closeReason);
+        transaction.set(branchRef, branchUpdates, { merge: true });
+      }
+    });
+    await redisService.del(`cache:restaurant_status:${branchId}`);
 
     // Record audit log
     await logAudit(

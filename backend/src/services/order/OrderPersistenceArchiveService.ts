@@ -215,8 +215,9 @@ export class OrderPersistenceArchiveService {
           customerName, customerPhone, userAddress, tableNumber,
           subtotal, discountAmount, couponCode, taxAmount, cgst, sgst,
           deliveryFee, totalAmount, franchiseId, branchId, orderData.cashierId || null,
+          orderData.cashierName || null, orderData.terminalId || null, orderData.notes || null, orderData.customerId || orderData.userId || null,
           (rawStatus.toLowerCase() === 'delivered' || pgOrderStatus === 'DELIVERED') ? new Date() : null,
-          (rawStatus.toLowerCase() === 'delivered' || rawStatus.toLowerCase() === 'cancelled' || pgOrderStatus === 'DELIVERED' || pgOrderStatus === 'CANCELLED') ? 'TERMINAL' : 'ACTIVE'
+          (rawStatus.toLowerCase() === 'delivered' || rawStatus.toLowerCase() === 'cancelled' || pgOrderStatus === 'DELIVERED' || pgOrderStatus === 'CANCELLED') ? 'TERMINAL' : (orderData.live_lifecycle || 'ACTIVE')
         ]);
 
         // 2. Insert/Upsert line items deterministically (Requirement 1.A)
@@ -277,9 +278,15 @@ export class OrderPersistenceArchiveService {
             $6, $7, $8, $9, $10,
             $11, $12
           ) ON CONFLICT (id) DO UPDATE SET
-            payment_status = EXCLUDED.payment_status,
+            payment_status = CASE
+              WHEN canonical_bills.payment_status = 'PAID' AND EXCLUDED.payment_status IN ('PENDING', 'FAILED') THEN canonical_bills.payment_status
+              WHEN canonical_bills.payment_status = 'REFUNDED' THEN canonical_bills.payment_status
+              ELSE EXCLUDED.payment_status
+            END,
             is_cancelled = EXCLUDED.is_cancelled,
-            cancellation_reason = EXCLUDED.cancellation_reason;
+            cancellation_reason = COALESCE(EXCLUDED.cancellation_reason, canonical_bills.cancellation_reason)
+          WHERE canonical_bills.order_id = EXCLUDED.order_id
+            AND canonical_bills.net_amount = EXCLUDED.net_amount;
         `, [
           billId, permanentBillNo, orderId, orderDate, subtotal,
           discountAmount, taxAmount, totalAmount, paymentMethod, paymentStatus,
@@ -319,7 +326,7 @@ export class OrderPersistenceArchiveService {
         firestoreUpdates.orderNumber = `#${dailyOrderNo}`;
       }
 
-      await adminDb.collection('orders').doc(orderId).set(firestoreUpdates, { merge: true }).catch(() => {});
+      adminDb.collection('orders').doc(orderId).set(firestoreUpdates, { merge: true }).catch(() => {});
 
       return {
         success: true,
@@ -333,7 +340,7 @@ export class OrderPersistenceArchiveService {
       // Record sync error in Firestore without breaking the live order
       const syncAttempts = (orderData?.postgresSyncRetryCount || 0) + 1;
       const isFatal = err.message.includes('missing required') || syncAttempts >= 5;
-      await adminDb.collection('orders').doc(orderId).set({
+      adminDb.collection('orders').doc(orderId).set({
         postgresPersistence: isFatal ? 'FAILED_VALIDATION' : 'PENDING',
         postgresSyncError: err.message,
         postgresSyncRetryCount: syncAttempts,
@@ -791,6 +798,96 @@ export class OrderPersistenceArchiveService {
   }
 
   /**
+   * Sweeps PostgreSQL canonical_orders for PROJECTION_PENDING and projects them to Firestore.
+   * Guarantees crash recovery if process terminated after PostgreSQL transaction commit but before Firestore set().
+   */
+  public static async reconcilePendingProjections(): Promise<{ recovered: number; errors: number }> {
+    let recovered = 0;
+    let errors = 0;
+    try {
+      const res = await query(`
+        SELECT id, permanent_bill_no, daily_order_no, order_date, order_time,
+               order_source, order_type, order_status, payment_method, payment_status,
+               customer_name, customer_phone, delivery_address, table_number,
+               subtotal, discount_amount, coupon_code, tax_amount, cgst, sgst,
+               delivery_fee, total_amount, franchise_id, branch_id, cashier_id,
+               cashier_name, terminal_id, notes, customer_id
+        FROM canonical_orders
+        WHERE live_lifecycle = 'PROJECTION_PENDING'
+        ORDER BY created_at ASC
+        LIMIT 50;
+      `);
+
+      for (const row of res.rows) {
+        try {
+          const itemsRes = await query(`
+            SELECT id, menu_item_id, item_name, size_variant, crust, quantity, unit_price, addons_json, line_total
+            FROM canonical_order_items
+            WHERE order_id = $1
+          `, [row.id]);
+
+          const items = itemsRes.rows.map((it: any) => ({
+            id: it.menu_item_id || it.id,
+            name: it.item_name,
+            size: it.size_variant,
+            crust: it.crust,
+            quantity: it.quantity,
+            price: Number(it.unit_price),
+            lineTotal: Number(it.line_total),
+            addons: typeof it.addons_json === 'string' ? JSON.parse(it.addons_json) : (it.addons_json || [])
+          }));
+
+          const firestoreDoc = {
+            id: row.id,
+            orderId: row.id,
+            permanentBillNo: Number(row.permanent_bill_no),
+            dailyOrderNumber: Number(row.daily_order_no),
+            orderDateLocal: row.order_date,
+            userId: row.customer_id,
+            customerId: row.customer_id,
+            items,
+            totalAmount: Number(row.total_amount),
+            subtotal: Number(row.subtotal),
+            deliveryFee: Number(row.delivery_fee),
+            taxes: Number(row.tax_amount),
+            cgst: Number(row.cgst),
+            sgst: Number(row.sgst),
+            discountAmount: Number(row.discount_amount),
+            appliedCouponCode: row.coupon_code,
+            status: String(row.order_status).toLowerCase(),
+            paymentMethod: row.payment_method,
+            paymentStatus: String(row.payment_status).toLowerCase(),
+            customerName: row.customer_name,
+            customerPhone: row.customer_phone,
+            deliveryAddress: { addressLine: row.delivery_address || 'Pickup' },
+            tableNumber: row.table_number,
+            franchiseId: row.franchise_id,
+            branchId: row.branch_id,
+            cashierId: row.cashier_id,
+            cashierName: row.cashier_name,
+            terminalId: row.terminal_id,
+            notes: row.notes,
+            live_lifecycle: 'ACTIVE',
+            postgresPersistence: 'COMPLETE',
+            postgresSyncedAt: new Date().toISOString(),
+            updatedAt: new Date()
+          };
+
+          await adminDb.collection('orders').doc(row.id).set(firestoreDoc, { merge: true });
+          await query("UPDATE canonical_orders SET live_lifecycle = 'ACTIVE' WHERE id = $1 AND live_lifecycle = 'PROJECTION_PENDING'", [row.id]);
+          recovered++;
+        } catch (recErr: any) {
+          console.warn(`[OrderPersistence] Failed to recover projection for order ${row.id}:`, recErr.message);
+          errors++;
+        }
+      }
+    } catch (err: any) {
+      console.warn('[OrderPersistence] Pending projection sweep notice:', err.message);
+    }
+    return { recovered, errors };
+  }
+
+  /**
    * Reconciliation worker: sweeps through orders to synchronize pending writes and archive completed terminal orders.
    */
   public static async reconcileArchivalWorker(): Promise<{
@@ -803,6 +900,11 @@ export class OrderPersistenceArchiveService {
     let errors = 0;
 
     try {
+      // 0. Sweep canonical PostgreSQL orders stuck in PROJECTION_PENDING (crash recovery)
+      const projRes = await this.reconcilePendingProjections();
+      synced += projRes.recovered;
+      errors += projRes.errors;
+
       // 1. Check for terminal orders that are still unfinalized (lifecycle in ['ACTIVE', 'PENDING'])
       const unfinalizedSnap = await adminDb.collection('orders')
         .where('status', 'in', ['delivered', 'cancelled'])

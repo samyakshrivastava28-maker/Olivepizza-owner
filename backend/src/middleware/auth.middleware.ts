@@ -138,7 +138,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           dbResolved = true;
         }
         if (role === 'owner' || role === 'platform_owner' || role === 'admin') {
-          allowedApps = ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'];
+          allowedApps = Array.from(new Set(['OWNER', 'CUSTOMER', ...allowedApps]));
         }
         if (pgUser.franchise_id) franchiseId = pgUser.franchise_id;
         if (pgUser.branch_id) branchId = pgUser.branch_id;
@@ -207,7 +207,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
 
           if (isOwnerMode) {
             role = 'owner';
-            allowedApps = ['OWNER', 'RESTAURANT_MANAGER', 'DELIVERY', 'POS', 'FRANCHISE_MANAGER', 'CUSTOMER'];
+            allowedApps = Array.from(new Set(['OWNER', 'CUSTOMER', ...allowedApps]));
             permissions = ['*'];
             dbResolved = true;
           } else if (userData.role && userData.role !== 'customer') {
@@ -421,7 +421,7 @@ export const requireRole = (allowedRoles: string[]) => {
     
     const isDeliveryEquivalent = (r: string) => r === 'delivery' || r === 'delivery_partner' || r === 'rider';
     const isManagerEquivalent = (r: string) => r === 'manager' || r === 'restaurant_manager';
-    const isFranchiseOwnerEquivalent = (r: string) => r === 'franchise_owner' || r === 'owner' || r === 'franchise_manager';
+    const isFranchiseOwnerEquivalent = (r: string) => r === 'franchise_owner' || r === 'franchise_manager';
     const isPosEquivalent = (r: string) => r === 'pos' || r === 'pos_operator' || r === 'cashier';
 
     const isOwner = userRole === 'owner' || 
@@ -440,7 +440,7 @@ export const requireRole = (allowedRoles: string[]) => {
       return false;
     });
 
-    const hasRole = isOwner ||
+    const hasRole = (isOwner && isOwnerOrAdminRequested) ||
       isDeveloperAllowedForOwner || 
       isAllowedByApp ||
       allowedRoles.includes(userRole) || 
@@ -460,6 +460,33 @@ export const requireRole = (allowedRoles: string[]) => {
          ip: req.ip
       });
       res.status(403).json({ error: 'Forbidden: Insufficient permissions' });
+      return;
+    }
+    next();
+  };
+};
+
+export const requireApp = (requiredApp: 'OWNER' | 'RESTAURANT_MANAGER' | 'DELIVERY' | 'POS' | 'FRANCHISE_MANAGER' | 'CUSTOMER') => {
+  return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    if (!req.user) {
+      res.status(401).json({ error: 'Unauthorized: Authentication required', code: 'UNAUTHORIZED' });
+      return;
+    }
+    const allowed = Array.isArray(req.user.allowedApps) ? req.user.allowedApps : [];
+    if (!allowed.includes(requiredApp)) {
+      await logSecurityEventServer({
+        action: 'api_forbidden_missing_app_grant',
+        route: req.originalUrl,
+        uid: req.user.uid,
+        email: req.user.email,
+        role: req.user.role,
+        branchId: req.user.branchId,
+        ip: req.ip
+      });
+      res.status(403).json({
+        error: `Forbidden: Your account does not have active access to the ${requiredApp} application.`,
+        code: 'APP_ACCESS_DENIED'
+      });
       return;
     }
     next();
