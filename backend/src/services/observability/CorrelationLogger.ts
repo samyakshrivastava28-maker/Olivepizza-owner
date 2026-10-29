@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+﻿import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 
 /**
@@ -45,7 +45,7 @@ export class CorrelationLogger {
           level,
           event: 'http_request_finished',
           method: req.method,
-          path: req.originalUrl || req.path,
+          path: (req.originalUrl || req.path || '').replace(/([?&](?:trackingToken|token|access_token|key|secret|password|idToken|auth)=)[^&]+/gi, '[REDACTED]'),
           statusCode,
           latencyMs,
           userId: user?.uid,

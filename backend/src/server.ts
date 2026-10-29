@@ -1,7 +1,7 @@
-import express from 'express';
+﻿import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import apiApp from './app';
+import apiApp, { corsMiddleware } from './app.js';
 import { DataRetentionJob } from './jobs/DataRetentionJob';
 import './services/DataLifecycleService';
 import './services/notification/NotificationQueueService';
@@ -30,7 +30,8 @@ validateEnvironmentVariables();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+// Strict production-grade CORS configuration shared from app.ts
+app.use(corsMiddleware);
 
 // Enable trusted reverse proxy (NGINX / Cloudflare)
 app.set('trust proxy', 1);

@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import orderRoutes from './routes/order.routes.js';
@@ -171,9 +171,17 @@ const devOrigins = [
   'http://127.0.0.1'
 ];
 
-app.use(cors({
+export function sanitizeUrlForLogging(rawUrl: string): string {
+  if (!rawUrl) return '';
+  return rawUrl.replace(
+    /([?&](?:trackingToken|token|access_token|key|secret|password|idToken|auth)=)[^&]+/gi,
+    '[REDACTED]'
+  );
+}
+
+export const corsMiddleware = cors({
   origin: (origin, callback) => {
-    // 1. Direct server-to-server or native client with no origin header
+    // 1. Direct server-to-server, health checks, or native client with no origin header
     if (!origin) {
       return callback(null, true);
     }
@@ -191,28 +199,29 @@ app.use(cors({
       return callback(null, true);
     }
 
-    // 4. Mobile app protocols
-    if (origin.startsWith('capacitor://') || origin.startsWith('ionic://')) {
+    // 4. Mobile app protocols (exact origins only, no prefix matching)
+    if (origin === 'capacitor://localhost' || origin === 'ionic://localhost') {
       return callback(null, true);
     }
 
-    // 5. Authorized local development & network testing origins
-    if (
-      devOrigins.includes(origin) ||
-      origin.startsWith('http://localhost:') ||
-      origin.startsWith('http://127.0.0.1:') ||
-      origin.startsWith('http://192.168.') ||
-      origin.startsWith('http://10.') ||
-      origin.startsWith('https://localhost')
-    ) {
-      return callback(null, true);
+    // 5. Authorized local development origins (strictly excluded in production)
+    if (!isProduction) {
+      if (
+        devOrigins.includes(origin) ||
+        /^http:\/\/localhost:\d+$/.test(origin) ||
+        /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)
+      ) {
+        return callback(null, true);
+      }
     }
 
     // Reject all other unknown origins safely
     callback(null, false);
   },
   credentials: true
-}));
+});
+
+app.use(corsMiddleware);
 
 // Strict, justified request body size limits (defense-in-depth against payload flooding DoS)
 app.use(express.json({ limit: '2mb' }));

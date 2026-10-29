@@ -12,7 +12,7 @@ service cloud.firestore {
 
     function isAdmin() {
       return request.auth != null && (
-        request.auth.token.role in ['admin', 'owner', 'developer', 'platform_owner', 'restaurant_manager'] ||
+        request.auth.token.role in ['admin', 'owner', 'developer', 'platform_owner'] ||
         (request.auth.token.email != null && request.auth.token.email.matches('(?i)(olivepizzarjn@gmail\\.com|webhub2811@gmail\\.com|samyakshrivastava28@gmail\\.com|ssamyak265@gmail\\.com|s\\.callhub2811@gmail\\.com|samyaks695@gmail\\.com|shrivastavadhirendra587@gmail\\.com|shrishikhar184@gmail\\.com|homkumarsahu@gmail\\.com)')) ||
         request.auth.uid in [
           'ZzMmHLa6fBeDYY7clYNjP70fbiE2',
@@ -56,10 +56,17 @@ service cloud.firestore {
       return request.auth != null && request.auth.token.role == 'delivery_partner';
     }
 
+    function isRestaurantManager() {
+      return request.auth != null && (
+        request.auth.token.role in ['restaurant_manager', 'manager'] ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['restaurant_manager', 'manager'])
+      );
+    }
+
     // --- PROTECTED BUSINESS COLLECTIONS ---
     
     match /users/{userId} {
-      allow read: if isOwner(userId) || hasFullAccess();
+      allow read: if isOwner(userId) || hasFullAccess() || (isRestaurantManager() && resource.data.role in ['delivery', 'delivery_partner']);
       // Only admins can change role, franchiseId, branchId, terminalId, or administrative flags
       // Non-admins can only write customer fields (name, phone, address, photoURL) and CANNOT self-promote
       allow create: if hasFullAccess() || (
@@ -80,8 +87,20 @@ service cloud.firestore {
       allow delete: if hasFullAccess();
     }
 
+    match /customer_identities/{phone} {
+      allow read: if hasFullAccess() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow create, update: if hasFullAccess() || (isSignedIn() && request.resource.data.uid == request.auth.uid);
+      allow delete: if hasFullAccess();
+    }
+
+    match /security_logs/{logId} {
+      allow create: if hasFullAccess() || (isSignedIn() && request.resource.data.size() < 15);
+      allow read, update, delete: if hasFullAccess();
+    }
+
     match /orders/{orderId} {
       allow read: if hasFullAccess() || 
+                  isRestaurantManager() ||
                   (isSignedIn() && resource.data.userId == request.auth.uid) || 
                   (isDeliveryPartner() && resource.data.deliveryPartnerId == request.auth.uid);
       allow write: if hasFullAccess();
@@ -132,13 +151,23 @@ service cloud.firestore {
       allow write: if hasFullAccess();
     }
 
+    match /restaurant_settings/{branchId} {
+      allow read: if true;
+      allow write: if hasFullAccess();
+    }
+
+    match /branch_menu_overrides/{overrideId} {
+      allow read: if true;
+      allow write: if hasFullAccess();
+    }
+
     match /delivery_zones/{zoneId} {
       allow read: if true;
       allow write: if hasFullAccess();
     }
 
     match /delivery_partners/{partnerId} {
-      allow read: if hasFullAccess() || (request.auth != null && request.auth.uid == partnerId);
+      allow read: if hasFullAccess() || isRestaurantManager() || (request.auth != null && request.auth.uid == partnerId);
       // Riders can only update their own telemetry/status fields, not administrative status or assigned branch
       allow create: if hasFullAccess();
       allow update: if hasFullAccess() || (
@@ -148,11 +177,6 @@ service cloud.firestore {
         ])
       );
       allow delete: if hasFullAccess();
-    }
-
-    match /reviews/{reviewId} {
-      allow read: if true;
-      allow write: if isSignedIn();
     }
 
     match /reviews/{reviewId} {
@@ -184,17 +208,17 @@ service cloud.firestore {
     }
     
     match /client_errors/{errorId} {
-      allow create: if request.resource.data.size() < 12;
+      allow create: if hasFullAccess() || (isSignedIn() && request.resource.data.size() < 12);
       allow read, update, delete: if hasFullAccess();
     }
     
     match /activity_logs/{logId} {
-      allow create: if request.resource.data.size() < 12;
+      allow create: if hasFullAccess() || (isSignedIn() && request.resource.data.size() < 12);
       allow read, update, delete: if hasFullAccess();
     }
     
     match /crash_reports/{reportId} {
-      allow create: if request.resource.data.size() < 12;
+      allow create: if hasFullAccess() || (isSignedIn() && request.resource.data.size() < 12);
       allow read, update, delete: if hasFullAccess();
     }
 
@@ -253,6 +277,7 @@ service cloud.firestore {
     
     // --- TRUECALLER WEB/QR VERIFICATION SESSIONS ---
     match /truecaller_web_sessions/{requestId} {
+      // Allow single-document lookup by exact cryptographically secure requestId for instant web/desktop listener
       allow get: if true;
       allow list: if false;
       allow write: if hasFullAccess();

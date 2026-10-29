@@ -21,10 +21,13 @@ coverage/
 *.p12
 *.pfx
 *.keystore
-!android/app/ci-release.keystore
+*.keystore.*
+*.keystore.b64
 *.jks
 release.keystore
 android/app/release.keystore
+android/app/*.keystore
+android/app/*.keystore.b64
 credentials/
 serviceAccountKey*.json
 service-account*.json

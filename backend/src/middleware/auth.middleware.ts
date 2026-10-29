@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+﻿import { Request, Response, NextFunction } from 'express';
 import { adminAuth, adminDb } from '../config/firebase.js';
 import { query } from '../config/postgres.js';
 import { FranchiseScopeService, ScopeContext } from '../services/franchise/FranchiseScopeService.js';
@@ -363,8 +363,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
       email: decodedToken.email
     });
 
-    const isOwnerByRole = role === 'owner' || role === 'platform_owner' ||
-      (emailLower === 'olivepizzarjn@gmail.com' || emailLower === 'webhub2811@gmail.com' || emailLower === 'olivepizzamaker@gmail.com');
+    const isOwnerByRole = role === 'owner' || role === 'platform_owner';
 
     req.user = {
       uid,
@@ -414,22 +413,18 @@ export const requireRole = (allowedRoles: string[]) => {
     }
     
     const userRole = req.user.role || '';
-    const AUTHORIZED_INTERNAL_EMAILS = ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'];
-    const isInternalAccount = req.user.email && AUTHORIZED_INTERNAL_EMAILS.includes(req.user.email.toLowerCase());
     const isOwnerOrAdminRequested = allowedRoles.includes('owner') || allowedRoles.includes('admin') || allowedRoles.includes('platform_admin');
-    const isDeveloperAllowedForOwner = isOwnerOrAdminRequested && (userRole === 'developer' || isInternalAccount);
     
     const isDeliveryEquivalent = (r: string) => r === 'delivery' || r === 'delivery_partner' || r === 'rider';
     const isManagerEquivalent = (r: string) => r === 'manager' || r === 'restaurant_manager';
     const isFranchiseOwnerEquivalent = (r: string) => r === 'franchise_owner' || r === 'franchise_manager';
     const isPosEquivalent = (r: string) => r === 'pos' || r === 'pos_operator' || r === 'cashier';
 
-    const isOwner = userRole === 'owner' || 
-                    userRole === 'platform_owner' || 
-                    (req.user as any)?.isOwnerMode === true || 
-                    (req.user as any)?.isGlobalOwner === true || 
-                    (req.user as any)?.admin === true ||
-                    isInternalAccount;
+    const isOwner = userRole === 'owner' ||
+                    userRole === 'platform_owner' ||
+                    (req.user as any)?.isOwnerMode === true ||
+                    (req.user as any)?.isGlobalOwner === true ||
+                    (req.user as any)?.admin === true;
 
     const userAllowedApps: string[] = (req.user as any)?.allowedApps || [];
     const isAllowedByApp = allowedRoles.some(r => {
@@ -441,7 +436,6 @@ export const requireRole = (allowedRoles: string[]) => {
     });
 
     const hasRole = (isOwner && isOwnerOrAdminRequested) ||
-      isDeveloperAllowedForOwner || 
       isAllowedByApp ||
       allowedRoles.includes(userRole) || 
       (isDeliveryEquivalent(userRole) && allowedRoles.some(isDeliveryEquivalent)) ||

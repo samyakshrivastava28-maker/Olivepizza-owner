@@ -1,4 +1,4 @@
-import { Router, Response } from 'express';
+﻿import { Router, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
 import { verifyToken, AuthRequest, requireRole } from '../middleware/auth.middleware.js';
 import { idempotency } from '../middleware/idempotency.middleware.js';
@@ -35,10 +35,7 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
     return;
   }
   const emailLower = (user.email || '').toLowerCase().trim();
-  const isMasterOwner = emailLower === 'olivepizzarjn@gmail.com' ||
-    emailLower === 'webhub2811@gmail.com' ||
-    emailLower === 'olivepizzamaker@gmail.com';
-  const isOwnerRole = isMasterOwner ||
+  const isOwnerRole =
     user.role === 'owner' ||
     user.role === 'platform_owner' ||
     user.role === 'admin' ||
@@ -47,7 +44,7 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
   // 1. Owner & Admin Accounts: Operational and terminal access requiring explicit POS grant
   if (isOwnerRole) {
     const allowedApps = Array.isArray((user as any).allowedApps) ? (user as any).allowedApps : [];
-    const hasPosAppGrant = isMasterOwner || allowedApps.map((a: any) => String(a).toUpperCase()).includes('POS');
+    const hasPosAppGrant = allowedApps.map((a: any) => String(a).toUpperCase()).includes('POS');
     if (!hasPosAppGrant) {
       res.status(403).json({ error: 'Forbidden: POS operational access requires an explicit active POS app grant.', code: 'APP_ACCESS_DENIED' });
       return;
@@ -1687,9 +1684,7 @@ router.post('/shifts/cash-adjustment', verifyToken, requirePOSRole, async (req: 
 // ─── 13. GLOBAL OWNER: ALL POS TERMINALS VIEW (GET /all-terminals) ───────────
 router.get('/all-terminals', verifyToken, requireRole(['owner', 'admin', 'developer', 'platform_owner', 'franchise_owner']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const isGlobalOwner = ['owner', 'admin', 'developer', 'platform_owner'].includes(req.user?.role || '') ||
-      req.user?.email === 'olivepizzarjn@gmail.com' ||
-      req.user?.email === 'webhub2811@gmail.com';
+    const isGlobalOwner = ['owner', 'admin', 'developer', 'platform_owner'].includes(req.user?.role || '');
 
     const userFranchiseId = req.user?.franchiseId;
 

@@ -1,4 +1,4 @@
-import { adminDb, adminAuth } from '../../config/firebase.js';
+﻿import { adminDb, adminAuth } from '../../config/firebase.js';
 import { FranchiseScopeService } from './FranchiseScopeService.js';
 import { query } from '../../config/postgres.js';
 
@@ -444,46 +444,9 @@ export class FranchiseAccessService {
       return { authorized: false, reason: 'Database service unavailable' };
     }
 
-    // 0. Master Owner Instant Authorization across all applications
-    const isMasterOwner =
-      emailLower === 'webhub2811@gmail.com' ||
-      emailLower === 'olivepizzarjn@gmail.com' ||
-      emailLower === 'olivepizzamaker@gmail.com' ||
-      emailLower === 'samyakshrivastava28@gmail.com' ||
-      emailLower === 'samyaks695@gmail.com';
-
-    // 0. Master Owner Instant Authorization: strictly for OWNER command center
-    if (targetApp === 'OWNER' && isMasterOwner) {
-      const defaultBranch = requestedBranchId || 'main_branch';
-      const defaultFranchise = 'fra_rajnandgaon';
-      return {
-        authorized: true,
-        requiresPin: false,
-        isProfileComplete: true,
-        user: {
-          uid,
-          email: emailLower,
-          name: 'Olive Pizza Owner',
-          role: 'owner',
-          phone: '+919179944445',
-          phoneNumber: '+919179944445',
-          branchId: defaultBranch,
-          branchName: 'Olive Pizza — Rajnandgaon HQ',
-          branchIds: ['all', defaultBranch],
-          franchiseId: defaultFranchise,
-          terminalId: terminalId || 'Counter 1',
-          permissions: ['*'],
-          allowedApps: ['OWNER'],
-          applicationAccess: {
-            app_restaurant_management: false,
-            app_delivery: false,
-            app_pos: false,
-            app_franchise_management: false,
-            app_owner: true
-          }
-        }
-      };
-    }
+    // 1. Authorization is determined exclusively by PostgreSQL app_users role.
+    // Accounts must be registered in app_users with role='owner'|'platform_owner'|'admin'.
+    // No email-based fast-path — all identities go through database and Firestore checks.
 
     // 1. Authoritative PostgreSQL Database Check (app_users & delivery_partners)
     const phoneRaw = (phoneNumber || '').trim();
@@ -524,10 +487,10 @@ export class FranchiseAccessService {
               email: pgUserData.email || emailLower,
               name: pgUserData.name || 'Olive Pizza Owner',
               role: 'owner',
-              phone: pgUserData.phone || '+919179944445',
-              phoneNumber: pgUserData.phone || '+919179944445',
+              phone: pgUserData.phone || '',
+              phoneNumber: pgUserData.phone || '',
               branchId: pgUserData.branch_id || 'main_branch',
-              branchName: 'Olive Pizza — Rajnandgaon HQ',
+              branchName: 'Olive Pizza',
               branchIds: ['all'],
               franchiseId: pgUserData.franchise_id || 'fra_rajnandgaon',
               terminalId: terminalId || 'Counter 1',
@@ -594,10 +557,10 @@ export class FranchiseAccessService {
             email: pgUserData.email || emailLower,
             name: pgUserData.name || 'Olive Pizza Staff',
             role: isOwner ? (roleMap[targetApp] || 'owner') : (userRole || roleMap[targetApp] || 'staff'),
-            phone: pgUserData.phone || '+919179944445',
-            phoneNumber: pgUserData.phone || '+919179944445',
+            phone: pgUserData.phone || '',
+            phoneNumber: pgUserData.phone || '',
             branchId: resolvedBranch,
-            branchName: 'Olive Pizza — Rajnandgaon HQ',
+            branchName: 'Olive Pizza',
             branchIds: ['all', resolvedBranch],
             franchiseId: resolvedFranchise,
             terminalId: terminalId || 'Counter 1',
@@ -640,7 +603,7 @@ export class FranchiseAccessService {
                 name: dp.name || 'Delivery Partner',
                 role: 'delivery_partner',
                 branchId: dp.branch_id || 'main_branch',
-                branchName: 'Olive Pizza — Rajnandgaon HQ',
+                branchName: 'Olive Pizza',
                 branchIds: [dp.branch_id || 'main_branch'],
                 franchiseId: dp.franchise_id || 'fra_rajnandgaon',
                 permissions: ['delivery.orders', 'delivery.location'],
@@ -758,10 +721,10 @@ export class FranchiseAccessService {
             email: emailLower || userData.email || '',
             name: userData.name || userData.displayName || 'Olive Pizza Owner',
             role: 'owner',
-            phone: userData.phone || userData.phoneNumber || '+919179944445',
-            phoneNumber: userData.phone || userData.phoneNumber || '+919179944445',
+            phone: userData.phone || userData.phoneNumber || '',
+            phoneNumber: userData.phone || userData.phoneNumber || '',
             branchId: resolvedBranch,
-            branchName: 'Olive Pizza — Rajnandgaon HQ',
+            branchName: 'Olive Pizza',
             branchIds: ['all', resolvedBranch],
             franchiseId: resolvedFranchise,
             terminalId: userData.terminalId || terminalId || 'Counter 1',
@@ -948,7 +911,7 @@ export class FranchiseAccessService {
       }
 
       if (!isApproved) {
-        if (isMasterOwner || isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
+        if (isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
           return {
             authorized: false,
             code: 'STAFF_GRANT_REQUIRED',
@@ -1085,7 +1048,7 @@ export class FranchiseAccessService {
       }
 
       if (!isApproved) {
-        if (isMasterOwner || isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
+        if (isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
           return {
             authorized: false,
             code: 'STAFF_GRANT_REQUIRED',
@@ -1180,7 +1143,7 @@ export class FranchiseAccessService {
       }
 
       if (!isApproved) {
-        if (isMasterOwner || isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
+        if (isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
           return {
             authorized: false,
             code: 'STAFF_GRANT_REQUIRED',
@@ -1289,7 +1252,7 @@ export class FranchiseAccessService {
       }
 
       if (!isApproved) {
-        if (isMasterOwner || isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
+        if (isOwnerByProfile || (pgUserData && ['owner', 'platform_owner', 'admin'].includes((pgUserData.role || '').toLowerCase()))) {
           return {
             authorized: false,
             code: 'STAFF_GRANT_REQUIRED',
