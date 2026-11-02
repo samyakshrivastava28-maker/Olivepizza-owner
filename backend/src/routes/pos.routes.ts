@@ -66,70 +66,48 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
   }
 
   // 2. Staff Accounts Authorized by Owner
-  const allowedRoles = ['pos_operator', 'cashier', 'restaurant_manager', 'franchise_manager', 'franchise_owner', 'store_manager', 'manager', 'staff', 'admin'];
-  let isAuthorized = allowedRoles.includes(user.role);
+  const allowedPosRoles = ['pos_operator', 'cashier'];
+  let isAuthorized = allowedPosRoles.includes(user.role);
 
-  // Check user.allowedApps or applicationAccess
+  // Check user.allowedApps
   if (!isAuthorized) {
     const allowedApps = Array.isArray((user as any).allowedApps) ? (user as any).allowedApps : [];
     if (allowedApps.map((a: any) => String(a).toUpperCase()).includes('POS')) {
       isAuthorized = true;
     }
-    const appAccess = (user as any).applicationAccess;
-    if (appAccess?.app_pos === true || appAccess?.pos === true) {
-      isAuthorized = true;
-    }
   }
 
-  // Check PostgreSQL app_users for authorization grant
+  // Check PostgreSQL app_users for authoritative grant
   if (!isAuthorized) {
     try {
       const pgUserRes = await query(
-        `SELECT role, franchise_id, branch_id, allowed_apps, is_active FROM app_users WHERE (email IS NOT NULL AND LOWER(email) = $1) OR id = $2 LIMIT 1`,
+        `SELECT role, franchise_id, branch_id, allowed_apps, is_active, status FROM app_users WHERE (email IS NOT NULL AND LOWER(email) = $1) OR id = $2 LIMIT 1`,
         [emailLower, user.uid]
       );
       if (pgUserRes.rows.length > 0) {
         const pgUser = pgUserRes.rows[0];
-        if (pgUser.is_active !== false) {
-          const pgApps: string[] = Array.isArray(pgUser.allowed_apps) ? pgUser.allowed_apps : [];
-          if (pgApps.map(a => String(a).toUpperCase()).includes('POS') || allowedRoles.includes(pgUser.role)) {
-            isAuthorized = true;
-            if (pgUser.franchise_id && !user.franchiseId) user.franchiseId = pgUser.franchise_id;
-            if (pgUser.branch_id && !user.branchId) user.branchId = pgUser.branch_id;
-          }
+        if (pgUser.is_active === false || pgUser.status === 'REVOKED' || pgUser.status === 'SUSPENDED' || pgUser.status === 'DISABLED') {
+          res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked', code: 'ACCOUNT_REVOKED' });
+          return;
+        }
+        const pgApps: string[] = Array.isArray(pgUser.allowed_apps) ? pgUser.allowed_apps : [];
+        if (pgApps.map(a => String(a).toUpperCase()).includes('POS') || allowedPosRoles.includes(pgUser.role)) {
+          isAuthorized = true;
+          if (pgUser.franchise_id && !user.franchiseId) user.franchiseId = pgUser.franchise_id;
+          if (pgUser.branch_id && !user.branchId) user.branchId = pgUser.branch_id;
         }
       }
     } catch (pgErr: any) {
-      console.warn('[requirePOSRole] PostgreSQL app_users check notice:', pgErr.message);
-    }
-  }
-
-  // Check pos_accounts collection in Firestore
-  if (!isAuthorized && adminDb) {
-    try {
-      const posDoc = await adminDb.collection('pos_accounts').doc(user.uid).get();
-      if (posDoc.exists && (posDoc.data()?.status === 'APPROVED' || posDoc.data()?.status === 'ACTIVE' || posDoc.data()?.isActive === true)) {
-        isAuthorized = true;
-        const pData = posDoc.data()!;
-        if (pData.franchiseId && !user.franchiseId) user.franchiseId = pData.franchiseId;
-        if (pData.branchId && !user.branchId) user.branchId = pData.branchId;
-      } else if (emailLower) {
-        const posSnap = await adminDb.collection('pos_accounts').where('email', '==', emailLower).limit(1).get();
-        if (!posSnap.empty && (posSnap.docs[0].data()?.status === 'APPROVED' || posSnap.docs[0].data()?.status === 'ACTIVE' || posSnap.docs[0].data()?.isActive === true)) {
-          isAuthorized = true;
-          const pData = posSnap.docs[0].data()!;
-          if (pData.franchiseId && !user.franchiseId) user.franchiseId = pData.franchiseId;
-          if (pData.branchId && !user.branchId) user.branchId = pData.branchId;
-        }
-      }
-    } catch (fsErr: any) {
-      console.warn('[requirePOSRole] Firestore pos_accounts check notice:', fsErr.message);
+      console.error('[requirePOSRole] PostgreSQL authoritative check failure (fail-closed):', pgErr.message);
+      res.status(503).json({ error: 'Database unavailable: Authoritative check failed', code: 'DATABASE_UNAVAILABLE' });
+      return;
     }
   }
 
   if (!isAuthorized) {
     res.status(403).json({
-      error: 'Forbidden: POS access is restricted to the Franchise Manager and authorized POS accounts.'
+      error: 'Forbidden: POS access requires cashier or pos_operator role, or an explicit POS grant in PostgreSQL.',
+      code: 'APP_ACCESS_DENIED'
     });
     return;
   }
@@ -819,6 +797,10 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
     });
   } catch (error: any) {
     console.error('[POS] Order creation failed:', error);
+    if (error.code === 'IDEMPOTENCY_CONFLICT' || error.statusCode === 409) {
+      res.status(409).json({ success: false, code: 'IDEMPOTENCY_CONFLICT', error: error.message });
+      return;
+    }
     res.status(500).json({ success: false, error: error.message || 'Failed to create bill' });
   }
 });
@@ -2621,7 +2603,7 @@ router.get('/health/telemetry', verifyToken, requireRole(['owner', 'admin', 'dev
 });
 
 // POST /api/pos/bills/sync-offline — Batch idempotent sync of offline-created bills
-router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post(['/bills/sync-offline', '/bills/offline-sync'], verifyToken, requirePOSRole, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const user = req.user!;
     const { bills } = req.body;
@@ -2684,15 +2666,59 @@ router.post('/bills/sync-offline', verifyToken, requirePOSRole, async (req: Auth
       try {
         // 1. Check PostgreSQL canonical ledger first for stable duplicate suppression
         const existingOrder = await query(
-          `SELECT id, permanent_bill_no, daily_order_no, payment_status, total_amount 
+          `SELECT id, permanent_bill_no, daily_order_no, payment_status, total_amount, request_fingerprint 
            FROM canonical_orders 
            WHERE id = $1 LIMIT 1`,
           [syncOrderId]
         );
 
         if (existingOrder.rows.length > 0) {
-          duplicateCount++;
           const existRow = existingOrder.rows[0];
+          const incomingTotal = Number(bill.finalTotal ?? bill.totalAmount ?? bill.total ?? 0);
+          const existingTotal = Number(existRow.total_amount);
+
+          let isFingerprintConflict = false;
+          if (existRow.request_fingerprint && Array.isArray(bill.items) && bill.items.length > 0) {
+            try {
+              const incomingFingerprint = CanonicalOrderService.computeOrderFingerprint({
+                id: syncOrderId,
+                orderSource: bill.orderSource || 'POS_TAKEAWAY',
+                orderType: bill.orderType,
+                customerPhone: bill.customerPhone,
+                franchiseId,
+                branchId,
+                terminalId: bill.session?.terminalId,
+                items: bill.items,
+                subtotal: bill.subtotal || 0,
+                discountAmount: bill.discountAmount || 0,
+                taxAmount: bill.taxAmount || 0,
+                deliveryFee: bill.deliveryFee || 0,
+                totalAmount: incomingTotal,
+                paymentMethod: bill.paymentMethod || 'CASH'
+              });
+              if (incomingFingerprint !== existRow.request_fingerprint) {
+                isFingerprintConflict = true;
+              }
+            } catch (fpErr) {
+              // fallback to amount comparison
+            }
+          }
+
+          if (isFingerprintConflict || (incomingTotal > 0 && Math.abs(incomingTotal - existingTotal) > 0.05)) {
+            processedBills.push({
+              id: existRow.id,
+              idempotencyKey,
+              status: 'CONFLICT',
+              success: false,
+              code: 'IDEMPOTENCY_CONFLICT',
+              error: `Idempotency conflict: key "${idempotencyKey}" was previously recorded with conflicting details.`,
+              permanentBillNo: Number(existRow.permanent_bill_no),
+              duplicate: false
+            });
+            continue;
+          }
+
+          duplicateCount++;
           processedBills.push({
             id: existRow.id,
             idempotencyKey,

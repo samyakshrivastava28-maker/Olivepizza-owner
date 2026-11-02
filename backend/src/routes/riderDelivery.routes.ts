@@ -341,7 +341,7 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
     }
 
     // For operational actions, rider MUST be online and have a valid GPS fix
-    if ((req.user?.role === 'delivery_partner' || req.user?.role === 'delivery') && !isMasterAccount) {
+    if (req.user?.role === 'delivery_partner' || req.user?.role === 'delivery') {
       let partnerData: any = {};
       try {
         const partnerDoc = await adminDb.collection('delivery_partners').doc(uid).get();
@@ -754,7 +754,7 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           { lat: riderLat, lng: riderLng }
         );
 
-        if (!geofenceResult.allowed && !isMasterAccount) {
+        if (!geofenceResult.allowed) {
           res.status(400).json({
             success: false,
             error: `50-metre delivery gate violated: ${geofenceResult.reason || 'You are outside the 50m customer delivery radius.'}`,

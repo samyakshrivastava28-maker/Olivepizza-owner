@@ -62,9 +62,10 @@ export async function createDisposableTestDb(): Promise<DisposableTestDb> {
 
   const query = async <T = any>(text: string, params: any[] = []): Promise<{ rows: T[]; rowCount: number }> => {
     const res = await db.query<T>(text, params);
+    const affected = (res as any).affectedRows;
     return {
       rows: res.rows,
-      rowCount: res.rows.length
+      rowCount: affected !== undefined ? affected : res.rows.length
     };
   };
 

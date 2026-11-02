@@ -67,8 +67,16 @@ export class MonthlyReportNotificationService {
     const userRole = (user.role || '').toLowerCase().trim();
     const userEmail = (user.email || '').toLowerCase().trim();
 
+    // 0. Active Account Check
+    if (user.isActive === false) {
+      return {
+        authorized: false,
+        reason: 'Access Denied: Account is deactivated or revoked in system database.'
+      };
+    }
+
     // 1. HARD SECURITY GUARD: Customers and Delivery personnel are unconditionally blocked
-    if (FORBIDDEN_ROLES.has(userRole)) {
+    if (FORBIDDEN_ROLES.has(userRole) || userRole === 'customer') {
       return {
         authorized: false,
         reason: `Access Denied: Role '${userRole}' is strictly forbidden from accessing internal business reports.`
@@ -76,7 +84,13 @@ export class MonthlyReportNotificationService {
     }
 
     // 2. Platform Owners / Master Admins have global access
-    if (AUTHORIZED_OWNER_EMAILS.includes(userEmail) || OWNER_ROLES.has(userRole)) {
+    if (AUTHORIZED_OWNER_EMAILS.includes(userEmail)) {
+      if (OWNER_ROLES.has(userRole)) {
+        return { authorized: true };
+      }
+    }
+
+    if (OWNER_ROLES.has(userRole)) {
       return { authorized: true };
     }
 

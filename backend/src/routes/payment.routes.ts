@@ -144,9 +144,13 @@ router.post('/verify', verifyToken, async (req: AuthRequest, res: Response) => {
 
     const verifyResult = await provider.verifyPayment({
       paymentId,
-      providerPaymentId: providerPaymentId || canonicalPayment.id,
+      providerPaymentId: providerPaymentId || canonicalPayment.provider_payment_id || canonicalPayment.id,
       providerSignature,
       providerTransactionId,
+      rawPayload: {
+        paymentId,
+        currency: canonicalPayment.currency || 'INR'
+      }
     });
 
     // 5. Enforce Strict Provider Verification, Amount Matching and Captured Status (Requirement 1.C)
@@ -208,20 +212,72 @@ router.post('/verify', verifyToken, async (req: AuthRequest, res: Response) => {
       });
     }
 
-    await query(
-      "UPDATE payments SET status = 'PAYMENT_CAPTURED', provider_transaction_id = $2, verified_at = NOW() WHERE id = $1",
-      [paymentId, finalTxId]
-    );
+    // 6. Concurrency-Safe Transactional State Transition with Row-Level Lock
+    const { pool } = await import('../lib/db.js');
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const lockedRes = await client.query(
+        'SELECT id, user_id, amount, currency, status, order_id FROM payments WHERE id = $1 FOR UPDATE',
+        [paymentId]
+      );
+      if (lockedRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: 'Payment record not found' });
+      }
+      const current = lockedRes.rows[0];
+      if (current.status === 'PAYMENT_CAPTURED' || current.status === 'CAPTURED') {
+        await client.query('COMMIT');
+        return res.json({
+          success: true,
+          verified: true,
+          status: 'captured',
+          idempotent: true,
+          paymentId,
+          providerPaymentId: verifyResult.providerPaymentId || providerPaymentId,
+          providerTransactionId: finalTxId
+        });
+      }
+      if (current.status !== 'CREATED' && current.status !== 'PAYMENT_PENDING' && current.status !== 'PENDING') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          error: `Invalid payment transition: cannot capture payment in status ${current.status}`
+        });
+      }
 
-    console.log(`[PaymentSecurity][${requestId}] Payment ${paymentId} successfully verified & CAPTURED via ${providerName} (txId: ${finalTxId})`);
+      await client.query(
+        `UPDATE payments 
+         SET status = 'PAYMENT_CAPTURED', provider_transaction_id = $2, verified_at = NOW(), updated_at = NOW() 
+         WHERE id = $1`,
+        [paymentId, finalTxId]
+      );
 
-    return res.json({
-      success: true,
-      verified: true,
-      status: 'captured',
-      providerPaymentId: verifyResult.providerPaymentId || providerPaymentId,
-      providerTransactionId: finalTxId,
-    });
+      if (current.order_id) {
+        try {
+          await client.query(
+            `UPDATE orders SET payment_status = 'PAID', updated_at = NOW() WHERE id = $1 AND payment_status != 'PAID'`,
+            [current.order_id]
+          );
+        } catch (_) {}
+      }
+
+      await client.query('COMMIT');
+      console.log(`[PaymentSecurity][${requestId}] Payment ${paymentId} successfully verified & CAPTURED via ${providerName} (txId: ${finalTxId})`);
+
+      return res.json({
+        success: true,
+        verified: true,
+        status: 'captured',
+        providerPaymentId: verifyResult.providerPaymentId || providerPaymentId,
+        providerTransactionId: finalTxId,
+      });
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    } finally {
+      client.release();
+    }
   } catch (error: any) {
     console.error(`[PaymentSecurity][${requestId}] Internal error during verification:`, error.message);
     res.status(500).json({ success: false, error: 'Internal payment verification failure' });
@@ -245,12 +301,52 @@ router.post('/webhook/:provider', async (req: Request, res: Response) => {
       req.headers['signature']) as string;
 
     const idempotencyKey = ((req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || '') as string).trim();
-    const result = await paymentGrpcClient.processWebhook({
-      provider: providerName,
-      payloadJson: req.body,
-      signature: signature || '',
-      idempotencyKey: idempotencyKey || undefined,
-    });
+
+    const rawPayload = (req as any).rawBody || req.body;
+    let result: any;
+    const grpcEnabled = process.env.GRPC_ENABLED === 'true';
+
+    if (grpcEnabled) {
+      try {
+        result = await paymentGrpcClient.processWebhook({
+          provider: providerName,
+          payloadJson: req.body,
+          signature: signature || '',
+          idempotencyKey: idempotencyKey || undefined,
+        });
+      } catch (grpcErr: any) {
+        const isConnectionError = grpcErr.code === 14 /* UNAVAILABLE */ ||
+          grpcErr.message?.includes('UNAVAILABLE') ||
+          grpcErr.message?.includes('ECONNREFUSED') ||
+          grpcErr.message?.includes('connect');
+
+        if (isConnectionError) {
+          console.warn('[WebhookRoute] gRPC server offline/unavailable, falling back to direct PaymentService:', grpcErr.message);
+          const { PaymentService } = await import('../services/payment/PaymentService.js');
+          result = await PaymentService.processWebhook(providerName, rawPayload, signature || '');
+        } else {
+          // Ambiguous error or timeout: check if event was already recorded in payment_webhooks
+          const payload = req.body || {};
+          const eventId = payload.event_id || payload.id;
+          if (eventId) {
+            const { query } = await import('../lib/db.js');
+            const checkRes = await query('SELECT 1 FROM payment_webhooks WHERE event_id = $1 LIMIT 1', [eventId]);
+            if (checkRes.rows.length > 0) {
+              result = { success: true, eventType: 'duplicate_ignored', handledBy: 'grpc_committed' };
+            } else {
+              console.error('[WebhookRoute] gRPC timed out without committing event. Returning 504 for gateway retry.');
+              return res.status(504).json({ error: 'Gateway timeout during webhook processing' });
+            }
+          } else {
+            return res.status(502).json({ error: 'gRPC processing failure: ' + grpcErr.message });
+          }
+        }
+      }
+    } else {
+      const { PaymentService } = await import('../services/payment/PaymentService.js');
+      result = await PaymentService.processWebhook(providerName, rawPayload, signature || '');
+    }
+
     res.json({ received: true, ...result });
   } catch (error: any) {
     console.error('[WebhookRoute] Webhook processing failed:', error.message);

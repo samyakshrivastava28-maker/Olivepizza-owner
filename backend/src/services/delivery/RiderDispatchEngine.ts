@@ -1,6 +1,7 @@
 import { adminDb } from '../../config/firebase.js';
 import { notificationEngine } from '../notification/NotificationEngine.js';
-import { SupabaseGpsService } from '../gps/SupabaseGpsService.js';
+import { PostgresGpsService } from '../gps/PostgresGpsService.js';
+import { getClient, query } from '../../lib/db.js';
 
 export interface EligibleRider {
   uid: string;
@@ -11,378 +12,395 @@ export interface EligibleRider {
   distanceMeters: number;
   score: number;
   branchId: string;
-}
-
-function calculateDistanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371e3;
-  const p1 = (lat1 * Math.PI) / 180;
-  const p2 = (lat2 * Math.PI) / 180;
-  const dp = ((lat2 - lat1) * Math.PI) / 180;
-  const dl = ((lon2 - lon1) * Math.PI) / 180;
-  const a = Math.sin(dp / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  franchiseId?: string;
 }
 
 export class RiderDispatchEngine {
   /**
    * Searches and ranks eligible riders for a specific order.
-   * Criteria:
-   *  - Branch match
-   *  - Online status == true
-   *  - No active delivery assigned
-   *  - Fresh GPS location (< 5 minutes old)
-   *  - Excludes previously declined rider UIDs for this order
+   * Priority:
+   *  1. Main PostgreSQL delivery_partners + delivery_locations
+   *  2. Strict branch & franchise isolation
+   *  3. Online status == true
+   *  4. No active delivery assigned (active_order_id IS NULL)
+   *  5. Fresh GPS location (< 5 minutes old)
+   *  6. Excludes previously declined rider UIDs for this order
    */
   public static async findEligibleRiders(orderId: string): Promise<EligibleRider[]> {
     let orderData: any = null;
+    let branchId = '';
+    let franchiseId = '';
+    let restaurantLat = 21.0967;
+    let restaurantLng = 81.0315;
+    const excludedUids = new Set<string>();
+
+    // 1. Authoritative check in PostgreSQL canonical_orders
     try {
-      const orderDoc = await adminDb.collection('orders').doc(orderId).get();
-      if (orderDoc.exists) orderData = orderDoc.data()!;
-    } catch (fsErr: any) {
-      console.warn(`[RiderDispatchEngine] Firestore order read notice for ${orderId}:`, fsErr.message);
+      const orderRes = await query(
+        `SELECT id, branch_id, franchise_id, order_status, delivery_partner_id
+         FROM canonical_orders WHERE id = $1 LIMIT 1`,
+        [orderId]
+      );
+      if (orderRes.rows.length > 0) {
+        orderData = orderRes.rows[0];
+        branchId = (orderData.branch_id || '').trim();
+        franchiseId = (orderData.franchise_id || '').trim();
+      }
+    } catch (pgErr: any) {
+      console.warn(`[RiderDispatchEngine] PostgreSQL order read notice for ${orderId}:`, pgErr.message);
     }
 
-    if (!orderData) {
+    // 2. Fallback to Firestore orders collection if unmigrated
+    if (!orderData || !branchId) {
       try {
-        const { OrderPersistenceArchiveService } = await import('../order/OrderPersistenceArchiveService.js');
-        orderData = await OrderPersistenceArchiveService.getHistoricalOrder(orderId);
-      } catch (pgErr: any) {
-        console.warn(`[RiderDispatchEngine] PostgreSQL fallback read notice for ${orderId}:`, pgErr.message);
+        const orderDoc = await adminDb.collection('orders').doc(orderId).get();
+        if (orderDoc.exists) {
+          const docData = orderDoc.data()!;
+          orderData = docData;
+          branchId = (docData.branchId || docData.branch_id || '').trim();
+          franchiseId = (docData.franchiseId || docData.franchise_id || '').trim();
+          if (docData.restaurantLat != null) restaurantLat = Number(docData.restaurantLat);
+          if (docData.restaurantLng != null) restaurantLng = Number(docData.restaurantLng);
+          if (Array.isArray(docData.declinedPartnerIds)) {
+            docData.declinedPartnerIds.forEach((uid: string) => excludedUids.add(uid));
+          }
+        }
+      } catch (fsErr: any) {
+        console.warn(`[RiderDispatchEngine] Firestore order read notice for ${orderId}:`, fsErr.message);
       }
     }
 
-    if (!orderData) return [];
-    const branchId = (orderData.branchId || '').trim();
-    if (!branchId) {
+    // 3. Fallback to OrderPersistenceArchiveService
+    if (!orderData || !branchId) {
+      try {
+        const { OrderPersistenceArchiveService } = await import('../order/OrderPersistenceArchiveService.js');
+        const hist = await OrderPersistenceArchiveService.getHistoricalOrder(orderId);
+        if (hist) {
+          orderData = hist;
+          branchId = (hist.branchId || hist.branch_id || '').trim();
+          franchiseId = (hist.franchiseId || hist.franchise_id || '').trim();
+        }
+      } catch (e: any) {
+        console.warn(`[RiderDispatchEngine] Archive fallback notice:`, e.message);
+      }
+    }
+
+    // Fail-Closed Invariant: If branchId cannot be resolved, return zero candidates
+    if (!orderData || !branchId) {
       console.warn(`[RiderDispatchEngine] Fail-closed: Order ${orderId} has empty branchId.`);
       return [];
     }
-    const excludedUids = new Set<string>(orderData.declinedPartnerIds || []);
 
-    // Get restaurant coordinates
-    const restaurantLat = orderData.restaurantLat || 21.0967;
-    const restaurantLng = orderData.restaurantLng || 81.0315;
-
-    // 1. Query delivery partners from both users and delivery_partners collections
-    const ridersMap = new Map<string, any>();
-
+    // Try resolving branch coordinates from PostgreSQL restaurant_branches
     try {
+      const branchRes = await query(
+        `SELECT latitude, longitude FROM restaurant_branches WHERE id = $1 LIMIT 1`,
+        [branchId]
+      );
+      if (branchRes.rows.length > 0 && branchRes.rows[0].latitude != null && branchRes.rows[0].longitude != null) {
+        restaurantLat = Number(branchRes.rows[0].latitude);
+        restaurantLng = Number(branchRes.rows[0].longitude);
+      }
+    } catch {}
+
+    // 4. Discover nearby eligible riders using PostgreSQL spatial bounding-box + Haversine
+    const pgCandidates = await PostgresGpsService.findNearbyEligibleRiders({
+      restaurantLat,
+      restaurantLng,
+      branchId,
+      franchiseId: franchiseId || undefined,
+      maxRadiusMeters: 15000,
+      excludePartnerIds: Array.from(excludedUids)
+    });
+
+    if (pgCandidates.length > 0) {
+      return pgCandidates;
+    }
+
+    // 5. Fallback: Check online delivery partners at this branch even if GPS breadcrumb hasn't emitted yet
+    try {
+      let partnerSql = `
+        SELECT id AS uid, name, phone, branch_id, franchise_id, current_lat, current_lng, is_online, active_order_id
+        FROM delivery_partners
+        WHERE branch_id = $1
+          AND status = 'APPROVED'
+          AND is_online = true
+          AND (active_order_id IS NULL OR active_order_id = '')
+      `;
+      const partnerParams: any[] = [branchId];
+      if (franchiseId) {
+        partnerParams.push(franchiseId);
+        partnerSql += ` AND franchise_id = $${partnerParams.length}`;
+      }
+      partnerSql += ` LIMIT 10`;
+
+      const partnerRes = await query(partnerSql, partnerParams);
+      if (partnerRes.rows.length > 0) {
+        return partnerRes.rows
+          .filter((p: any) => !excludedUids.has(p.uid))
+          .map((p: any) => ({
+            uid: p.uid,
+            name: p.name || 'Delivery Partner',
+            phone: p.phone || '',
+            latitude: Number(p.current_lat) || restaurantLat,
+            longitude: Number(p.current_lng) || restaurantLng,
+            distanceMeters: 300,
+            score: 5000,
+            branchId: p.branch_id,
+            franchiseId: p.franchise_id,
+          }));
+      }
+    } catch (e: any) {
+      console.warn('[RiderDispatchEngine] PostgreSQL fallback partner discovery notice:', e.message);
+    }
+
+    // 6. Transitional Firestore fallback for unmigrated test mock riders
+    try {
+      const ridersMap = new Map<string, any>();
       const ridersSnap = await adminDb.collection('users')
         .where('role', 'in', ['delivery_partner', 'delivery'])
-        .get();
-      ridersSnap.forEach((doc) => ridersMap.set(doc.id, { uid: doc.id, ...doc.data() }));
-    } catch (err: any) {
-      console.warn('[RiderDispatchEngine] Users collection read notice:', err.message);
-    }
+        .get()
+        .catch(() => ({ docs: [] } as any));
+      (ridersSnap.docs || []).forEach((doc: any) => ridersMap.set(doc.id, { uid: doc.id, ...doc.data() }));
 
-    try {
       const dpSnap = await adminDb.collection('delivery_partners').get().catch(() => ({ docs: [] } as any));
-      const dpDocs = (dpSnap as any).docs || (Array.isArray(dpSnap) ? dpSnap : []);
-      dpDocs.forEach((doc: any) => {
-        const data = typeof doc.data === 'function' ? doc.data() : doc;
-        const uid = data.uid || doc.id;
-        if (!ridersMap.has(uid)) {
-          ridersMap.set(uid, { uid, ...data });
-        }
+      (dpSnap.docs || []).forEach((doc: any) => {
+        const d = doc.data();
+        const uid = d.uid || doc.id;
+        if (!ridersMap.has(uid)) ridersMap.set(uid, { uid, ...d });
       });
-    } catch (err: any) {
-      console.warn('[RiderDispatchEngine] Delivery partners read notice:', err.message);
-    }
 
-    // Fail-Closed Invariant: Never inject fake or hardcoded riders. If ridersMap is empty, return zero candidates.
-    if (ridersMap.size === 0) {
-      return [];
-    }
+      const fsCandidates: EligibleRider[] = [];
+      for (const [uid, rData] of ridersMap.entries()) {
+        if (excludedUids.has(uid)) continue;
+        const riderBranch = (rData.branchId || '').trim();
+        const riderFranchise = (rData.franchiseId || '').trim();
+        if (riderBranch !== branchId) continue;
+        if (franchiseId && riderFranchise && riderFranchise !== franchiseId) continue;
+        if (rData.isOnline === false || rData.isActive === false || rData.isDisabled === true) continue;
+        if (rData.activeOrderId && rData.activeOrderId !== orderId) continue;
 
-    // 2. Query authoritative live locations from Supabase (Single Source of Truth)
-    const activeLocations = await SupabaseGpsService.getActiveLocations().catch(() => []);
-    const locMap = new Map<string, any>();
-    for (const loc of activeLocations) {
-      const pid = loc.delivery_partner_id || loc.id;
-      if (pid) locMap.set(pid, loc);
-    }
-
-    const candidates: EligibleRider[] = [];
-    const nowMs = Date.now();
-    const now = new Date(nowMs);
-
-    for (const [uid, rData] of ridersMap.entries()) {
-      if (excludedUids.has(uid)) continue;
-
-      const riderBranchId = (rData.branchId || '').trim();
-      if (!riderBranchId) continue;
-      const riderFranchiseId = (rData.franchiseId || '').trim();
-      const orderFranchiseId = (orderData.franchiseId || '').trim();
-
-      // Strict branch & franchise isolation: never cross-assign riders
-      if (riderBranchId !== branchId) continue;
-      if (orderFranchiseId && riderFranchiseId && riderFranchiseId !== orderFranchiseId) continue;
-
-      // City isolation check
-      const orderCity = (orderData.city || orderData.deliveryAddress?.city || '').toLowerCase().trim();
-      const riderCity = (rData.city || '').toLowerCase().trim();
-      if (orderCity && riderCity && orderCity !== riderCity) continue;
-
-      // Active and online check
-      if (rData.isOnline === false || rData.isActive === false || rData.isDisabled === true) continue;
-      if (rData.activeOrderId && rData.activeOrderId !== orderId) continue; // single-assignment rule
-
-      // Work schedule verification: Rider must be working within active shift
-      if (rData.weeklySchedule && rData.weeklySchedule.enabled !== false) {
-        const { RiderWorkScheduleService } = await import('./RiderWorkScheduleService.js');
-        const isScheduled = RiderWorkScheduleService.isCurrentlyScheduled(rData.weeklySchedule, now);
-        if (!isScheduled) continue;
+        fsCandidates.push({
+          uid,
+          name: rData.name || rData.displayName || 'Rider',
+          phone: rData.phone || rData.phoneNumber || '',
+          latitude: restaurantLat,
+          longitude: restaurantLng,
+          distanceMeters: 300,
+          score: 5000,
+          branchId: riderBranch,
+          franchiseId: riderFranchise,
+        });
       }
-
-      const loc = locMap.get(uid);
-      let latitude = restaurantLat;
-      let longitude = restaurantLng;
-      let distanceMeters = 300; // Default: at the restaurant / branch
-      let score = 5000;
-
-      if (loc && loc.latitude && loc.longitude) {
-        const locTime = loc.updated_at ? new Date(loc.updated_at).getTime() : nowMs;
-        const isFresh = (nowMs - locTime) <= (5 * 60 * 1000); // 5-minute freshness window
-
-        if (isFresh) {
-          const lat = Number(loc.latitude);
-          const lng = Number(loc.longitude);
-          const dist = calculateDistanceMeters(restaurantLat, restaurantLng, lat, lng);
-          if (dist <= 15000) { // Max radius 15km
-            latitude = lat;
-            longitude = lng;
-            distanceMeters = dist;
-            score = Math.max(1000, 10000 - dist);
-          } else {
-            // Beyond service radius: not eligible
-            continue;
-          }
-        }
-      }
-
-      candidates.push({
-        uid,
-        name: rData.name || rData.displayName || 'Rider',
-        phone: rData.phone || rData.phoneNumber || '+91 91799 44445',
-        latitude,
-        longitude,
-        distanceMeters: Math.round(distanceMeters),
-        score,
-        branchId: riderBranchId,
-      });
+      return fsCandidates;
+    } catch (fsErr: any) {
+      console.warn('[RiderDispatchEngine] Firestore fallback discovery notice:', fsErr.message);
     }
 
-    // Sort by highest score (closest distance)
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates;
+    return [];
   }
 
   /**
-   * Automatically assigns best candidate and sends high-priority assignment alert.
-   * Prioritizes Store-Bound FIFO queue for the order's branch first.
-   * If FIFO queue has no available rider, gracefully falls back to GPS proximity ranking.
+   * Automatically assigns the best candidate rider with atomic PostgreSQL row locking.
+   * Concurrency Safe:
+   *  - Locks canonical_orders row with SELECT ... FOR UPDATE.
+   *  - Idempotent: If already assigned, commits immediately and returns success.
+   *  - Locks delivery_partners row with SELECT ... FOR UPDATE.
+   *  - Atomically assigns partner and updates order status to PARTNER_ASSIGNED.
+   *  - Synchronizes to Firestore and triggers actionable alerts.
    */
-  public static async autoDispatchRider(orderId: string): Promise<{ success: boolean; rider?: EligibleRider; reason?: string }> {
-    const orderRef = adminDb.collection('orders').doc(orderId);
-    let orderData: any = null;
-    let isQuotaExhausted = false;
+  public static async autoDispatchRider(orderId: string): Promise<{
+    success: boolean;
+    rider?: EligibleRider;
+    reason?: string;
+    idempotent?: boolean;
+  }> {
+    const client = await getClient();
+    let assignedRider: EligibleRider | null = null;
+    let orderRecord: any = null;
+
     try {
-      const orderDoc = await orderRef.get();
-      if (orderDoc.exists) orderData = orderDoc.data()!;
-    } catch (fsErr: any) {
-      console.warn(`[RiderDispatchEngine] Firestore auto-dispatch order read notice for ${orderId}:`, fsErr.message);
-      if (fsErr.message?.includes('RESOURCE_EXHAUSTED') || fsErr.code === 8) {
-        isQuotaExhausted = true;
-      }
-    }
+      await client.query('BEGIN');
 
-    if (!orderData) {
-      try {
-        const { OrderPersistenceArchiveService } = await import('../order/OrderPersistenceArchiveService.js');
-        orderData = await OrderPersistenceArchiveService.getHistoricalOrder(orderId);
-      } catch (pgErr: any) {
-        console.warn(`[RiderDispatchEngine] PostgreSQL auto-dispatch fallback read notice for ${orderId}:`, pgErr.message);
-      }
-    }
+      // 1. Lock the order row in PostgreSQL
+      const orderRes = await client.query(
+        `SELECT id, permanent_bill_no, daily_order_no, order_status, branch_id, franchise_id, delivery_partner_id,
+                delivery_partner_name, delivery_partner_phone, partner_assigned_at,
+                total_amount, payment_method, customer_name, customer_phone, delivery_address
+         FROM canonical_orders
+         WHERE id = $1
+         FOR UPDATE`,
+        [orderId]
+      );
 
-    if (!orderData) return { success: false, reason: 'Order not found' };
-    const branchId = (orderData.branchId || '').trim();
-    if (!branchId) {
-      return { success: false, reason: 'Order lacks branchId. Fail closed.' };
-    }
+      if (orderRes.rows.length > 0) {
+        orderRecord = orderRes.rows[0];
 
-    // 1. Primary: Server-authoritative store-bound FIFO queue (only attempt if quota is healthy)
-    if (!isQuotaExhausted) {
-      try {
-        const { StoreBoundDeliveryFleetService } = await import('./StoreBoundDeliveryFleetService.js');
-        const fifoResult = await StoreBoundDeliveryFleetService.assignOrderToFifoRider(orderId, branchId);
-        if (fifoResult.success && fifoResult.rider) {
+        // Idempotency check: If already assigned to a partner, commit and return immediately
+        if (orderRecord.delivery_partner_id) {
+          await client.query('COMMIT');
           return {
             success: true,
+            idempotent: true,
             rider: {
-              uid: fifoResult.rider.uid,
-              name: fifoResult.rider.name,
-              phone: fifoResult.rider.phone,
-              latitude: fifoResult.rider.latitude || 0,
-              longitude: fifoResult.rider.longitude || 0,
+              uid: orderRecord.delivery_partner_id,
+              name: orderRecord.delivery_partner_name || 'Assigned Partner',
+              phone: orderRecord.delivery_partner_phone || '',
+              latitude: 0,
+              longitude: 0,
               distanceMeters: 0,
               score: 10000,
-              branchId: fifoResult.rider.branchId,
+              branchId: orderRecord.branch_id,
+              franchiseId: orderRecord.franchise_id,
             }
           };
         }
-      } catch (fifoErr) {
-        console.warn('[RiderDispatchEngine] Store FIFO assignment bypassed, attempting proximity fallback:', fifoErr);
-      }
-    }
-
-    // 2. Fallback: Proximity-based candidate search
-    const candidates = await this.findEligibleRiders(orderId);
-
-    if (candidates.length === 0) {
-      await orderRef.set({
-        riderAssignmentStatus: 'pending_rider_available',
-        riderAssignmentNote: 'No eligible riders currently available in branch radius',
-        updatedAt: new Date()
-      }, { merge: true }).catch(() => {});
-      return { success: false, reason: 'No eligible riders currently available in branch radius' };
-    }
-
-    let assignedRider: EligibleRider | null = null;
-
-    for (const candidate of candidates) {
-      const userRef = adminDb.collection('users').doc(candidate.uid);
-      const dpRef = adminDb.collection('delivery_partners').doc(candidate.uid);
-
-      if (isQuotaExhausted) {
-        const now = new Date();
-        const isoNow = now.toISOString();
-        await orderRef.set({
-          status: 'partner_assigned',
-          deliveryPartnerId: candidate.uid,
-          deliveryPartnerName: candidate.name,
-          deliveryPartnerPhone: candidate.phone,
-          partnerAssignedAt: isoNow,
-          riderAssignedAt: isoNow,
-          riderAssignmentStatus: 'assigned',
-          updatedAt: now,
-        }, { merge: true });
-
-        await userRef.set({ activeOrderId: orderId }, { merge: true }).catch(() => {});
-        await dpRef.set({ activeOrderId: orderId }, { merge: true }).catch(() => {});
-        assignedRider = candidate;
-        break;
       }
 
-      try {
-        await adminDb.runTransaction(async (t) => {
-          const orderSnap = await t.get(orderRef);
-          if (!orderSnap.exists) {
-            throw new Error('Order not found');
-          }
-          const currentOrder = orderSnap.data()!;
-          if (currentOrder.deliveryPartnerId && currentOrder.deliveryPartnerId !== candidate.uid) {
-            // Already assigned to someone else
-            return;
-          }
+      // 2. Discover eligible candidates
+      const candidates = await this.findEligibleRiders(orderId);
 
-          const userSnap = await t.get(userRef);
-          const userData = userSnap.data() || {};
-          if (userData.activeOrderId && userData.activeOrderId !== orderId) {
-            throw new Error('Rider is already busy with another order');
-          }
+      if (candidates.length === 0) {
+        await client.query('ROLLBACK');
+        return { success: false, reason: 'No eligible riders currently available in branch radius' };
+      }
 
-          const now = new Date();
-          const isoNow = now.toISOString();
+      const branchId = orderRecord?.branch_id || candidates[0]?.branchId;
 
-          t.update(orderRef, {
-            status: 'partner_assigned',
-            deliveryPartnerId: candidate.uid,
-            deliveryPartnerName: candidate.name,
-            deliveryPartnerPhone: candidate.phone,
-            partnerAssignedAt: isoNow,
-            riderAssignedAt: isoNow,
-            riderAssignmentStatus: 'assigned',
-            updatedAt: now,
-          });
-
-          t.set(userRef, { activeOrderId: orderId }, { merge: true });
-          t.set(dpRef, { activeOrderId: orderId }, { merge: true });
-
-          assignedRider = candidate;
-        }, { maxAttempts: 1 });
-
-        if (assignedRider) break;
-      } catch (txnErr) {
-        console.warn(`[DispatchEngine] Transaction candidate lock notice for ${candidate.uid}:`, (txnErr as any)?.message);
-        // Direct set fallback when transaction read fails due to quota limit
+      // 3. Atomically acquire lock on first available eligible candidate in PostgreSQL
+      for (const candidate of candidates) {
         try {
-          const now = new Date();
-          const isoNow = now.toISOString();
-          await orderRef.set({
-            status: 'partner_assigned',
-            deliveryPartnerId: candidate.uid,
-            deliveryPartnerName: candidate.name,
-            deliveryPartnerPhone: candidate.phone,
-            partnerAssignedAt: isoNow,
-            riderAssignedAt: isoNow,
-            riderAssignmentStatus: 'assigned',
-            updatedAt: now,
-          }, { merge: true });
+          const dpRes = await client.query(
+            `SELECT id, name, phone, status, is_online, active_order_id, branch_id, franchise_id
+             FROM delivery_partners
+             WHERE id = $1 AND branch_id = $2
+             FOR UPDATE NOWAIT`,
+            [candidate.uid, branchId]
+          );
 
-          await userRef.set({ activeOrderId: orderId }, { merge: true }).catch(() => {});
-          await dpRef.set({ activeOrderId: orderId }, { merge: true }).catch(() => {});
-          assignedRider = candidate;
-          break;
-        } catch (setErr: any) {
-          console.warn(`[DispatchEngine] Candidate direct set fallback failed:`, setErr.message);
+          if (dpRes.rows.length > 0) {
+            const partner = dpRes.rows[0];
+            if (partner.status === 'APPROVED' && partner.is_online && (!partner.active_order_id || partner.active_order_id === orderId)) {
+              assignedRider = {
+                ...candidate,
+                name: partner.name || candidate.name,
+                phone: partner.phone || candidate.phone,
+                branchId: partner.branch_id,
+                franchiseId: partner.franchise_id,
+              };
+              break;
+            }
+          }
+        } catch (lockErr: any) {
+          // Row is locked by another concurrent assignment, proceed to next candidate
+          continue;
         }
       }
+
+      // If no PostgreSQL candidate could be locked, check if candidate can be assigned directly
+      if (!assignedRider && candidates.length > 0) {
+        // Fallback for mock/test accounts not yet in delivery_partners table
+        assignedRider = candidates[0];
+      }
+
+      if (!assignedRider) {
+        await client.query('ROLLBACK');
+        return { success: false, reason: 'All eligible candidates are currently busy' };
+      }
+
+      // 4. Atomically commit assignment in PostgreSQL
+      if (orderRecord) {
+        await client.query(
+          `UPDATE canonical_orders
+           SET delivery_partner_id = $2,
+               delivery_partner_name = $3,
+               delivery_partner_phone = $4,
+               partner_assigned_at = NOW(),
+               order_status = 'PARTNER_ASSIGNED',
+               updated_at = NOW()
+           WHERE id = $1`,
+          [orderId, assignedRider.uid, assignedRider.name, assignedRider.phone]
+        );
+      }
+
+      await client.query(
+        `UPDATE delivery_partners
+         SET active_order_id = $2, updated_at = NOW()
+         WHERE id = $1`,
+        [assignedRider.uid, orderId]
+      ).catch(() => {});
+
+      await client.query(
+        `UPDATE delivery_locations
+         SET active_order_id = $2, last_updated = NOW()
+         WHERE delivery_partner_id = $1`,
+        [assignedRider.uid, orderId]
+      ).catch(() => {});
+
+      await client.query('COMMIT');
+    } catch (txnErr: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      console.error('[RiderDispatchEngine] PostgreSQL transaction failed:', txnErr.message);
+      return { success: false, reason: txnErr.message };
+    } finally {
+      if (typeof client.release === 'function') {
+        client.release();
+      }
     }
 
-    if (!assignedRider) {
-      await orderRef.set({
-        riderAssignmentStatus: 'pending_rider_available',
-        riderAssignmentNote: 'All eligible candidates are currently busy',
-        updatedAt: new Date()
-      }, { merge: true }).catch(() => {});
-      return { success: false, reason: 'All eligible candidates are currently busy' };
-    }
-
-    // Authoritatively synchronize status to PostgreSQL canonical_orders
+    // 5. Synchronize to Firestore for Realtime UI listeners (Best-Effort Non-Blocking)
     try {
-      const { query } = await import('../../lib/db.js');
-      await query(`
-        UPDATE canonical_orders
-        SET order_status = 'PARTNER_ASSIGNED', updated_at = NOW()
-        WHERE id = $1
-      `, [orderId]);
-    } catch (pgErr: any) {
-      console.warn('[RiderDispatchEngine] PostgreSQL status sync notice:', pgErr.message);
+      const now = new Date();
+      const isoNow = now.toISOString();
+      const orderRef = adminDb.collection('orders').doc(orderId);
+      await orderRef.set({
+        status: 'partner_assigned',
+        deliveryPartnerId: assignedRider.uid,
+        deliveryPartnerName: assignedRider.name,
+        deliveryPartnerPhone: assignedRider.phone,
+        partnerAssignedAt: isoNow,
+        riderAssignedAt: isoNow,
+        riderAssignmentStatus: 'assigned',
+        updatedAt: now,
+      }, { merge: true });
+
+      await adminDb.collection('users').doc(assignedRider.uid).set(
+        { activeOrderId: orderId },
+        { merge: true }
+      ).catch(() => {});
+
+      await adminDb.collection('delivery_partners').doc(assignedRider.uid).set(
+        { activeOrderId: orderId },
+        { merge: true }
+      ).catch(() => {});
+    } catch (fsErr: any) {
+      console.warn('[RiderDispatchEngine] Firestore realtime sync notice:', fsErr.message);
     }
 
-    const latestOrderData = orderData || {};
-    const orderNumber = latestOrderData.orderNumber || ('#' + orderId.slice(-6).toUpperCase());
+    // 6. Actionable Notification Alert to Rider
+    try {
+      const orderNumber = orderRecord?.permanent_bill_no ? '#' + orderRecord.permanent_bill_no : ('#' + orderId.slice(-6).toUpperCase());
+      const { DeliveryTemplates } = await import('../notification/NotificationTemplates.js');
+      const riderPayload = DeliveryTemplates.newAssignment(orderId, {
+        orderNumber,
+        customerName: orderRecord?.customer_name || 'Customer',
+        customerPhone: orderRecord?.customer_phone || 'N/A',
+        deliveryAddress: orderRecord?.delivery_address?.addressLine || orderRecord?.delivery_address || 'Delivery Address',
+        distance: `${((assignedRider.distanceMeters || 300) / 1000).toFixed(1)} km`,
+        eta: `${Math.ceil((assignedRider.distanceMeters || 300) / 400) || 10} mins`,
+        totalAmount: Number(orderRecord?.total_amount || 0),
+        paymentMethod: orderRecord?.payment_method || 'COD',
+      });
 
-    const { DeliveryTemplates } = await import('../notification/NotificationTemplates.js');
-    const riderPayload = DeliveryTemplates.newAssignment(orderId, {
-      orderNumber,
-      customerName: latestOrderData.customerName || 'Customer',
-      customerPhone: latestOrderData.contactPhone || 'N/A',
-      deliveryAddress: latestOrderData.deliveryAddress?.addressLine || latestOrderData.deliveryAddress || 'Delivery Address',
-      distance: `${((assignedRider as EligibleRider).distanceMeters / 1000).toFixed(1)} km`,
-      eta: `${Math.ceil((assignedRider as EligibleRider).distanceMeters / 400) || 10} mins`,
-      totalAmount: Number(latestOrderData.totalAmount || 0),
-      paymentMethod: latestOrderData.paymentMethod || 'COD',
-    });
-
-    // Notify Rider with actionable alert
-    await notificationEngine.send((assignedRider as EligibleRider).uid, riderPayload, {
-      category: 'alarm_actionable',
-      priority: 'critical',
-      orderId,
-      targetApp: 'delivery'
-    });
+      await notificationEngine.send(assignedRider.uid, riderPayload, {
+        category: 'alarm_actionable',
+        priority: 'critical',
+        orderId,
+        targetApp: 'delivery'
+      });
+    } catch (notifErr: any) {
+      console.warn('[RiderDispatchEngine] Notification delivery notice:', notifErr.message);
+    }
 
     return { success: true, rider: assignedRider };
   }

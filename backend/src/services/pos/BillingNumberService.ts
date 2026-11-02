@@ -62,7 +62,11 @@ export class BillingNumberService {
    * - Standard PostgreSQL sequence semantics apply: gaps may legally occur if a transaction
    *   aborts or after unclean shutdown, preventing serialization bottlenecks.
    */
-  public static async allocateNumbers(date: Date = new Date()): Promise<AllocatedBillNumbers> {
+  public static async allocateNumbers(
+    date: Date = new Date(),
+    franchiseId: string = 'fra_primary',
+    branchId: string = 'main_branch'
+  ): Promise<AllocatedBillNumbers> {
     const orderDate = this.getLocalDateString(date);
     const orderTime = this.getLocalTimeString(date);
 
@@ -72,8 +76,8 @@ export class BillingNumberService {
       const permanentBillNo = parseInt(seqRes.rows[0].bill_no, 10);
 
       const dailyRes = await client.query(
-        `SELECT get_next_daily_order_number($1::date) AS daily_no;`,
-        [orderDate]
+        `SELECT get_next_daily_order_number($1::date, $2::varchar, $3::varchar) AS daily_no;`,
+        [orderDate, franchiseId || 'fra_primary', branchId || 'main_branch']
       );
       const dailyOrderNo = parseInt(dailyRes.rows[0].daily_no, 10);
 

@@ -18,7 +18,7 @@ const ALLOWED_ROLES = [
 
 const requireKitchenAccess = (req: AuthRequest, res: Response, next: Function) => {
   const role = req.user?.role || '';
-  if (!ALLOWED_ROLES.includes(role) && !['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'].includes(req.user?.email?.toLowerCase() || '')) {
+  if (!ALLOWED_ROLES.includes(role)) {
     res.status(403).json({ success: false, error: 'Forbidden: Insufficient permissions for Kitchen Management' });
     return;
   }
@@ -27,7 +27,7 @@ const requireKitchenAccess = (req: AuthRequest, res: Response, next: Function) =
 
 function resolveKitchenScope(req: AuthRequest): { branchId: string; franchiseId?: string } | { error: string; status: number } {
   const role = req.user?.role || '';
-  const isGlobal = ['owner', 'admin', 'developer'].includes(role) || ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'].includes(req.user?.email?.toLowerCase() || '');
+  const isGlobal = ['platform_owner', 'owner', 'admin'].includes(role);
   
   if (isGlobal) {
     const branchId = (req.query.branchId as string) || req.body?.branchId;

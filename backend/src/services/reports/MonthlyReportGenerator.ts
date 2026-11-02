@@ -1,3 +1,4 @@
+import { FirebaseStorageReportService } from '../storage/FirebaseStorageReportService.js';
 import { CloudflareReportService, MonthlyReportMetadata } from './CloudflareReportService.js';
 import { sendEmailDirect } from '../email.service.js';
 import { adminDb as db } from '../../config/firebase.js';
@@ -154,11 +155,43 @@ export class MonthlyReportGenerator {
       avgDeliveryMins: 25
     };
     const pdfBuffer = await this.createPdfReportBuffer(targetMonth, targetYear, metrics);
-    let uploadResult: { cloudflarePath: string; publicUrl?: string; sizeFormatted: string } = { cloudflarePath: 'reports/' + targetYear + '/' + reportKey + '.pdf', publicUrl: 'https://reports.olivepizza.in/monthly/' + reportKey + '.pdf', sizeFormatted: '45.2 KB' };
+    let uploadResult: { cloudflarePath: string; publicUrl?: string; sizeFormatted: string } = {
+      cloudflarePath: 'reports/' + targetYear + '/' + reportKey + '.pdf',
+      publicUrl: 'https://reports.olivepizza.in/monthly/' + reportKey + '.pdf',
+      sizeFormatted: '45.2 KB'
+    };
+
+    // 1. Authoritative Primary Storage: Upload to Firebase Storage
     try {
-      uploadResult = await CloudflareReportService.uploadPdfReport(targetYear, targetMonth, pdfBuffer);
-    } catch (err: any) {
-      console.warn('[MonthlyReportGenerator] R2 upload notice:', err.message);
+      const fbResult = await FirebaseStorageReportService.uploadReportBuffer({
+        reportType: 'MONTHLY_PDF',
+        extension: 'pdf',
+        contentType: 'application/pdf',
+        periodLabel: `${targetMonth}_${targetYear}`,
+        franchiseId: franchiseId || 'fra_rajnandgaon',
+        branchId: branchId || 'main_branch',
+        startDate: `${targetYear}-${targetMonth}-01`,
+        endDate: `${targetYear}-${targetMonth}-31`,
+        buffer: pdfBuffer,
+        generatedByUid: 'system_cron'
+      });
+      uploadResult.cloudflarePath = fbResult.filePath;
+      uploadResult.sizeFormatted = `${(fbResult.sizeBytes / 1024).toFixed(1)} KB`;
+      try {
+        const signed = await FirebaseStorageReportService.getSignedDownloadUrl(fbResult.reportId, {
+          role: 'platform_owner',
+          email: 'olivepizzarjn@gmail.com'
+        });
+        uploadResult.publicUrl = signed.downloadUrl;
+      } catch {}
+    } catch (fbErr: any) {
+      console.warn('[MonthlyReportGenerator] Firebase Storage upload notice:', fbErr.message);
+      // 2. Legacy fallback for historical backward-compatibility
+      try {
+        uploadResult = await CloudflareReportService.uploadPdfReport(targetYear, targetMonth, pdfBuffer);
+      } catch (err: any) {
+        console.warn('[MonthlyReportGenerator] Legacy R2 upload notice:', err.message);
+      }
     }
     const reportDoc: MonthlyReportMetadata = {
       id: reportKey,

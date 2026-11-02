@@ -114,17 +114,45 @@ export class CanonicalOrderService {
       }
     }
 
+    const requestFingerprint = (params as any).requestFingerprint || crypto.createHash('sha256').update(JSON.stringify({
+      id: orderId,
+      customerPhone: params.customerPhone,
+      totalAmount: params.totalAmount,
+      items: (params.items || []).map((it: any) => ({
+        id: it.menuItemId || it.id,
+        quantity: it.quantity,
+        price: it.price
+      }))
+    })).digest('hex');
+
     // 0. Idempotent check: if order with this ID already exists in canonical PostgreSQL ledger, return existing details
     if (params.id) {
       try {
         const existing = await query(
-          `SELECT id, permanent_bill_no, daily_order_no, order_date, order_time, total_amount, payment_status, order_status 
+          `SELECT id, permanent_bill_no, daily_order_no, order_date, order_time, total_amount, payment_status, order_status, request_fingerprint 
            FROM canonical_orders 
            WHERE id = $1 LIMIT 1`,
           [orderId]
         );
         if (existing.rows.length > 0) {
           const row = existing.rows[0];
+          const existingFingerprint = row.request_fingerprint;
+          const existingTotal = Number(row.total_amount);
+          const incomingTotal = Number(params.totalAmount);
+
+          if (existingFingerprint) {
+            if (existingFingerprint !== requestFingerprint) {
+              const conflictErr: any = new Error(`[CanonicalOrderService] Idempotency conflict: Order ${orderId} was previously committed with a different request fingerprint.`);
+              conflictErr.code = 'IDEMPOTENCY_CONFLICT';
+              conflictErr.statusCode = 409;
+              throw conflictErr;
+            }
+          } else if (incomingTotal > 0 && Math.abs(incomingTotal - existingTotal) > 0.05) {
+            const conflictErr: any = new Error(`[CanonicalOrderService] Idempotency conflict: Order ${orderId} was previously committed with total ${existingTotal}, but received conflicting payload with total ${incomingTotal}.`);
+            conflictErr.code = 'IDEMPOTENCY_CONFLICT';
+            conflictErr.statusCode = 409;
+            throw conflictErr;
+          }
           console.log(`[CanonicalOrderService] Idempotent retry detected for existing order ${orderId} (Bill: #${row.permanent_bill_no}). Returning existing record.`);
           return {
             id: row.id,
@@ -139,12 +167,19 @@ export class CanonicalOrderService {
           };
         }
       } catch (checkErr: any) {
+        if (checkErr.code === 'IDEMPOTENCY_CONFLICT' || checkErr.statusCode === 409) {
+          throw checkErr;
+        }
         console.warn(`[CanonicalOrderService] Idempotency pre-check notice for ${orderId}:`, checkErr.message);
       }
     }
 
-    // 1. Allocate continuous Permanent Bill No. and Daily Order No.
-    const nums = await BillingNumberService.allocateNumbers();
+    // 1. Allocate continuous Permanent Bill No. and Daily Order No. scoped to franchise and branch
+    const nums = await BillingNumberService.allocateNumbers(
+      new Date(),
+      params.franchiseId || 'fra_primary',
+      params.branchId || 'main_branch'
+    );
     const { permanentBillNo, dailyOrderNo, orderDate, orderTime } = nums;
 
     // 1.1 Process and verify line items authoritatively from catalog
@@ -273,18 +308,19 @@ export class CanonicalOrderService {
             customer_name, customer_phone, delivery_address, table_number,
             subtotal, discount_amount, coupon_code, tax_amount, cgst, sgst,
             delivery_fee, total_amount, franchise_id, branch_id, cashier_id,
-            cashier_name, terminal_id, notes
+            cashier_name, terminal_id, notes, request_fingerprint
           ) VALUES (
             $1, $2, $3, $4::date, $5::time,
             $6, $7, $8, $9, $10,
             $11, $12, $13, $14,
             $15, $16, $17, $18, $19, $20,
             $21, $22, $23, $24, $25,
-            $26, $27, $28
+            $26, $27, $28, $29
           ) ON CONFLICT (id) DO UPDATE SET
             order_status = EXCLUDED.order_status,
             payment_status = EXCLUDED.payment_status,
             total_amount = EXCLUDED.total_amount,
+            request_fingerprint = EXCLUDED.request_fingerprint,
             updated_at = NOW();
         `, [
           orderId, permanentBillNo, dailyOrderNo, orderDate, orderTime,
@@ -293,7 +329,7 @@ export class CanonicalOrderService {
           params.deliveryAddress || null, params.tableNumber || null,
           subtotal, discountAmount, params.couponCode || null, taxAmount, cgst, sgst,
           deliveryFee, totalAmount, franchiseId, branchId, params.cashierId || null,
-          cashierName, params.terminalId || 'POS-TERM-01', params.notes || ''
+          cashierName, params.terminalId || 'POS-TERM-01', params.notes || '', requestFingerprint
         ]);
 
         // 2.2 Insert immutable line items

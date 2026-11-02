@@ -99,12 +99,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     const userIdentifier = (user.email || user.uid || '').toLowerCase().trim();
     const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || '127.0.0.1').trim();
 
-    const isOwnerAccount = userIdentifier === 'webhub2811@gmail.com' || 
-                           userIdentifier === 'olivepizzarjn@gmail.com' || 
-                           userIdentifier === 'olivepizzamaker@gmail.com' ||
-                           userIdentifier === 'samyakshrivastava28@gmail.com' ||
-                           userIdentifier === 'samyaks695@gmail.com' || 
-                           user.role === 'owner' || 
+    const isOwnerAccount = user.role === 'owner' || 
                            user.role === 'platform_owner' ||
                            (user as any)?.isOwnerMode === true ||
                            (user as any)?.isGlobalOwner === true ||

@@ -661,9 +661,18 @@ class OliveWebSocketServer {
       this.broadcastToOrder(normalizedData.orderId, broadcastMsg);
     }
 
-    // 2. Broadcast to all owner/admin clients for real-time fleet map
-    this.broadcastToRole('owner', broadcastMsg);
-    this.broadcastToRole('admin', broadcastMsg);
+    // 2. Scoped broadcast for real-time fleet map (Branch/Franchise isolation)
+    const driverFranchise = (data as any).franchiseId;
+    const driverBranch = (data as any).branchId;
+    if (driverFranchise && driverBranch) {
+      this.broadcastToBranch(driverFranchise, driverBranch, {
+        type: 'driver.location_update',
+        data: normalizedData
+      });
+    } else {
+      this.broadcastToRole('owner', broadcastMsg);
+      this.broadcastToRole('admin', broadcastMsg);
+    }
   }
 
   /**
@@ -735,11 +744,12 @@ class OliveWebSocketServer {
         const isBranchMatch = (!client.branchId || client.branchId === branchId) &&
                              (!client.franchiseId || client.franchiseId === franchiseId);
 
-        // Supervisors (Owner / Admin / Developer) get all branches
-        const isSupervisor = client.role === 'owner' || client.role === 'admin' || client.role === 'developer';
+        // Supervisors (Owner / Admin / Developer) get all branches ONLY IF they are platform-wide (no franchiseId attached)
+        const isSupervisor = (client.role === 'owner' || client.role === 'admin' || client.role === 'developer') && !client.franchiseId;
 
-        // Franchise manager gets their franchise
-        const isFranchiseManager = client.role === 'franchise_manager' && (!client.franchiseId || client.franchiseId === franchiseId);
+        // Franchise manager or franchise owner gets their franchise
+        const isFranchiseManager = (client.role === 'franchise_manager' || client.role === 'franchise_owner' || client.role === 'owner') && 
+                                   client.franchiseId === franchiseId;
 
         if (isBranchMatch || isSupervisor || isFranchiseManager) {
           client.lastSeenSeq = ringEvent.seq;

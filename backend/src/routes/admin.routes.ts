@@ -567,59 +567,106 @@ router.post('/accounts/approve', async (req: AuthRequest, res: Response) => {
       updatePayload.permissions = existingData.permissions;
     }
 
-    // 1. Update users collection
-    if (uid) {
-      await adminDb.collection('users').doc(uid).set(updatePayload, { merge: true });
-    } else if (cleanEmail) {
-      const q = await adminDb.collection('users').where('email', '==', cleanEmail).limit(1).get();
-      if (!q.empty) {
-        await q.docs[0].ref.set(updatePayload, { merge: true });
+    // 1. Authoritative PostgreSQL Database Commit FIRST
+    const targetUid = uid || existingDoc?.id || `staff_${Date.now()}`;
+    const targetEmail = cleanEmail || existingData.email || null;
+    const targetPhone = existingData.phone || existingData.phoneNumber || null;
+    const targetName = existingData.name || existingData.displayName || existingData.cashierName || 'Olive Pizza Staff';
+
+    try {
+      const { query } = await import('../lib/db.js');
+      await query(
+        `INSERT INTO app_users (id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active, updated_at)
+         VALUES ($1, $2, $3, $4, $5, 'APPROVED', $6, $7, $8::jsonb, true, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           email = COALESCE(EXCLUDED.email, app_users.email),
+           phone = COALESCE(EXCLUDED.phone, app_users.phone),
+           name = COALESCE(EXCLUDED.name, app_users.name),
+           role = EXCLUDED.role,
+           status = 'APPROVED',
+           franchise_id = EXCLUDED.franchise_id,
+           branch_id = EXCLUDED.branch_id,
+           allowed_apps = EXCLUDED.allowed_apps,
+           is_active = true,
+           updated_at = NOW()`,
+        [targetUid, targetEmail, targetPhone, targetName, resolvedRole, effectiveFranchiseId, effectiveBranchId, JSON.stringify(allowedApps)]
+      );
+
+      if (resolvedApp === 'DELIVERY') {
+        await query(
+          `INSERT INTO delivery_partners (id, name, phone, email, franchise_id, branch_id, status, is_online, vehicle_number, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'APPROVED', false, $7, NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             name = COALESCE(EXCLUDED.name, delivery_partners.name),
+             phone = COALESCE(EXCLUDED.phone, delivery_partners.phone),
+             email = COALESCE(EXCLUDED.email, delivery_partners.email),
+             franchise_id = EXCLUDED.franchise_id,
+             branch_id = EXCLUDED.branch_id,
+             status = 'APPROVED',
+             vehicle_number = COALESCE(EXCLUDED.vehicle_number, delivery_partners.vehicle_number),
+             updated_at = NOW()`,
+          [targetUid, targetName, targetPhone, targetEmail, effectiveFranchiseId, effectiveBranchId, existingData.vehicleNumber || null]
+        );
       }
+    } catch (pgSyncErr: any) {
+      console.error('[AdminAccounts] Authoritative PostgreSQL sync failed on approve:', pgSyncErr.message);
+      res.status(500).json({ error: 'Failed to synchronize account to authoritative database', details: pgSyncErr.message });
+      return;
     }
 
-    // 2. Update specific operational collection
-
-    if (resolvedApp === 'RESTAURANT_MANAGER') {
-      if (uid) await adminDb.collection('restaurant_managers').doc(uid).set(updatePayload, { merge: true });
-      if (cleanEmail) {
-        const mgrSnap = await adminDb.collection('restaurant_managers').where('email', '==', cleanEmail).limit(1).get();
-        if (!mgrSnap.empty) await mgrSnap.docs[0].ref.set(updatePayload, { merge: true });
-      }
-    } else if (resolvedApp === 'POS') {
-      if (uid) await adminDb.collection('pos_accounts').doc(uid).set(updatePayload, { merge: true });
-      if (cleanEmail) {
-        const posSnap = await adminDb.collection('pos_accounts').where('email', '==', cleanEmail).limit(1).get();
-        if (!posSnap.empty) await posSnap.docs[0].ref.set(updatePayload, { merge: true });
-      }
-    } else if (resolvedApp === 'FRANCHISE_MANAGER') {
-      if (uid) await adminDb.collection('franchise_users').doc(uid).set(updatePayload, { merge: true });
-      if (cleanEmail) {
-        const fraSnap = await adminDb.collection('franchise_users').where('email', '==', cleanEmail).limit(1).get();
-        if (!fraSnap.empty) await fraSnap.docs[0].ref.set(updatePayload, { merge: true });
-      }
-    } else if (resolvedApp === 'DELIVERY') {
+    // 2. Secondary System Synchronization (Firestore & Firebase Auth Claims)
+    // Runs ONLY after authoritative PostgreSQL commit succeeds
+    let secondaryWarning: string | undefined;
+    try {
       if (uid) {
-        await adminDb.collection('delivery_partners').doc(uid).set(updatePayload, { merge: true });
-        await adminDb.collection('delivery_riders').doc(uid).set(updatePayload, { merge: true }).catch(() => {});
+        await adminDb.collection('users').doc(uid).set(updatePayload, { merge: true });
+      } else if (cleanEmail) {
+        const q = await adminDb.collection('users').where('email', '==', cleanEmail).limit(1).get();
+        if (!q.empty) {
+          await q.docs[0].ref.set(updatePayload, { merge: true });
+        }
       }
-      if (cleanEmail) {
-        const delSnap = await adminDb.collection('delivery_partners').where('email', '==', cleanEmail).limit(1).get();
-        if (!delSnap.empty) await delSnap.docs[0].ref.set(updatePayload, { merge: true });
-      }
-    }
 
-    // 3. Set custom claims if UID is available — NO HARDCODED FALLBACKS
-    if (uid && !uid.startsWith('mgr_') && !uid.startsWith('pos_')) {
-      try {
+      if (resolvedApp === 'RESTAURANT_MANAGER') {
+        if (uid) await adminDb.collection('restaurant_managers').doc(uid).set(updatePayload, { merge: true });
+        if (cleanEmail) {
+          const mgrSnap = await adminDb.collection('restaurant_managers').where('email', '==', cleanEmail).limit(1).get();
+          if (!mgrSnap.empty) await mgrSnap.docs[0].ref.set(updatePayload, { merge: true });
+        }
+      } else if (resolvedApp === 'POS') {
+        if (uid) await adminDb.collection('pos_accounts').doc(uid).set(updatePayload, { merge: true });
+        if (cleanEmail) {
+          const posSnap = await adminDb.collection('pos_accounts').where('email', '==', cleanEmail).limit(1).get();
+          if (!posSnap.empty) await posSnap.docs[0].ref.set(updatePayload, { merge: true });
+        }
+      } else if (resolvedApp === 'FRANCHISE_MANAGER') {
+        if (uid) await adminDb.collection('franchise_users').doc(uid).set(updatePayload, { merge: true });
+        if (cleanEmail) {
+          const fraSnap = await adminDb.collection('franchise_users').where('email', '==', cleanEmail).limit(1).get();
+          if (!fraSnap.empty) await fraSnap.docs[0].ref.set(updatePayload, { merge: true });
+        }
+      } else if (resolvedApp === 'DELIVERY') {
+        if (uid) {
+          await adminDb.collection('delivery_partners').doc(uid).set(updatePayload, { merge: true });
+          await adminDb.collection('delivery_riders').doc(uid).set(updatePayload, { merge: true }).catch(() => {});
+        }
+        if (cleanEmail) {
+          const delSnap = await adminDb.collection('delivery_partners').where('email', '==', cleanEmail).limit(1).get();
+          if (!delSnap.empty) await delSnap.docs[0].ref.set(updatePayload, { merge: true });
+        }
+      }
+
+      if (uid && !uid.startsWith('mgr_') && !uid.startsWith('pos_')) {
         await adminAuth.setCustomUserClaims(uid, {
           role: resolvedRole,
           branchId: effectiveBranchId,
           franchiseId: effectiveFranchiseId,
           status: 'APPROVED'
         });
-      } catch (claimsErr: any) {
-        console.warn('[AdminAccounts] Custom claims warning on approve:', claimsErr.message);
       }
+    } catch (secErr: any) {
+      console.warn('[AdminAccounts] Secondary directory sync warning:', secErr.message);
+      secondaryWarning = 'Account approved in database, but secondary directory sync was delayed: ' + secErr.message;
     }
 
     res.json({
@@ -627,7 +674,8 @@ router.post('/accounts/approve', async (req: AuthRequest, res: Response) => {
       message: `Account approved successfully as ${resolvedRole}`,
       uid,
       role: resolvedRole,
-      status: 'APPROVED'
+      status: 'APPROVED',
+      warning: secondaryWarning
     });
   } catch (error: any) {
     console.error('[AdminAccounts] Error approving account:', error);
@@ -690,6 +738,30 @@ router.post('/accounts/reject', async (req: AuthRequest, res: Response) => {
         const delSnap = await adminDb.collection('delivery_partners').where('email', '==', cleanEmail).limit(1).get();
         if (!delSnap.empty) await delSnap.docs[0].ref.set(rejectionData, { merge: true });
       }
+    }
+
+    // Synchronize rejection to PostgreSQL
+    try {
+      const { query } = await import('../lib/db.js');
+      const targetUid = uid || '';
+      await query(
+        `UPDATE app_users
+         SET status = 'REJECTED', is_active = false, updated_at = NOW()
+         WHERE (id = $1 AND $1 <> '') OR (email IS NOT NULL AND LOWER(email) = LOWER($2))`,
+        [targetUid, cleanEmail]
+      );
+      if (targetApp === 'DELIVERY' || !targetApp) {
+        await query(
+          `UPDATE delivery_partners
+           SET status = 'REJECTED', is_online = false, updated_at = NOW()
+           WHERE (id = $1 AND $1 <> '') OR (email IS NOT NULL AND LOWER(email) = LOWER($2))`,
+          [targetUid, cleanEmail]
+        );
+      }
+    } catch (pgRejectErr: any) {
+      console.error('[AdminAccounts] PostgreSQL sync error on reject:', pgRejectErr);
+      res.status(500).json({ error: 'Failed to reject account in system database', details: pgRejectErr.message });
+      return;
     }
 
     res.json({
@@ -763,6 +835,33 @@ router.post('/accounts/toggle-status', async (req: AuthRequest, res: Response) =
         const delSnap = await adminDb.collection('delivery_partners').where('email', '==', cleanEmail).limit(1).get();
         if (!delSnap.empty) await delSnap.docs[0].ref.set(updateData, { merge: true });
       }
+    }
+
+    // Synchronize status toggle to PostgreSQL
+    try {
+      const { query } = await import('../lib/db.js');
+      const nextStatus = activeBool ? 'APPROVED' : 'DISABLED';
+      const targetUid = uid || '';
+
+      await query(
+        `UPDATE app_users
+         SET status = $2, is_active = $3, updated_at = NOW()
+         WHERE (id = $1 AND $1 <> '') OR (email IS NOT NULL AND LOWER(email) = LOWER($4))`,
+        [targetUid, nextStatus, activeBool, cleanEmail]
+      );
+
+      if (targetApp === 'DELIVERY' || !targetApp) {
+        await query(
+          `UPDATE delivery_partners
+           SET status = $2, is_online = $3, updated_at = NOW()
+           WHERE (id = $1 AND $1 <> '') OR (email IS NOT NULL AND LOWER(email) = LOWER($4))`,
+          [targetUid, nextStatus, false, cleanEmail]
+        );
+      }
+    } catch (pgToggleErr: any) {
+      console.error('[AdminAccounts] PostgreSQL sync error on toggle-status:', pgToggleErr);
+      res.status(500).json({ error: 'Failed to update account status in system database', details: pgToggleErr.message });
+      return;
     }
 
     res.json({

@@ -14,6 +14,7 @@ import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 import { StoreBoundDeliveryFleetService, RiderOperationalState } from '../services/delivery/StoreBoundDeliveryFleetService.js';
 import { ApiSecurityMiddleware, ResponseSanitizationService } from '../security/index.js';
 import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
+import { PostgresGpsService } from '../services/gps/PostgresGpsService.js';
 
 const router = Router();
 
@@ -55,9 +56,9 @@ router.get('/orders/:id/location', async (req: AuthRequest, res: Response) => {
     }
 
     // Query Authoritative Supabase GPS Telemetry
-    let location = await SupabaseGpsService.getLatestLocationByOrder(id);
+    let location = await PostgresGpsService.getLatestLocationByOrder(id);
     if (!location && orderDoc.exists && orderDoc.data()?.deliveryPartnerId) {
-      location = await SupabaseGpsService.getLatestLocation(orderDoc.data()!.deliveryPartnerId);
+      location = await PostgresGpsService.getLatestLocation(orderDoc.data()!.deliveryPartnerId);
     }
 
     if (!location) {
@@ -68,10 +69,10 @@ router.get('/orders/:id/location', async (req: AuthRequest, res: Response) => {
     res.json({
       currentLat: Number(location.latitude),
       currentLng: Number(location.longitude),
-      status: location.online_status ? 'active' : 'offline',
+      status: (location.onlineStatus ?? (location as any).online_status) ? 'active' : 'offline',
       speed: location.speed || 0,
       heading: location.heading || 0,
-      updatedAt: location.last_updated
+      updatedAt: location.lastUpdated || (location as any).last_updated
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch tracking' });
@@ -327,8 +328,8 @@ const handleLocationUpdate = async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    // 1. Authoritative Supabase delivery_locations update (Triggers Supabase Realtime)
-    await SupabaseGpsService.upsertLatestLocation({
+    // 1. Authoritative PostgreSQL delivery_locations update
+    const gpsRes = await PostgresGpsService.upsertLatestLocation({
       deliveryPartnerId,
       activeOrderId: targetOrderId || null,
       latitude: Number(actualLat),
@@ -338,6 +339,38 @@ const handleLocationUpdate = async (req: AuthRequest, res: Response) => {
       heading: heading ? Number(heading) : null,
       onlineStatus: true
     });
+
+    const locationUpdatePayload = {
+      deliveryPartnerId,
+      latitude: Number(actualLat),
+      longitude: Number(actualLng),
+      orderId: targetOrderId,
+      franchiseId: gpsRes.franchiseId,
+      branchId: gpsRes.branchId,
+      timestamp: new Date().toISOString()
+    };
+
+    // Scoped WebSocket broadcasts: Customer tracking + Branch/Franchise Fleet Isolation
+    try {
+      if (targetOrderId) {
+        webSocketServer.broadcastToOrder(targetOrderId, {
+          type: 'RIDER_LOCATION_UPDATE',
+          data: locationUpdatePayload
+        });
+      }
+
+      if (gpsRes.franchiseId && gpsRes.branchId) {
+        webSocketServer.broadcastToBranch(gpsRes.franchiseId, gpsRes.branchId, {
+          type: 'RIDER_LOCATION_UPDATE',
+          data: locationUpdatePayload
+        });
+      } else {
+        webSocketServer.broadcastToRole('owner', {
+          type: 'RIDER_LOCATION_UPDATE',
+          data: locationUpdatePayload
+        });
+      }
+    } catch {}
 
     // 2. Check Delivery Radius Warning
     const settingsSnap = await adminDb.collection('settings').doc('store').get();
@@ -358,8 +391,18 @@ const handleLocationUpdate = async (req: AuthRequest, res: Response) => {
         timestamp: FieldValue.serverTimestamp(),
         acknowledged: false
       });
-      // Optionally emit websocket event to owner dashboard
-      webSocketServer.broadcastToRole('owner', { type: 'radius_warning', data: { partnerId: deliveryPartnerId, distance, maxRadius } });
+      // Emit scoped websocket event to branch dashboard / fleet supervisor
+      if (gpsRes.franchiseId && gpsRes.branchId) {
+        webSocketServer.broadcastToBranch(gpsRes.franchiseId, gpsRes.branchId, {
+          type: 'radius_warning',
+          data: { partnerId: deliveryPartnerId, distance, maxRadius }
+        });
+      } else {
+        webSocketServer.broadcastToRole('owner', {
+          type: 'radius_warning',
+          data: { partnerId: deliveryPartnerId, distance, maxRadius }
+        });
+      }
     }
 
     res.json({ success: true });
@@ -636,7 +679,7 @@ router.get('/rider/me', requireRole(['delivery', 'delivery_partner', 'owner', 'a
     }
 
     const data = userDoc.data()!;
-    const isOwner = req.user!.role === 'owner' || ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'].includes(req.user!.email?.toLowerCase() || '');
+    const isOwner = req.user!.role === 'owner' || req.user!.role === 'platform_owner';
     
     const rider = {
       uid,
@@ -693,7 +736,7 @@ router.post('/rider/status', requireRole(['delivery', 'delivery_partner', 'owner
     await adminDb.collection('delivery_partners').doc(uid).set(updatePayload, { merge: true }).catch(() => {});
 
     if (finalLat != null && finalLng != null) {
-      await SupabaseGpsService.upsertLatestLocation({
+      await PostgresGpsService.upsertLatestLocation({
         deliveryPartnerId: uid,
         latitude: Number(finalLat),
         longitude: Number(finalLng),

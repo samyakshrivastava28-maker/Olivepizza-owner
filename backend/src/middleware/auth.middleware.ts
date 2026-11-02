@@ -126,7 +126,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
       );
       if (pgUserRes.rows.length > 0) {
         const pgUser = pgUserRes.rows[0];
-        if (pgUser.is_active === false || pgUser.status === 'REVOKED' || pgUser.status === 'SUSPENDED') {
+        if (pgUser.is_active === false || pgUser.status === 'REVOKED' || pgUser.status === 'SUSPENDED' || pgUser.status === 'DISABLED') {
           res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked in system database', code: 'ACCOUNT_REVOKED' });
           return;
         }
@@ -146,7 +146,12 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
         isActive = pgUser.is_active !== false;
       }
     } catch (pgErr: any) {
-      console.warn('[verifyToken] PostgreSQL app_users indexed lookup notice:', pgErr.message);
+      console.error('[verifyToken] PostgreSQL app_users lookup failure (fail-closed):', pgErr.message);
+      res.status(503).json({
+        error: 'Service temporarily unavailable: Unable to verify authorization against authoritative database',
+        code: 'AUTH_DATABASE_UNAVAILABLE'
+      });
+      return;
     }
 
     // Check delivery_partners in database if not already resolved as staff or owner
@@ -163,7 +168,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
         );
         if (dpRes.rows.length > 0) {
           const dp = dpRes.rows[0];
-          if (dp.status === 'REVOKED' || dp.status === 'TERMINATED') {
+          if (dp.status === 'REVOKED' || dp.status === 'TERMINATED' || dp.status === 'DISABLED') {
             res.status(403).json({ error: 'Forbidden: Delivery partner account has been revoked', code: 'ACCOUNT_REVOKED' });
             return;
           }
@@ -171,11 +176,17 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
             role = 'delivery_partner';
             if (dp.branch_id) branchId = dp.branch_id;
             if (dp.franchise_id) franchiseId = dp.franchise_id;
+            allowedApps = Array.from(new Set([...allowedApps, 'DELIVERY']));
             dbResolved = true;
           }
         }
       } catch (dpErr: any) {
-        console.warn('[verifyToken] PostgreSQL delivery_partners lookup notice:', dpErr.message);
+        console.error('[verifyToken] PostgreSQL delivery_partners lookup failure (fail-closed):', dpErr.message);
+        res.status(503).json({
+          error: 'Service temporarily unavailable: Unable to verify delivery authorization against authoritative database',
+          code: 'AUTH_DATABASE_UNAVAILABLE'
+        });
+        return;
       }
     }
 
@@ -231,6 +242,9 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
           if (userData.branchId) branchId = userData.branchId;
           if (userData.branchIds && Array.isArray(userData.branchIds)) branchIds = userData.branchIds;
           if (userData.permissions && permissions.length === 0) permissions = userData.permissions;
+          if (userData.allowedApps && Array.isArray(userData.allowedApps)) {
+            allowedApps = Array.from(new Set([...allowedApps, ...userData.allowedApps]));
+          }
           if (userData.isActive !== undefined) isActive = userData.isActive;
           // POS terminal binding — stored in Firestore user record for cashier role
           if (userData.terminalId) terminalId = userData.terminalId as string;
@@ -267,6 +281,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
               if (rmData.branchId) branchId = rmData.branchId;
               if (rmData.franchiseId) franchiseId = rmData.franchiseId;
               if (rmData.permissions) permissions = rmData.permissions;
+              allowedApps = Array.from(new Set([...allowedApps, 'RESTAURANT_MANAGER']));
             }
           }
 
@@ -292,6 +307,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
                 role = dpData.role || 'delivery_partner';
                 if (dpData.branchId) branchId = dpData.branchId;
                 if (dpData.franchiseId) franchiseId = dpData.franchiseId;
+                allowedApps = Array.from(new Set([...allowedApps, 'DELIVERY']));
               }
             }
           }
@@ -318,6 +334,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
                 role = fuData.role || 'franchise_manager';
                 if (fuData.franchiseId) franchiseId = fuData.franchiseId;
                 if (fuData.branchIds) branchIds = fuData.branchIds;
+                allowedApps = Array.from(new Set([...allowedApps, 'FRANCHISE_MANAGER']));
               }
             }
           }
@@ -345,6 +362,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
                 if (posData.franchiseId) franchiseId = posData.franchiseId;
                 if (posData.branchId) branchId = posData.branchId;
                 if (posData.terminalId) terminalId = posData.terminalId;
+                allowedApps = Array.from(new Set([...allowedApps, 'POS']));
               }
             }
           }

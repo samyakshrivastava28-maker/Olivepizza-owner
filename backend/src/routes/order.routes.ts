@@ -522,6 +522,181 @@ router.post('/validate-checkout', async (req: Request, res: Response): Promise<v
   }
 });
 
+/**
+ * POST /api/orders/sync-offline-actions
+ * Batch idempotent synchronization of offline restaurant manager actions.
+ * Supports:
+ * - Order status transitions (preparing, ready, delivered, cancelled)
+ * - Prep time adjustments
+ * Server-enforced idempotency, franchise/branch isolation, conflict resolution.
+ */
+router.post('/sync-offline-actions', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const user = req.user;
+    if (!user || !user.uid) {
+      res.status(401).json({ success: false, error: 'Unauthorized' });
+      return;
+    }
+
+    const role = (user.role || '').toLowerCase();
+    const allowedApps = Array.isArray(user.allowedApps) ? user.allowedApps : [];
+    const isStaff = ['restaurant_manager', 'kitchen_staff', 'cashier'].includes(role) ||
+      allowedApps.includes('RESTAURANT_MANAGER');
+
+    if (!isStaff) {
+      res.status(403).json({ success: false, error: 'Forbidden: Restaurant manager authorization required' });
+      return;
+    }
+
+    const { actions } = req.body;
+    if (!actions || !Array.isArray(actions) || actions.length === 0) {
+      res.status(400).json({ success: false, error: 'actions array is required' });
+      return;
+    }
+
+    const userBranchId = user.branchId;
+    const actionScope = FranchiseScopeService.resolveScope(user);
+
+    const results: any[] = [];
+
+    for (const act of actions) {
+      const actionId = act.actionId || act.id || act.idempotencyKey || `act_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const idempotencyKey = act.idempotencyKey || act.actionId || act.id || actionId;
+      const orderId = act.orderId;
+      const nextStatus = act.nextStatus;
+      const reason = act.reason;
+      const prepMinutes = act.estimatedPreparationMinutes ?? act.prepMinutes;
+
+      if (!orderId || !nextStatus) {
+        results.push({
+          idempotencyKey,
+          actionId,
+          orderId: orderId || null,
+          status: 'FAILED',
+          error: 'Missing orderId or nextStatus'
+        });
+        continue;
+      }
+
+      try {
+        // 1. Fetch current order state from Firestore or authoritative PostgreSQL
+        let currentStatus = 'pending';
+        let orderBranchId = '';
+
+        const orderDoc = await adminDb.collection('orders').doc(orderId).get();
+        if (orderDoc.exists) {
+          const orderData = orderDoc.data()!;
+          currentStatus = orderData.status || 'pending';
+          orderBranchId = orderData.branchId || '';
+        } else {
+          const pgOrder = await query('SELECT id, order_status, branch_id, franchise_id FROM canonical_orders WHERE id = $1 LIMIT 1', [orderId]);
+          if (pgOrder.rows.length === 0) {
+            results.push({
+              idempotencyKey,
+              actionId,
+              orderId,
+              status: 'FAILED',
+              error: `Order ${orderId} not found in database`
+            });
+            continue;
+          }
+          currentStatus = pgOrder.rows[0].order_status || 'pending';
+          orderBranchId = pgOrder.rows[0].branch_id || '';
+        }
+
+        // Branch isolation check
+        if (orderBranchId && !FranchiseScopeService.isAuthorizedForBranch(actionScope, orderBranchId)) {
+          results.push({
+            idempotencyKey,
+            actionId,
+            orderId,
+            status: 'FAILED',
+            error: `Forbidden: Branch isolation violation for branch ${orderBranchId}`
+          });
+          continue;
+        }
+
+        // Idempotency: If order is already in the target status or advanced past it
+        if (currentStatus === nextStatus) {
+          results.push({
+            idempotencyKey,
+            actionId,
+            orderId,
+            status: 'ALREADY_SYNCED',
+            currentStatus,
+            duplicate: true
+          });
+          continue;
+        }
+
+        // Conflict check: If order was cancelled on the server while client was offline
+        if (currentStatus === 'cancelled' || currentStatus === 'rejected') {
+          results.push({
+            idempotencyKey,
+            actionId,
+            orderId,
+            status: 'REVIEW_REQUIRED',
+            error: `Order was cancelled on server while offline. Current status: ${currentStatus}`,
+            currentStatus
+          });
+          continue;
+        }
+
+        // Execute transition
+        const transitionMetadata = typeof prepMinutes === 'number' ? { estimatedPreparationMinutes: prepMinutes } : {};
+        const transRes = await OrderStateMachine.transition(
+          orderId,
+          nextStatus,
+          { uid: user.uid, role: role || 'restaurant_manager', name: user.email?.split('@')[0] || 'Manager', branchId: userBranchId || orderBranchId },
+          transitionMetadata
+        );
+
+        if (transRes.success) {
+          results.push({
+            idempotencyKey,
+            actionId,
+            orderId,
+            status: 'SYNCED',
+            newStatus: nextStatus,
+            version: transRes.version,
+            syncedAt: new Date().toISOString()
+          });
+        } else {
+          results.push({
+            idempotencyKey,
+            actionId,
+            orderId,
+            status: 'REVIEW_REQUIRED',
+            error: transRes.error || 'State machine transition rejected',
+            currentStatus
+          });
+        }
+      } catch (actErr: any) {
+        console.error(`[SyncOfflineActions] Error syncing action ${actionId}:`, actErr.message);
+        results.push({
+            idempotencyKey,
+            actionId,
+          orderId,
+          status: 'FAILED',
+          error: actErr.message
+        });
+      }
+    }
+
+    const syncedCount = results.filter(r => r.status === 'SYNCED' || r.status === 'ALREADY_SYNCED').length;
+    res.json({
+      success: true,
+      message: `Processed ${actions.length} offline actions (${syncedCount} succeeded)`,
+      syncedCount,
+      totalCount: actions.length,
+      results
+    });
+  } catch (err: any) {
+    console.error('[SyncOfflineActions] Global error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Create a new order securely
 router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user?.uid;
@@ -1548,8 +1723,8 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
     }
 
     const userBranchId = req.user?.branchId;
-
-    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && role !== 'owner' && role !== 'admin') {
+    const reqScope = FranchiseScopeService.resolveScope(req.user);
+    if (orderBranchId && !FranchiseScopeService.isAuthorizedForBranch(reqScope, orderBranchId)) {
       res.status(403).json({
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`
       });
@@ -1619,7 +1794,8 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
     const orderData = orderDoc.data()!;
     const orderBranchId = orderData.branchId || '';
 
-    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
+    const reqScope = FranchiseScopeService.resolveScope(req.user);
+    if (orderBranchId && !FranchiseScopeService.isAuthorizedForBranch(reqScope, orderBranchId)) {
       return res.status(403).json({
         success: false,
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
@@ -1854,7 +2030,8 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
     const orderData = orderDoc.data()!;
     const orderBranchId = orderData.branchId || '';
 
-    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
+    const reqScope = FranchiseScopeService.resolveScope(req.user);
+    if (orderBranchId && !FranchiseScopeService.isAuthorizedForBranch(reqScope, orderBranchId)) {
       return res.status(403).json({
         success: false,
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,
@@ -1945,7 +2122,8 @@ router.post('/:id/acknowledge', verifyToken, async (req: AuthRequest, res: Respo
     const orderData = orderDoc.data()!;
     const orderBranchId = orderData.branchId || '';
 
-    if (userBranchId && userBranchId !== orderBranchId && userBranchId !== 'all' && !isMasterAccount && userRole !== 'owner' && userRole !== 'admin') {
+    const reqScope = FranchiseScopeService.resolveScope(req.user);
+    if (orderBranchId && !FranchiseScopeService.isAuthorizedForBranch(reqScope, orderBranchId)) {
       return res.status(403).json({
         success: false,
         error: `Forbidden: You do not have authority over orders from branch ${orderBranchId}`,

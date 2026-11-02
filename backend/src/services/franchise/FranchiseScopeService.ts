@@ -105,38 +105,40 @@ export class FranchiseScopeService {
    */
   public static isGlobalOwner(emailOrUser?: string | any, role?: string): boolean {
     if (!emailOrUser && !role) return false;
-    let email = '';
     let userRole = '';
     if (typeof emailOrUser === 'object') {
       userRole = (emailOrUser?.role || role || '').toLowerCase();
-      email = (emailOrUser?.email || '').toLowerCase();
     } else {
-      email = (emailOrUser || '').toLowerCase();
       userRole = (role || '').toLowerCase();
     }
-    // Only the verified platform owner and authorized internal account can have global owner scope
-    return (
-      email === 'olivepizzarjn@gmail.com' ||
-      (email === 'webhub2811@gmail.com' && ['owner', 'developer', 'admin', 'platform_owner'].includes(userRole))
-    );
+
+    return userRole === 'platform_owner' || userRole === 'owner';
   }
   /**
    * Check if a caller is authorized to access or mutate a target branch
    */
   public static isAuthorizedForBranch(scope: ScopeContext, targetBranchId?: string): boolean {
     if (!targetBranchId || targetBranchId === 'all') {
-      return scope.isGlobalOwner || scope.isFranchiseOwner;
+      return false;
     }
 
     if (scope.isGlobalOwner) return true;
     if (scope.isFranchiseOwner) {
+      if (!scope.franchiseId) return false;
       if (scope.branchIds && scope.branchIds.length > 0) {
         return scope.branchIds.includes(targetBranchId) || scope.branchId === targetBranchId;
       }
-      return true;
+      if (scope.branchId && scope.branchId !== 'all') {
+        return scope.branchId === targetBranchId;
+      }
+      return false;
     }
 
-    return scope.branchIds.includes(targetBranchId) || scope.branchId === targetBranchId;
+    // Branch-scoped staff must match targetBranchId explicitly (never allow wildcard 'all')
+    if (scope.branchIds && scope.branchIds.length > 0) {
+      return scope.branchIds.includes(targetBranchId);
+    }
+    return Boolean(scope.branchId && scope.branchId !== 'all' && scope.branchId === targetBranchId);
   }
 
   /**

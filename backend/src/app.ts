@@ -224,7 +224,12 @@ export const corsMiddleware = cors({
 app.use(corsMiddleware);
 
 // Strict, justified request body size limits (defense-in-depth against payload flooding DoS)
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({
+  limit: '2mb',
+  verify: (req: any, _res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 app.use(express.urlencoded({ limit: '2mb', extended: true }));
 
 // API Performance & Correlation Tracker

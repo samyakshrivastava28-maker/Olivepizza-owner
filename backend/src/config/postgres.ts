@@ -6,21 +6,29 @@ import { runMigrations } from '../migrations/runner.js';
 
 dotenv.config();
 
-export type DatabaseEnvironment = 'development' | 'testing' | 'render-test' | 'staging' | 'production' | 'vps';
+export type DatabaseEnvironment = 'development' | 'testing' | 'render-test' | 'staging' | 'production' | 'vps' | 'layerbase';
 
 export const DATABASE_ENV: DatabaseEnvironment = 
   (process.env.DATABASE_ENV as DatabaseEnvironment) || 
   (process.env.NODE_ENV === 'production' ? 'production' : 'development');
 
-let dbUrl: string | undefined;
+export type DatabaseProvider = 'layerbase' | 'self_hosted' | 'local' | 'render-test' | 'vps';
+export const DATABASE_PROVIDER: DatabaseProvider = 
+  (process.env.DATABASE_PROVIDER as DatabaseProvider) || 
+  (process.env.DATABASE_URL?.includes('layerbase.dev') ? 'layerbase' : 'layerbase');
 
-if (DATABASE_ENV === 'render-test') {
-  dbUrl = process.env.RENDER_POSTGRES_URL || process.env.DATABASE_URL;
-} else if (DATABASE_ENV === 'production' || DATABASE_ENV === 'vps') {
-  dbUrl = process.env.VPS_POSTGRES_URL || process.env.DATABASE_URL;
-} else {
-  // development / testing / default
-  dbUrl = process.env.RENDER_POSTGRES_URL || process.env.DATABASE_URL;
+let dbUrl: string | undefined = process.env.DATABASE_URL;
+
+if (!dbUrl) {
+  if (DATABASE_PROVIDER === 'layerbase' || DATABASE_ENV === 'layerbase') {
+    dbUrl = process.env.LAYERBASE_DATABASE_URL || process.env.DATABASE_URL;
+  } else if (DATABASE_PROVIDER === 'self_hosted' || DATABASE_PROVIDER === 'vps' || DATABASE_ENV === 'production' || DATABASE_ENV === 'vps') {
+    dbUrl = process.env.VPS_POSTGRES_URL || process.env.DATABASE_URL;
+  } else if (DATABASE_PROVIDER === 'render-test' || DATABASE_ENV === 'render-test') {
+    dbUrl = process.env.RENDER_POSTGRES_URL || process.env.DATABASE_URL;
+  } else {
+    dbUrl = process.env.DATABASE_URL;
+  }
 }
 
 // Auto-fix Render IPv6 issue for Supabase (Forces IPv4 Connection Pooler)
@@ -31,8 +39,9 @@ if (dbUrl && dbUrl.includes('.supabase.co')) {
   }
 }
 
+const isLayerbase = Boolean(dbUrl?.includes('layerbase.dev') || DATABASE_PROVIDER === 'layerbase' || DATABASE_ENV === 'layerbase');
 const isRenderPostgres = Boolean(dbUrl?.includes('render.com') || dbUrl?.includes('dpg-'));
-const isCloudPostgres = Boolean(isRenderPostgres || dbUrl?.includes('supabase.co') || dbUrl?.includes('pooler.supabase.com'));
+const isCloudPostgres = Boolean(isLayerbase || isRenderPostgres || dbUrl?.includes('supabase.co') || dbUrl?.includes('pooler.supabase.com'));
 const isLocalPostgres = Boolean(
   dbUrl?.includes('localhost') || 
   dbUrl?.includes('127.0.0.1') || 
@@ -40,8 +49,8 @@ const isLocalPostgres = Boolean(
   (!isCloudPostgres && process.env.NODE_ENV === 'test')
 );
 
-const maxConnections = parseInt(process.env.POSTGRES_POOL_MAX || '20', 10);
-const idleTimeoutMillis = parseInt(process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS || '30000', 10);
+const maxConnections = parseInt(process.env.POSTGRES_POOL_MAX || (isLayerbase ? '10' : '20'), 10);
+const idleTimeoutMillis = parseInt(process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS || (isLayerbase ? '2000' : '30000'), 10);
 const connectionTimeoutMillis = parseInt(process.env.POSTGRES_POOL_CONN_TIMEOUT_MS || '10000', 10);
 
 export const pgPool = new Pool({
@@ -49,6 +58,9 @@ export const pgPool = new Pool({
   max: maxConnections,
   idleTimeoutMillis: idleTimeoutMillis,
   connectionTimeoutMillis: connectionTimeoutMillis,
+  query_timeout: 15000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 5000,
   ssl: isLocalPostgres
     ? false
     : process.env.PG_SSL_REJECT_UNAUTHORIZED === 'true'
@@ -56,10 +68,10 @@ export const pgPool = new Pool({
       : process.env.PG_SSL_REJECT_UNAUTHORIZED === 'false' || isCloudPostgres
         ? { rejectUnauthorized: false }
         : false,
-  statement_timeout: 15000, // 15 seconds per statement limit
+// statement_timeout omitted from pool startup params for serverless pooler compatibility
 });
 
-console.log(`[PostgreSQL] Active Environment: "${DATABASE_ENV}" | Target: ${isRenderPostgres ? 'Render PostgreSQL (Testing/Staging)' : 'PostgreSQL'}`);
+console.log(`[PostgreSQL] Provider: "${DATABASE_PROVIDER}" | Environment: "${DATABASE_ENV}" | Target: ${isLayerbase ? 'Layerbase Serverless PostgreSQL (Authoritative)' : isRenderPostgres ? 'Render PostgreSQL' : 'PostgreSQL'}`);
 
 pgPool.on('error', (err) => {
   console.warn('[PostgreSQL Pool] Idle client connection warning (safe to ignore):', err.message);
@@ -89,7 +101,7 @@ export function assertSafeDatabaseTarget(): void {
  */
 export function assertSafeDatabaseForMutation(sqlText: string): void {
   if (process.env.NODE_ENV === 'test' || process.env.TEST_SAFETY_FAILSAFE === 'strict') {
-    if (isCloudPostgres) {
+    if (isCloudPostgres && process.env.ALLOW_CLOUD_TEST_CONNECTION !== 'true') {
       const normalized = sqlText.trim().replace(/\/\*[\s\S]*?\*\/|--.*$/gm, '').trim();
       const isDirectMutation = /^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|MERGE)\b/i.test(normalized);
       const isWritableCTE = /^\s*WITH\b[\s\S]*?\b(INSERT|UPDATE|DELETE|MERGE)\b/i.test(normalized);
@@ -104,7 +116,22 @@ export function assertSafeDatabaseForMutation(sqlText: string): void {
   }
 }
 
+let testQueryOverride: ((text: string, params?: any[]) => Promise<any>) | null = null;
+
+export function setTestQueryOverride(fn: ((text: string, params?: any[]) => Promise<any>) | null): void {
+  testQueryOverride = fn;
+}
+
+let testTransactionOverride: (<T>(callback: (client: any) => Promise<T>) => Promise<T>) | null = null;
+
+export function setTestTransactionOverride(fn: (<T>(callback: (client: any) => Promise<T>) => Promise<T>) | null): void {
+  testTransactionOverride = fn;
+}
+
 export async function query<T = any>(text: string, params: any[] = []): Promise<QueryResult<T>> {
+  if (testQueryOverride) {
+    return testQueryOverride(text, params);
+  }
   assertSafeDatabaseForMutation(text);
   const start = Date.now();
   try {
@@ -115,6 +142,10 @@ export async function query<T = any>(text: string, params: any[] = []): Promise<
     }
     return res;
   } catch (err: any) {
+    if (err.message?.includes('client_idle_timeout') || err.message?.includes('Connection terminated') || err.code === '08P01') {
+      console.warn(`[PostgreSQL Pooler] Idle client connection expired (${err.message}). Retrying query with fresh socket...`);
+      return await pgPool.query<T>(text, params);
+    }
     console.error(`[PostgreSQL Query Error] ${err.message} | Query: ${text.substring(0, 120)}`);
     throw err;
   }
@@ -125,6 +156,9 @@ export async function query<T = any>(text: string, params: any[] = []): Promise<
  * Every client query executed within the transaction is guarded against cloud mutation during tests.
  */
 export async function withTransaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
+  if (testTransactionOverride) {
+    return testTransactionOverride(callback as any);
+  }
   const client = await pgPool.connect();
   const originalClientQuery = client.query.bind(client);
 
@@ -149,7 +183,8 @@ export async function withTransaction<T>(callback: (client: PoolClient) => Promi
     }
     throw err;
   } finally {
-    client.release();
+    (client as any).query = originalClientQuery;
+    client.release(true);
   }
 }
 

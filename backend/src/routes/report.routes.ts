@@ -11,6 +11,8 @@ import { GoogleSheetsMonthlyReportService } from '../services/reports/GoogleShee
 import { SalesCalculationEngine } from '../services/reports/SalesCalculationEngine.js';
 import { pgPool, query } from '../config/postgres.js';
 import { redisService } from '../services/redis/RedisService.js';
+import { ReportExportService } from '../services/reports/ReportExportService.js';
+import { FirebaseStorageReportService } from '../services/storage/FirebaseStorageReportService.js';
 import crypto from 'crypto';
 
 const router = Router();
@@ -18,10 +20,14 @@ const router = Router();
 // Middleware: Require Owner or Admin role (supporting canonical roles and authorized master accounts)
 const requireOwnerOrAdmin = (req: AuthRequest, res: Response, next: any) => {
   if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+  if (req.user.isActive === false) {
+    return res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked.', code: 'ACCOUNT_REVOKED' });
+  }
   const role = (req.user.role || '').toLowerCase();
-  const isAuthorized = ['owner', 'admin', 'platform_owner', 'developer'].includes(role) ||
-    req.user.email === 'olivepizzarjn@gmail.com' ||
-    req.user.email === 'webhub2811@gmail.com';
+  if (['customer', 'delivery', 'delivery_partner', 'rider'].includes(role)) {
+    return res.status(403).json({ error: 'Forbidden: Role not authorized for administrative access.', code: 'ROLE_FORBIDDEN' });
+  }
+  const isAuthorized = ['owner', 'admin', 'platform_owner'].includes(role);
   if (!isAuthorized) {
     return res.status(403).json({ error: 'Forbidden. Owner or Admin access required.' });
   }
@@ -82,11 +88,21 @@ async function handleStreamPdf(req: AuthRequest, res: Response, forceDownload?: 
 
     // 1. Signature Check (HMAC deep links from owner emails)
     const sig = req.query.sig as string;
+    const exp = req.query.exp as string;
     let isSignedLink = false;
     if (sig) {
       try {
+        if (exp) {
+          const expNum = parseInt(exp, 10);
+          const expMs = exp.length === 10 ? expNum * 1000 : expNum;
+          if (Date.now() > expMs) {
+            res.status(403).json({ error: 'Forbidden: Signed report link has expired', code: 'LINK_EXPIRED' });
+            return;
+          }
+        }
         const trackingSecret = getReportCapabilitySecret();
-        const expectedSig = crypto.createHmac('sha256', trackingSecret).update(id).digest('hex');
+        const dataToSign = exp ? `${id}:${exp}` : id;
+        const expectedSig = crypto.createHmac('sha256', trackingSecret).update(dataToSign).digest('hex');
         const sigBuf = Buffer.from(sig, 'utf8');
         const expBuf = Buffer.from(expectedSig, 'utf8');
         if (sigBuf.length === expBuf.length && crypto.timingSafeEqual(sigBuf, expBuf)) {
@@ -176,10 +192,16 @@ async function handleStreamPdf(req: AuthRequest, res: Response, forceDownload?: 
         res.status(403).json({ error: authResult.reason || 'Forbidden: Access to this internal report is restricted.' });
         return;
       }
+
+      await FirebaseStorageReportService.verifyReportAccess(req.user, {
+        franchiseId,
+        branchId,
+        isGlobal: scopeLevel === 'GLOBAL'
+      });
     }
 
     // 4. Fetch Buffer from Cloudflare R2 / local mock
-    let buffer = await CloudflareR2Service.getBuffer(cloudflarePath);
+    let buffer = await FirebaseStorageReportService.getReportBuffer(cloudflarePath) || await CloudflareR2Service.getBuffer(cloudflarePath);
 
     // 5. If buffer not found, generate on the fly from PostgreSQL
     if (!buffer) {
@@ -777,6 +799,248 @@ router.post('/custom', verifyToken, async (req: AuthRequest, res: Response): Pro
   } catch (err: any) {
     console.error('[Custom Report Error]:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+
+/**
+ * GET /api/reports/export/orders
+ * Export Online, POS, or Combined orders as CSV.
+ * Stored to Firebase Storage private path with metadata.
+ */
+router.get('/export/orders', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const caller = req.user;
+    if (!caller) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const type = ((req.query.type as string) || 'combined').toLowerCase();
+    const startDate = (req.query.startDate as string) || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const endDate = (req.query.endDate as string) || new Date().toISOString().split('T')[0];
+    const franchiseId = (req.query.franchiseId as string) || caller.franchiseId || 'fra_rajnandgaon';
+    const branchId = (req.query.branchId as string) || caller.branchId || undefined;
+    const format = ((req.query.format as string) || 'download').toLowerCase();
+
+    // Authoritative PostgreSQL Access Control Check
+    await FirebaseStorageReportService.verifyReportAccess(caller, {
+      franchiseId,
+      branchId,
+      isGlobal: franchiseId === 'global' || franchiseId === 'all'
+    });
+
+    let exportResult;
+    if (type === 'online') {
+      exportResult = await ReportExportService.generateOnlineOrderCsv({ franchiseId, branchId, startDate, endDate });
+    } else if (type === 'pos') {
+      exportResult = await ReportExportService.generatePosOrderCsv({ franchiseId, branchId, startDate, endDate });
+    } else if (type === 'items' || type === 'order_items') {
+      exportResult = await ReportExportService.generateOrderItemsCsv({ franchiseId, branchId, startDate, endDate });
+    } else {
+      exportResult = await ReportExportService.generateCombinedOrderCsv({ franchiseId, branchId, startDate, endDate });
+    }
+
+    const upload = await FirebaseStorageReportService.uploadReport({
+      franchiseId,
+      branchId: branchId || 'all',
+      reportType: exportResult.reportType,
+      periodLabel: `${startDate}_to_${endDate}`,
+      startDate,
+      endDate,
+      csvContent: exportResult.csvContent,
+      generatedByUid: caller.uid
+    });
+
+    if (format === 'json') {
+      const signed = await FirebaseStorageReportService.getSignedDownloadUrl(upload.reportId, caller);
+      res.json({
+        success: true,
+        reportId: upload.reportId,
+        filePath: upload.filePath,
+        rowCount: exportResult.rowCount,
+        checksum: upload.checksumSha256,
+        downloadUrl: signed.downloadUrl,
+        expiresInSeconds: signed.expiresInSeconds
+      });
+      return;
+    }
+
+    const filename = `olive-pizza-orders-${type}-${startDate}-${endDate}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(exportResult.csvContent);
+  } catch (err: any) {
+    console.error('[Export Orders Error]:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/reports/export/financial
+ * Export Daily Reconciliation & Financial Summary Ledger as CSV.
+ */
+router.get('/export/financial', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const caller = req.user;
+    if (!caller) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const startDate = (req.query.startDate as string) || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const endDate = (req.query.endDate as string) || new Date().toISOString().split('T')[0];
+    const franchiseId = (req.query.franchiseId as string) || caller.franchiseId || 'fra_rajnandgaon';
+    const branchId = (req.query.branchId as string) || caller.branchId || undefined;
+    const format = ((req.query.format as string) || 'download').toLowerCase();
+
+    // Authoritative PostgreSQL Access Control Check
+    await FirebaseStorageReportService.verifyReportAccess(caller, {
+      franchiseId,
+      branchId,
+      isGlobal: franchiseId === 'global' || franchiseId === 'all'
+    });
+
+    const exportResult = await ReportExportService.generateFinancialSummaryCsv({ franchiseId, branchId, startDate, endDate });
+
+    const upload = await FirebaseStorageReportService.uploadReport({
+      franchiseId,
+      branchId: branchId || 'all',
+      reportType: exportResult.reportType,
+      periodLabel: `${startDate}_to_${endDate}`,
+      startDate,
+      endDate,
+      csvContent: exportResult.csvContent,
+      generatedByUid: caller.uid
+    });
+
+    if (format === 'json') {
+      const signed = await FirebaseStorageReportService.getSignedDownloadUrl(upload.reportId, caller);
+      res.json({
+        success: true,
+        reportId: upload.reportId,
+        filePath: upload.filePath,
+        rowCount: exportResult.rowCount,
+        checksum: upload.checksumSha256,
+        downloadUrl: signed.downloadUrl,
+        expiresInSeconds: signed.expiresInSeconds
+      });
+      return;
+    }
+
+    const filename = `olive-pizza-financial-summary-${startDate}-${endDate}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(exportResult.csvContent);
+  } catch (err: any) {
+    console.error('[Export Financial Error]:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/reports/export/items
+ * Export Granular Order Items Breakdown as CSV.
+ */
+router.get('/export/items', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const caller = req.user;
+    if (!caller) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const startDate = (req.query.startDate as string) || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const endDate = (req.query.endDate as string) || new Date().toISOString().split('T')[0];
+    const franchiseId = (req.query.franchiseId as string) || caller.franchiseId || 'fra_rajnandgaon';
+    const branchId = (req.query.branchId as string) || caller.branchId || undefined;
+    const format = ((req.query.format as string) || 'download').toLowerCase();
+
+    // Authoritative PostgreSQL Access Control Check
+    await FirebaseStorageReportService.verifyReportAccess(caller, {
+      franchiseId,
+      branchId,
+      isGlobal: franchiseId === 'global' || franchiseId === 'all'
+    });
+
+    const exportResult = await ReportExportService.generateOrderItemsCsv({ franchiseId, branchId, startDate, endDate });
+
+    const upload = await FirebaseStorageReportService.uploadReport({
+      franchiseId,
+      branchId: branchId || 'all',
+      reportType: exportResult.reportType,
+      periodLabel: `${startDate}_to_${endDate}`,
+      startDate,
+      endDate,
+      csvContent: exportResult.csvContent,
+      generatedByUid: caller.uid
+    });
+
+    if (format === 'json') {
+      const signed = await FirebaseStorageReportService.getSignedDownloadUrl(upload.reportId, caller);
+      res.json({
+        success: true,
+        reportId: upload.reportId,
+        filePath: upload.filePath,
+        rowCount: exportResult.rowCount,
+        checksum: upload.checksumSha256,
+        downloadUrl: signed.downloadUrl,
+        expiresInSeconds: signed.expiresInSeconds
+      });
+      return;
+    }
+
+    const filename = `olive-pizza-order-items-${startDate}-${endDate}.csv`;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(exportResult.csvContent);
+  } catch (err: any) {
+    if (err.message && err.message.includes('Forbidden')) {
+      res.status(403).json({ error: err.message, code: err.code || 'FORBIDDEN' });
+    } else {
+      console.error('[Export Items Error]:', err.message);
+      res.status(500).json({ error: err.message });
+    }
+  }
+});
+
+/**
+ * GET /api/reports/download/:id
+ * Retrieve signed download link or stream private report from Firebase Storage.
+ */
+router.get('/download/:id', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const caller = req.user;
+    if (!caller) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+
+    const { id } = req.params;
+    const signed = await FirebaseStorageReportService.getSignedDownloadUrl(id, caller);
+
+    if (req.query.stream === 'true' || !signed.downloadUrl.startsWith('http')) {
+      const buffer = await FirebaseStorageReportService.getReportBuffer(signed.report.file_path);
+      if (buffer) {
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${id}.csv"`);
+        res.send(buffer);
+        return;
+      }
+    }
+
+    res.json({
+      success: true,
+      downloadUrl: signed.downloadUrl,
+      expiresInSeconds: signed.expiresInSeconds,
+      report: signed.report
+    });
+  } catch (err: any) {
+    if (err.message && err.message.includes('Forbidden')) {
+      res.status(403).json({ error: err.message });
+    } else {
+      res.status(404).json({ error: err.message });
+    }
   }
 });
 
