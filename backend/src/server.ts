@@ -1,4 +1,4 @@
-﻿import express from 'express';
+import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import apiApp, { corsMiddleware } from './app.js';
@@ -62,7 +62,11 @@ app.get(['/health/ready', '/health/readiness'], async (_req, res) => {
     redisHealthy = await redisService.ping();
   } catch {}
 
-  const isReady = pgHealthy;
+  const isRedisConfigured = Boolean(process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL || process.env.REDIS_HOST);
+  const isRedisSatisfied = isRedisConfigured || process.env.NODE_ENV === 'production' || process.env.REQUIRE_REDIS === 'true'
+    ? redisHealthy
+    : true;
+  const isReady = pgHealthy && isRedisSatisfied;
   const statusCode = isReady ? 200 : 503;
 
   res.status(statusCode).json({

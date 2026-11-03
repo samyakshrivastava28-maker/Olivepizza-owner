@@ -2,6 +2,7 @@ import { pgPool } from '../config/postgres.js';
 import { adminDb as db } from '../config/firebase.js';
 import cron from 'node-cron';
 import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
+import { distributedJobCoordinator } from '../services/jobs/DistributedJobCoordinator.js';
 
 export class DataRetentionJob {
   public static async run(): Promise<void> {
@@ -103,14 +104,18 @@ export class DataRetentionJob {
   }
 
   public static schedule() {
-    // Run daily at 2:00 AM for full retention scan
+    // Run daily at 2:00 AM for full retention scan (coordinated across cluster)
     cron.schedule('0 2 * * *', () => {
-      DataRetentionJob.run();
+      distributedJobCoordinator.runScheduledSingleton('data_retention_daily', 600, async () => {
+        await DataRetentionJob.run();
+      });
     });
 
-    // Run every minute to enforce 5-minute navigation telemetry expiry
+    // Run every minute to enforce 5-minute navigation telemetry expiry (coordinated across cluster)
     cron.schedule('* * * * *', () => {
-      DataRetentionJob.runNavigationCleanup();
+      distributedJobCoordinator.runScheduledSingleton('navigation_cleanup_minutely', 50, async () => {
+        await DataRetentionJob.runNavigationCleanup();
+      });
     });
   }
 }

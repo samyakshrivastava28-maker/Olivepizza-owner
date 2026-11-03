@@ -30,6 +30,7 @@ import { query } from '../config/postgres.js';
 import { adminDb } from '../config/firebase.js';
 import { sendEmailDirect } from '../services/email.service.js';
 import crypto from 'crypto';
+import { distributedJobCoordinator } from '../services/jobs/DistributedJobCoordinator.js';
 
 export class MonthlyReportJob {
   private static isInitialized = false;
@@ -45,20 +46,22 @@ export class MonthlyReportJob {
     }
     this.isInitialized = true;
 
-    // Schedule: 1st of every month at 00:05 AM (Asia/Kolkata)
+    // Schedule: 1st of every month at 00:05 AM (Asia/Kolkata) coordinated across cluster
     cron.schedule('5 0 1 * *', async () => {
-      console.log('⏰ [MonthlyReportJob] Automated 1st-of-month 00:05 AM report job triggered.');
-      try {
-        await MonthlyReportJob.runMonthEndPipeline();
-        console.log('✅ [MonthlyReportJob] Month-end report pipeline completed successfully.');
-      } catch (err: any) {
-        console.error('❌ [MonthlyReportJob] Month-end report pipeline failed:', err.message);
-      }
+      await distributedJobCoordinator.runScheduledSingleton('monthly_report_1st_ist', 1800, async () => {
+        console.log('⏰ [MonthlyReportJob] Automated 1st-of-month 00:05 AM report job triggered.');
+        try {
+          await MonthlyReportJob.runMonthEndPipeline();
+          console.log('✅ [MonthlyReportJob] Month-end report pipeline completed successfully.');
+        } catch (err: any) {
+          console.error('❌ [MonthlyReportJob] Month-end report pipeline failed:', err.message);
+        }
+      });
     }, {
       timezone: 'Asia/Kolkata'
     });
 
-    console.log('⏰ [MonthlyReportJob] Scheduled to run automatically on the 1st of every month at 00:05 AM IST.');
+    console.log('⏰ [MonthlyReportJob] Scheduled to run automatically on the 1st of every month at 00:05 AM IST (distributed).');
   }
 
   /**

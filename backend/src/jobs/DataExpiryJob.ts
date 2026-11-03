@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import { adminDb } from '../config/firebase.js';
+import { distributedJobCoordinator } from '../services/jobs/DistributedJobCoordinator.js';
 
 export class DataExpiryJob {
   /**
@@ -64,19 +65,21 @@ export class DataExpiryJob {
       });
     }, 5000);
 
-    // Schedule to run every 5 minutes
+    // Schedule to run every 5 minutes (coordinated across cluster)
     cron.schedule('*/5 * * * *', async () => {
-      try {
-        await this.processExpirations();
-      } catch (e: any) {
-        if (e.message?.includes('RESOURCE_EXHAUSTED') || e.message?.includes('Quota exceeded')) {
-          console.warn('[DataExpiryJob] Firestore quota limit reached. Will retry next cycle.');
-        } else {
-          console.error('[DataExpiryJob] Error running expiry job:', e.message);
+      await distributedJobCoordinator.runScheduledSingleton('data_expiry_5min', 240, async () => {
+        try {
+          await this.processExpirations();
+        } catch (e: any) {
+          if (e.message?.includes('RESOURCE_EXHAUSTED') || e.message?.includes('Quota exceeded')) {
+            console.warn('[DataExpiryJob] Firestore quota limit reached. Will retry next cycle.');
+          } else {
+            console.error('[DataExpiryJob] Error running expiry job:', e.message);
+          }
         }
-      }
+      });
     });
-    console.log('[DataExpiryJob] Auto-expiry engine scheduled (running every 5 mins).');
+    console.log('[DataExpiryJob] Auto-expiry engine scheduled (running every 5 mins, distributed).');
   }
 
   /**

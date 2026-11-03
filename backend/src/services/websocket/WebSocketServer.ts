@@ -17,6 +17,7 @@ import { IncomingMessage } from 'http';
 import { appEventBus, OrderStatusChangedEvent, OrderCreatedEvent } from '../eventBus/AppEventBus.js';
 import { adminAuth, adminDb } from '../../config/firebase.js';
 import { sanitizeError } from '../../utils/logSanitizer.js';
+import { redisEventBusBridge } from '../eventBus/RedisEventBusBridge.js';
 
 export interface AuthoritativeUserInfo {
   role: string;
@@ -157,6 +158,11 @@ class OliveWebSocketServer {
    */
   attach(httpServer: any): void {
     if (this.wss) return; // Already attached
+
+    redisEventBusBridge.registerWebSocketServer(this);
+    redisEventBusBridge.init().catch((err: any) => {
+      console.warn('[WebSocketServer] RedisEventBusBridge notice:', err.message);
+    });
 
     this.wss = new WSSNative({ server: httpServer, path: '/ws' });
 
@@ -629,7 +635,7 @@ class OliveWebSocketServer {
   /**
    * Processes a live location update from a driver.
    */
-  public handleDriverLocationUpdate(data: DriverLocationData): void {
+  public handleDriverLocationUpdate(data: DriverLocationData, fromRemote = false): void {
     if (!data || !data.deliveryPartnerId || data.lat === undefined || data.lng === undefined) {
       return;
     }
@@ -658,7 +664,7 @@ class OliveWebSocketServer {
 
     // 1. If assigned to an active order, broadcast to all clients subscribed to that order (Customer tracking)
     if (normalizedData.orderId) {
-      this.broadcastToOrder(normalizedData.orderId, broadcastMsg);
+      this.broadcastToOrder(normalizedData.orderId, broadcastMsg, true);
     }
 
     // 2. Scoped broadcast for real-time fleet map (Branch/Franchise isolation)
@@ -668,47 +674,60 @@ class OliveWebSocketServer {
       this.broadcastToBranch(driverFranchise, driverBranch, {
         type: 'driver.location_update',
         data: normalizedData
-      });
+      }, true);
     } else {
-      this.broadcastToRole('owner', broadcastMsg);
-      this.broadcastToRole('admin', broadcastMsg);
+      this.broadcastToRole('owner', broadcastMsg, true);
+      this.broadcastToRole('admin', broadcastMsg, true);
+    }
+
+    // Inter-node cluster distribution
+    if (!fromRemote) {
+      redisEventBusBridge.publishWsBroadcast('driverLocationUpdate', { payload: data }).catch(() => {});
     }
   }
 
   /**
    * Broadcast to all clients subscribed to a specific order ID.
    */
-  public broadcastToOrder(orderId: string, message: object): void {
+  public broadcastToOrder(orderId: string, message: object, fromRemote = false): void {
     const subs = this.orderSubscribers.get(orderId);
-    if (!subs || subs.size === 0) return;
-
-    const payload = JSON.stringify(message);
-    for (const client of subs) {
-      if (client.ws.readyState === WebSocket.OPEN) {
-        client.ws.send(payload);
+    if (subs && subs.size > 0) {
+      const payload = JSON.stringify(message);
+      for (const client of subs) {
+        if (client.ws.readyState === WebSocket.OPEN) {
+          client.ws.send(payload);
+        }
       }
+    }
+
+    if (!fromRemote) {
+      redisEventBusBridge.publishWsBroadcast('broadcastToOrder', { targetOrderId: orderId, payload: message }).catch(() => {});
     }
   }
 
   /**
    * Send a message to all WebSocket connections for a specific Firebase UID.
    */
-  broadcastToUser(uid: string, message: object): void {
+  broadcastToUser(uid: string, message: object, fromRemote = false): void {
     const userClients = this.clients.get(uid);
-    if (!userClients || userClients.size === 0) return;
-
-    const payload = JSON.stringify(message);
-    for (const client of userClients) {
-      if (client.ws.readyState === WebSocket.OPEN) {
-        client.ws.send(payload);
+    if (userClients && userClients.size > 0) {
+      const payload = JSON.stringify(message);
+      for (const client of userClients) {
+        if (client.ws.readyState === WebSocket.OPEN) {
+          client.ws.send(payload);
+        }
       }
+    }
+
+    if (!fromRemote) {
+      redisEventBusBridge.publishWsBroadcast('broadcastToUser', { targetUserId: uid, payload: message }).catch(() => {});
     }
   }
 
   /**
    * Broadcast to all users with a specific role (for targeted operational dashboards).
    */
-  broadcastToRole(role: string, message: object): void {
+  broadcastToRole(role: string, message: object, fromRemote = false): void {
     const payload = JSON.stringify(message);
     for (const userClients of this.clients.values()) {
       for (const client of userClients) {
@@ -717,13 +736,17 @@ class OliveWebSocketServer {
         }
       }
     }
+
+    if (!fromRemote) {
+      redisEventBusBridge.publishWsBroadcast('broadcastToRole', { targetRole: role, payload: message }).catch(() => {});
+    }
   }
 
   /**
    * Broadcast to all users in a specific branch & franchise, plus global supervisors.
    * Employs the branch ring buffer to guarantee monotonic sequence numbering.
    */
-  broadcastToBranch(franchiseId: string, branchId: string, message: { type: string; data: any; eventId?: string }): BranchRingBufferEvent {
+  broadcastToBranch(franchiseId: string, branchId: string, message: { type: string; data: any; eventId?: string }, fromRemote = false): BranchRingBufferEvent {
     const ringEvent = this.recordBranchEvent(franchiseId, branchId, message.type, message.eventId || '', message.data);
     const envelope = {
       type: message.type,
@@ -758,21 +781,30 @@ class OliveWebSocketServer {
       }
     }
 
+    if (!fromRemote) {
+      redisEventBusBridge.publishWsBroadcast('broadcastToBranch', { franchiseId, branchId, payload: message }).catch(() => {});
+    }
+
     return ringEvent;
   }
 
   /**
    * Broadcast to ALL connected clients.
    */
-  broadcastToAll(message: object): void {
-    if (!this.wss) return;
-    const payload = JSON.stringify(message);
-    for (const userClients of this.clients.values()) {
-      for (const client of userClients) {
-        if (client.ws.readyState === WebSocket.OPEN) {
-          client.ws.send(payload);
+  broadcastToAll(message: object, fromRemote = false): void {
+    if (this.wss) {
+      const payload = JSON.stringify(message);
+      for (const userClients of this.clients.values()) {
+        for (const client of userClients) {
+          if (client.ws.readyState === WebSocket.OPEN) {
+            client.ws.send(payload);
+          }
         }
       }
+    }
+
+    if (!fromRemote) {
+      redisEventBusBridge.publishWsBroadcast('broadcastToAll', { payload: message }).catch(() => {});
     }
   }
 

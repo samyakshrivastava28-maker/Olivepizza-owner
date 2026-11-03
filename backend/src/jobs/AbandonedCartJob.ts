@@ -13,6 +13,7 @@ import cron from 'node-cron';
 import { adminDb } from '../config/firebase.js';
 import { notificationEngine } from '../services/notification/NotificationEngine.js';
 import { CustomerTemplates } from '../services/notification/NotificationTemplates.js';
+import { distributedJobCoordinator } from '../services/jobs/DistributedJobCoordinator.js';
 
 export interface AbandonedCartResult {
   userId: string;
@@ -30,17 +31,19 @@ export class AbandonedCartJob {
   private static readonly MAX_AGE_THRESHOLD_MS = 48 * 60 * 60 * 1000; // Ignore stale carts older than 48h
 
   public static init() {
-    // Schedule: Runs hourly at minute 0
+    // Schedule: Runs hourly at minute 0 (coordinated across cluster)
     cron.schedule('0 * * * *', async () => {
-      console.log('⏰ [AbandonedCartJob] Running hourly abandoned cart scan...');
-      try {
-        await AbandonedCartJob.processAbandonedCarts();
-      } catch (err: any) {
-        console.error('❌ [AbandonedCartJob] Error during abandoned cart processing:', err.message);
-      }
+      await distributedJobCoordinator.runScheduledSingleton('abandoned_cart_hourly', 300, async () => {
+        console.log('⏰ [AbandonedCartJob] Running hourly abandoned cart scan...');
+        try {
+          await AbandonedCartJob.processAbandonedCarts();
+        } catch (err: any) {
+          console.error('❌ [AbandonedCartJob] Error during abandoned cart processing:', err.message);
+        }
+      });
     });
 
-    console.log('⏰ [AbandonedCartJob] Initialized hourly 8-hour abandoned cart reminder job.');
+    console.log('⏰ [AbandonedCartJob] Initialized hourly 8-hour abandoned cart reminder job (distributed).');
   }
 
   /**

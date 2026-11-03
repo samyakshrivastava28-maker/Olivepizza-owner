@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { checkPostgresHealth, pgPool } from '../config/postgres.js';
 import { checkSupabaseHealth } from '../config/supabase.js';
 import { adminDb, isFirebaseAdminAuthenticated } from '../config/firebase.js';
+import { redisService } from '../services/redis/RedisService.js';
 import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
 import { execSync } from 'child_process';
 
@@ -50,47 +51,86 @@ router.get('/version', (req, res) => {
 router.get(['/ready', '/health/readiness', '/api/ready'], async (req, res) => {
   let firestoreStatus = 'healthy';
   let postgresStatus = 'healthy';
+  let redisStatus = 'healthy';
   let firestoreError: string | undefined;
   let postgresError: string | undefined;
+  let redisError: string | undefined;
 
-  try {
-    if (!adminDb || !isFirebaseAdminAuthenticated) {
-      firestoreStatus = 'unhealthy';
-      firestoreError = !isFirebaseAdminAuthenticated
-        ? 'Firebase Admin unauthenticated: Missing valid service account credentials'
-        : 'Firebase Admin DB instance not initialized';
-    } else {
-      await Promise.race([
+  const probeTimeoutMs = 2500;
+
+  // Run all probes concurrently for rapid HAProxy health responses
+  const [firestoreResult, postgresResult, redisResult] = await Promise.allSettled([
+    // 1. Firestore Probe
+    (async () => {
+      if (!adminDb || !isFirebaseAdminAuthenticated) {
+        throw new Error(!isFirebaseAdminAuthenticated
+          ? 'Firebase Admin unauthenticated: Missing valid service account credentials'
+          : 'Firebase Admin DB instance not initialized');
+      }
+      return Promise.race([
         adminDb.collection('settings').limit(1).get(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore probe timed out after 5000ms')), 5000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`Firestore probe timed out after ${probeTimeoutMs}ms`)), probeTimeoutMs))
       ]);
-    }
-  } catch (e: any) {
+    })(),
+
+    // 2. PostgreSQL Probe
+    (async () => {
+      return Promise.race([
+        pgPool.query('SELECT 1'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`PostgreSQL probe timed out after ${probeTimeoutMs}ms`)), probeTimeoutMs))
+      ]);
+    })(),
+
+    // 3. Redis Probe
+    (async () => {
+      const isRedisConfigured = Boolean(process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL || process.env.REDIS_HOST);
+      if (isRedisConfigured || process.env.NODE_ENV === 'production' || process.env.REQUIRE_REDIS === 'true') {
+        const pong = await Promise.race([
+          redisService.ping(),
+          new Promise<boolean>((_, reject) => setTimeout(() => reject(new Error(`Redis probe timed out after ${probeTimeoutMs}ms`)), probeTimeoutMs))
+        ]);
+        if (!pong) {
+          throw new Error('Redis ping did not return PONG');
+        }
+        return 'healthy';
+      }
+      return 'skipped';
+    })()
+  ]);
+
+  if (firestoreResult.status === 'rejected') {
     firestoreStatus = 'unhealthy';
-    firestoreError = e.message;
+    firestoreError = firestoreResult.reason?.message || String(firestoreResult.reason);
   }
 
-  try {
-    await Promise.race([
-      pgPool.query('SELECT 1'),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('PostgreSQL probe timed out after 5000ms')), 5000))
-    ]);
-  } catch (e: any) {
+  if (postgresResult.status === 'rejected') {
     postgresStatus = 'unhealthy';
-    postgresError = e.message;
+    postgresError = postgresResult.reason?.message || String(postgresResult.reason);
   }
 
-  const isReady = firestoreStatus === 'healthy' && postgresStatus === 'healthy';
+  if (redisResult.status === 'rejected') {
+    redisStatus = 'unhealthy';
+    redisError = redisResult.reason?.message || String(redisResult.reason);
+  } else if (redisResult.value === 'skipped') {
+    redisStatus = 'skipped';
+  }
+
+  const isCriticalDataHealthy = firestoreStatus === 'healthy' && postgresStatus === 'healthy';
+  const isRedisHealthy = redisStatus === 'healthy' || redisStatus === 'skipped';
+  const isReady = isCriticalDataHealthy && isRedisHealthy;
+
   res.status(isReady ? 200 : 503).json({
     status: isReady ? 'ready' : 'not_ready',
     firestore: firestoreStatus,
     postgres: postgresStatus,
+    redis: redisStatus,
     checks: {
       server: 'ready',
       firestore: firestoreStatus,
-      postgres: postgresStatus
+      postgres: postgresStatus,
+      redis: redisStatus
     },
-    errors: isReady ? undefined : { firestore: firestoreError, postgres: postgresError },
+    errors: isReady ? undefined : { firestore: firestoreError, postgres: postgresError, redis: redisError },
     timestamp: new Date().toISOString()
   });
 });

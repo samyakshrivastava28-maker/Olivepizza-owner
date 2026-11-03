@@ -14,6 +14,7 @@ import { query } from '../config/postgres.js';
 import { adminDb } from '../config/firebase.js';
 import { FranchiseGoogleSheetsService } from '../services/reports/FranchiseGoogleSheetsService.js';
 import { BillingNumberService } from '../services/pos/BillingNumberService.js';
+import { distributedJobCoordinator } from '../services/jobs/DistributedJobCoordinator.js';
 
 export interface DailySyncResult {
   date: string;
@@ -30,20 +31,22 @@ export class DailySheetsSyncJob {
   private static isRunning = false;
 
   public static init() {
-    // Cron: 00:00 AM every day (Asia/Kolkata timezone)
+    // Cron: 00:00 AM every day (Asia/Kolkata timezone) coordinated across cluster
     cron.schedule('0 0 * * *', async () => {
-      console.log('⏰ [DailySheetsSyncJob] Automated 00:00 AM IST daily Google Sheets sync triggered.');
-      try {
-        await DailySheetsSyncJob.syncPreviousDay();
-        console.log('✅ [DailySheetsSyncJob] Daily Google Sheets sync completed successfully.');
-      } catch (err: any) {
-        console.error('❌ [DailySheetsSyncJob] Daily Google Sheets sync failed:', err.message);
-      }
+      await distributedJobCoordinator.runScheduledSingleton('daily_sheets_sync_ist', 600, async () => {
+        console.log('⏰ [DailySheetsSyncJob] Automated 00:00 AM IST daily Google Sheets sync triggered.');
+        try {
+          await DailySheetsSyncJob.syncPreviousDay();
+          console.log('✅ [DailySheetsSyncJob] Daily Google Sheets sync completed successfully.');
+        } catch (err: any) {
+          console.error('❌ [DailySheetsSyncJob] Daily Google Sheets sync failed:', err.message);
+        }
+      });
     }, {
       timezone: 'Asia/Kolkata'
     });
 
-    console.log('⏰ [DailySheetsSyncJob] Scheduled to run daily at 00:00 AM IST for previous day orders.');
+    console.log('⏰ [DailySheetsSyncJob] Scheduled to run daily at 00:00 AM IST for previous day orders (distributed).');
   }
 
   /**

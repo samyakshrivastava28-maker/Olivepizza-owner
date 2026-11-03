@@ -80,6 +80,21 @@ export interface SearchOrderFilters {
 
 export class CanonicalOrderService {
   /**
+   * Deterministically computes a SHA-256 fingerprint for order idempotency
+   */
+  public static computeOrderFingerprint(params: any): string {
+    return (params as any).requestFingerprint || crypto.createHash('sha256').update(JSON.stringify({
+      id: params.id,
+      customerPhone: params.customerPhone,
+      totalAmount: params.totalAmount,
+      items: (params.items || []).map((it: any) => ({
+        id: it.menuItemId || it.id,
+        quantity: it.quantity,
+        price: it.price
+      }))
+    })).digest('hex');
+  }
+  /**
    * Atomically commits a new order, immutable line items, and financial bill to PostgreSQL.
    */
   public static async createCanonicalOrder(params: CreateOrderParams) {
