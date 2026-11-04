@@ -27,6 +27,7 @@ coverage/
 release.keystore
 android/app/release.keystore
 android/app/*.keystore
+!android/app/ci-release.keystore
 android/app/*.keystore.b64
 credentials/
 serviceAccountKey*.json
