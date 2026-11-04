@@ -1,3 +1,4 @@
+import '../../config/env.js';
 /**
  * RedisService.ts — Resilient Redis In-Memory Caching & Distributed Locking Engine
  * 

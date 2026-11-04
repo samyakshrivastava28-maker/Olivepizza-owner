@@ -1,3 +1,4 @@
+import '../config/env.ts';
 /**
  * layerbase_integration.test.ts — Live Integration Verification against Layerbase PostgreSQL & Redis
  * 

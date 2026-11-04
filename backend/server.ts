@@ -1,3 +1,4 @@
+import './src/config/env.ts';
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';

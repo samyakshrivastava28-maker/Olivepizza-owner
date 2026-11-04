@@ -1,3 +1,4 @@
+import './env.js';
 import pkg from 'pg';
 const { Pool } = pkg;
 import type { PoolClient, QueryResult } from 'pg';
