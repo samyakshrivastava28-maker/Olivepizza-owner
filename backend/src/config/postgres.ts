@@ -17,7 +17,9 @@ export const DATABASE_PROVIDER: DatabaseProvider =
   (process.env.DATABASE_PROVIDER as DatabaseProvider) || 
   (process.env.DATABASE_URL?.includes('layerbase.dev') ? 'layerbase' : 'layerbase');
 
-let dbUrl: string | undefined = process.env.DATABASE_URL;
+let dbUrl: string | undefined = (process.env.DATABASE_PROVIDER === 'layerbase' || process.env.DATABASE_ENV === 'layerbase')
+  ? (process.env.LAYERBASE_DATABASE_URL || process.env.DATABASE_URL)
+  : process.env.DATABASE_URL;
 
 if (!dbUrl) {
   if (DATABASE_PROVIDER === 'layerbase' || DATABASE_ENV === 'layerbase') {
