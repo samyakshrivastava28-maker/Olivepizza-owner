@@ -62,7 +62,7 @@ app.use('/api', healthRoutes);
   try {
     await Promise.race([
       adminDb.collection('settings').limit(1).get(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore probe timed out after 5000ms')), 5000))
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore probe timed out after 10000ms')), 10000))
     ]);
   } catch (e: any) {
     firestoreStatus = 'unhealthy';

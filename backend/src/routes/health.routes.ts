@@ -59,11 +59,11 @@ router.get(['/ready', '/health/readiness', '/api/ready'], async (req, res) => {
   let postgresError: string | undefined;
   let redisError: string | undefined;
 
-  const probeTimeoutMs = 5000;
+  const probeTimeoutMs = 10000;
 
   // Run all probes concurrently for rapid HAProxy health responses
   const [firestoreResult, postgresResult, redisResult] = await Promise.allSettled([
-    // 1. Firestore Probe with 60s quota-protective cache
+    // 1. Firestore Probe with quota-protective cache
     (async () => {
       if (cachedFirestoreProbe && Date.now() < cachedFirestoreProbe.expiresAt) {
         if (cachedFirestoreProbe.status === 'healthy') return 'healthy';
@@ -87,10 +87,14 @@ router.get(['/ready', '/health/readiness', '/api/ready'], async (req, res) => {
         return 'healthy';
       } catch (err: any) {
         let errorMsg = err?.message || String(err);
-        if (err?.code === 8 || errorMsg.includes('RESOURCE_EXHAUSTED') || errorMsg.includes('Quota exceeded')) {
+        const isQuotaExhausted = err?.code === 8 || errorMsg.includes('RESOURCE_EXHAUSTED') || errorMsg.includes('Quota exceeded');
+        if (isQuotaExhausted) {
           errorMsg = 'Firestore daily quota exhausted (Google Cloud Code 8 RESOURCE_EXHAUSTED: Daily Free Tier limit reached)';
+        } else if (errorMsg.includes('timed out')) {
+          errorMsg = `Firestore probe timed out after ${probeTimeoutMs}ms (Google Cloud latency or quota throttling)`;
         }
-        cachedFirestoreProbe = { status: 'unhealthy', error: errorMsg, expiresAt: Date.now() + 60000 };
+        const cacheTtlMs = isQuotaExhausted ? 300000 : 60000;
+        cachedFirestoreProbe = { status: 'unhealthy', error: errorMsg, expiresAt: Date.now() + cacheTtlMs };
         throw new Error(errorMsg);
       }
     })(),
