@@ -4,8 +4,8 @@ import { DevAlertService } from './email/DevAlertService.js';
 import dotenv from 'dotenv';
 dotenv.config();
 
-// Fast fail on missing env
-if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+// Fast fail on missing env (skip warning in test mode)
+if ((!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) && process.env.NODE_ENV !== 'test') {
   console.error("CRITICAL ERROR: SMTP credentials missing in environment variables. Emails will fail.");
 }
 
@@ -418,5 +418,7 @@ export const stopEmailWorker = (): void => {
   }
 };
 
-// Start worker with unref for background drain
-startEmailWorker();
+// Start worker with unref for background drain (only in non-test runtime)
+if (process.env.NODE_ENV !== 'test') {
+  startEmailWorker();
+}

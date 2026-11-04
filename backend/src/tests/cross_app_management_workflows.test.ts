@@ -16,7 +16,9 @@ import { FranchiseAccessService } from '../services/franchise/FranchiseAccessSer
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
 import { BillingNumberService } from '../services/pos/BillingNumberService.js';
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
-import { query } from '../config/postgres.js';
+import { query, setTestQueryOverride, setTestTransactionOverride } from '../config/postgres.js';
+import { setTestDbOverride } from '../lib/db.js';
+import { createDisposableTestDb, DisposableTestDb } from './disposableTestDb.js';
 import { adminDb } from '../config/firebase.js';
 
 async function runScenarioA() {
@@ -184,7 +186,40 @@ async function runScenarioF(franchiseId: string, branchId: string) {
   console.log('✅ Scenario F completed successfully.');
 }
 
-test('Master Workflow Scenarios A through F', async () => {
+test('Master Workflow Scenarios A through F', async (t) => {
+  const testDb = await createDisposableTestDb();
+  const mockPoolClient = {
+    query: testDb.query,
+    release: () => {}
+  };
+  const mockPool = {
+    query: testDb.query,
+    connect: async () => mockPoolClient
+  };
+  setTestDbOverride(testDb.query, mockPool);
+  setTestQueryOverride(testDb.query);
+  setTestTransactionOverride(testDb.withTransaction);
+
+  t.after(async () => {
+    setTestDbOverride(null, null);
+    setTestQueryOverride(null);
+    setTestTransactionOverride(null);
+    if (testDb) {
+      await testDb.close();
+    }
+  });
+
+  await testDb.db.exec(`
+    INSERT INTO app_users (id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active)
+    VALUES
+      ('usr_owner_webhub', 'webhub2811@gmail.com', '9179944445', 'Platform Owner', 'owner', 'APPROVED', 'fra_rajnandgaon', 'main_branch', '["OWNER"]'::jsonb, true)
+    ON CONFLICT (id) DO UPDATE SET
+      email = EXCLUDED.email,
+      role = EXCLUDED.role,
+      status = EXCLUDED.status,
+      allowed_apps = EXCLUDED.allowed_apps,
+      is_active = EXCLUDED.is_active;
+  `);
   console.log('🚀 Running Olive Pizza Master Workflow Scenarios A through F...\n');
   const { testFranchiseId, testBranchId } = await runScenarioA();
   await runScenarioB(testFranchiseId, testBranchId);

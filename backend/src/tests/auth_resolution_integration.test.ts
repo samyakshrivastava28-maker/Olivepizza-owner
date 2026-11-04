@@ -30,8 +30,16 @@ test('Multi-App Role & Scope Authorization Matrix (Strict Separation Policy)', a
     }
   });
 
-  // Seed PostgreSQL app_users and delivery_partners for tests
+  // Seed PostgreSQL franchises, branches, app_users and delivery_partners for tests
   await testDb.db.exec(`
+    INSERT INTO franchises (id, name, status)
+    VALUES ('fra_rajnandgaon', 'Olive Pizza Rajnandgaon', 'ACTIVE')
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO restaurant_branches (id, franchise_id, name, is_open)
+    VALUES ('main_branch', 'fra_rajnandgaon', 'Rajnandgaon Main Branch', true)
+    ON CONFLICT (id) DO NOTHING;
+
     INSERT INTO app_users (id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active)
     VALUES
       ('usr_owner_webhub', 'webhub2811@gmail.com', '9179944445', 'Platform Owner', 'owner', 'APPROVED', 'fra_rajnandgaon', 'main_branch', '["OWNER"]'::jsonb, true),

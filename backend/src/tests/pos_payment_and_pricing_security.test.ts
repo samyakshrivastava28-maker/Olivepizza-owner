@@ -133,6 +133,16 @@ test('Olive Pizza POS — Security & Authorization Authority Test Suite', async 
   });
 
   await t.test('P0: Reject Missing, Unassigned & Mismatched Franchise Ownership', async (st) => {
+    // Prime in-memory catalog cache for prod_margherita so tests do not depend on external Firestore network
+    POSService.seedCatalogItem('prod_margherita', {
+      id: 'prod_margherita',
+      name: 'Margherita Pizza',
+      productName: 'Margherita Pizza',
+      basePrice: 150,
+      price: 150,
+      isAvailable: true,
+      isActive: true
+    });
     // 1. Missing branchId
     await assert.rejects(
       async () => {

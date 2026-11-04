@@ -14,20 +14,17 @@ export const DATABASE_ENV: DatabaseEnvironment =
   (process.env.NODE_ENV === 'production' ? 'production' : 'development');
 
 export type DatabaseProvider = 'layerbase' | 'self_hosted' | 'local' | 'render-test' | 'vps';
-export const DATABASE_PROVIDER: DatabaseProvider = 
-  (process.env.DATABASE_PROVIDER as DatabaseProvider) || 
-  (process.env.DATABASE_URL?.includes('layerbase.dev') ? 'layerbase' : 'layerbase');
 
 let dbUrl: string | undefined = (process.env.DATABASE_PROVIDER === 'layerbase' || process.env.DATABASE_ENV === 'layerbase')
   ? (process.env.LAYERBASE_DATABASE_URL || process.env.DATABASE_URL)
   : process.env.DATABASE_URL;
 
 if (!dbUrl) {
-  if (DATABASE_PROVIDER === 'layerbase' || DATABASE_ENV === 'layerbase') {
+  if (process.env.DATABASE_PROVIDER === 'layerbase' || process.env.DATABASE_ENV === 'layerbase') {
     dbUrl = process.env.LAYERBASE_DATABASE_URL || process.env.DATABASE_URL;
-  } else if (DATABASE_PROVIDER === 'self_hosted' || DATABASE_PROVIDER === 'vps' || DATABASE_ENV === 'production' || DATABASE_ENV === 'vps') {
+  } else if (process.env.DATABASE_PROVIDER === 'self_hosted' || process.env.DATABASE_PROVIDER === 'vps' || process.env.DATABASE_ENV === 'production' || process.env.DATABASE_ENV === 'vps') {
     dbUrl = process.env.VPS_POSTGRES_URL || process.env.DATABASE_URL;
-  } else if (DATABASE_PROVIDER === 'render-test' || DATABASE_ENV === 'render-test') {
+  } else if (process.env.DATABASE_PROVIDER === 'render-test' || process.env.DATABASE_ENV === 'render-test') {
     dbUrl = process.env.RENDER_POSTGRES_URL || process.env.DATABASE_URL;
   } else {
     dbUrl = process.env.DATABASE_URL;
@@ -42,15 +39,27 @@ if (dbUrl && dbUrl.includes('.supabase.co')) {
   }
 }
 
-const isLayerbase = Boolean(dbUrl?.includes('layerbase.dev') || DATABASE_PROVIDER === 'layerbase' || DATABASE_ENV === 'layerbase');
-const isRenderPostgres = Boolean(dbUrl?.includes('render.com') || dbUrl?.includes('dpg-'));
-const isCloudPostgres = Boolean(isLayerbase || isRenderPostgres || dbUrl?.includes('supabase.co') || dbUrl?.includes('pooler.supabase.com'));
-const isLocalPostgres = Boolean(
+const isExplicitLocalHost = Boolean(
   dbUrl?.includes('localhost') || 
   dbUrl?.includes('127.0.0.1') || 
-  process.env.PG_SSL === 'false' ||
-  (!isCloudPostgres && process.env.NODE_ENV === 'test')
+  dbUrl?.includes('::1')
 );
+
+export const DATABASE_PROVIDER: DatabaseProvider = 
+  (process.env.DATABASE_PROVIDER as DatabaseProvider) || 
+  (isExplicitLocalHost ? 'local' :
+   dbUrl?.includes('layerbase.dev') ? 'layerbase' :
+   dbUrl?.includes('render.com') || dbUrl?.includes('dpg-') ? 'render-test' : 'layerbase');
+
+const isLocalPostgres = Boolean(
+  isExplicitLocalHost ||
+  DATABASE_PROVIDER === 'local' ||
+  (process.env.NODE_ENV === 'test' && !dbUrl?.includes('layerbase.dev') && !dbUrl?.includes('supabase.co'))
+);
+
+const isLayerbase = Boolean(!isLocalPostgres && (dbUrl?.includes('layerbase.dev') || DATABASE_PROVIDER === 'layerbase' || DATABASE_ENV === 'layerbase'));
+const isRenderPostgres = Boolean(!isLocalPostgres && (dbUrl?.includes('render.com') || dbUrl?.includes('dpg-') || DATABASE_PROVIDER === 'render-test'));
+const isCloudPostgres = Boolean(!isLocalPostgres && (isLayerbase || isRenderPostgres || dbUrl?.includes('supabase.co') || dbUrl?.includes('pooler.supabase.com')));
 
 const maxConnections = parseInt(process.env.POSTGRES_POOL_MAX || (isLayerbase ? '10' : '20'), 10);
 const idleTimeoutMillis = parseInt(process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS || (isLayerbase ? '2000' : '30000'), 10);

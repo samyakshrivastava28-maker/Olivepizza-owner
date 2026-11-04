@@ -44,6 +44,9 @@ router.get('/version', (req, res) => {
   });
 });
 
+// In-memory 60s TTL cache for dependency health probes to protect external quotas
+let cachedFirestoreProbe: { status: 'healthy' | 'unhealthy'; error?: string; expiresAt: number } | null = null;
+
 /**
  * Readiness Probe:
  * Returns simple pass/fail status without exposing internal infrastructure topology or connection metrics.
@@ -60,17 +63,36 @@ router.get(['/ready', '/health/readiness', '/api/ready'], async (req, res) => {
 
   // Run all probes concurrently for rapid HAProxy health responses
   const [firestoreResult, postgresResult, redisResult] = await Promise.allSettled([
-    // 1. Firestore Probe
+    // 1. Firestore Probe with 60s quota-protective cache
     (async () => {
-      if (!adminDb || !isFirebaseAdminAuthenticated) {
-        throw new Error(!isFirebaseAdminAuthenticated
-          ? 'Firebase Admin unauthenticated: Missing valid service account credentials'
-          : 'Firebase Admin DB instance not initialized');
+      if (cachedFirestoreProbe && Date.now() < cachedFirestoreProbe.expiresAt) {
+        if (cachedFirestoreProbe.status === 'healthy') return 'healthy';
+        throw new Error(cachedFirestoreProbe.error || 'Firestore probe failed');
       }
-      return Promise.race([
-        adminDb.collection('settings').limit(1).get(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`Firestore probe timed out after ${probeTimeoutMs}ms`)), probeTimeoutMs))
-      ]);
+
+      if (!adminDb || !isFirebaseAdminAuthenticated) {
+        const err = !isFirebaseAdminAuthenticated
+          ? 'Firebase Admin unauthenticated: Missing valid service account credentials'
+          : 'Firebase Admin DB instance not initialized';
+        cachedFirestoreProbe = { status: 'unhealthy', error: err, expiresAt: Date.now() + 15000 };
+        throw new Error(err);
+      }
+
+      try {
+        await Promise.race([
+          adminDb.collection('settings').limit(1).get(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error(`Firestore probe timed out after ${probeTimeoutMs}ms`)), probeTimeoutMs))
+        ]);
+        cachedFirestoreProbe = { status: 'healthy', expiresAt: Date.now() + 60000 };
+        return 'healthy';
+      } catch (err: any) {
+        let errorMsg = err?.message || String(err);
+        if (err?.code === 8 || errorMsg.includes('RESOURCE_EXHAUSTED') || errorMsg.includes('Quota exceeded')) {
+          errorMsg = 'Firestore daily quota exhausted (Google Cloud Code 8 RESOURCE_EXHAUSTED: Daily Free Tier limit reached)';
+        }
+        cachedFirestoreProbe = { status: 'unhealthy', error: errorMsg, expiresAt: Date.now() + 60000 };
+        throw new Error(errorMsg);
+      }
     })(),
 
     // 2. PostgreSQL Probe

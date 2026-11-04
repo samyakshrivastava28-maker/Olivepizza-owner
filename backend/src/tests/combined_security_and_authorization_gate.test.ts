@@ -58,8 +58,20 @@ test('Combined Security, Authorization, Offline Reliability & Data Integrity Acc
     }
   });
 
-  // Seed PostgreSQL app_users and delivery_partners
+  // Seed PostgreSQL franchises, branches, app_users and delivery_partners
   await testDb.db.exec(`
+    INSERT INTO franchises (id, name, status)
+    VALUES
+      ('fra_rajnandgaon', 'Olive Pizza Rajnandgaon', 'ACTIVE'),
+      ('fra_bilaspur', 'Olive Pizza Bilaspur', 'ACTIVE')
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO restaurant_branches (id, franchise_id, name, is_open)
+    VALUES
+      ('branch_rjn_main', 'fra_rajnandgaon', 'RJN Main Branch', true),
+      ('branch_bsp_main', 'fra_bilaspur', 'BSP Main Branch', true)
+    ON CONFLICT (id) DO NOTHING;
+
     INSERT INTO app_users (id, email, name, role, status, is_active, franchise_id, branch_id, allowed_apps)
     VALUES
       ('usr_global_owner', 'webhub2811@gmail.com', 'Samyak Shrivastava', 'owner', 'APPROVED', true, 'fra_rajnandgaon', 'branch_rjn_main', '["OWNER"]'::jsonb),
