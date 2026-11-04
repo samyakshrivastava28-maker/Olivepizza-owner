@@ -86,10 +86,12 @@ export async function runMigrations(customPool?: any): Promise<{ applied: string
 
       if (checkRes.rows.length > 0) {
         const sqlContent = fs.readFileSync(path.join(__dirname, file), 'utf8');
-        const currentChecksum = crypto.createHash('sha256').update(sqlContent, 'utf8').digest('hex');
+        const normalizedContent = sqlContent.replace(/\r\n/g, '\n');
+        const currentChecksum = crypto.createHash('sha256').update(normalizedContent, 'utf8').digest('hex');
+        const rawChecksum = crypto.createHash('sha256').update(sqlContent, 'utf8').digest('hex');
         const recordedChecksum = checkRes.rows[0].checksum;
 
-        if (recordedChecksum && recordedChecksum !== currentChecksum) {
+        if (recordedChecksum && recordedChecksum !== currentChecksum && recordedChecksum !== rawChecksum) {
           throw new Error(`[Migrations] Checksum mismatch for already-applied migration "${file}". Expected ${recordedChecksum}, but file on disk has ${currentChecksum}. Migration history has been altered! Aborting fail-closed.`);
         }
         if (!recordedChecksum) {

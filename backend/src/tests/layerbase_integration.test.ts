@@ -75,12 +75,12 @@ test('Layerbase PostgreSQL & Redis Live Integration Suite', async (t) => {
     const today = new Date();
     
     // Allocate numbers for Franchise A, Branch 1 (Main branch)
-    const allocA1 = await BillingNumberService.allocateNumbers(today, 'fra_primary', 'main_branch');
+    const allocA1 = await BillingNumberService.allocateNumbers(today, 'fra_rajnandgaon', 'main_branch');
     assert.ok(allocA1.permanentBillNo > 0, 'Permanent bill number is positive');
     assert.ok(allocA1.dailyOrderNo >= 1, 'Daily order number is positive');
 
     // Allocate next for Franchise A, Branch 1 -> dailyOrderNo must increment
-    const allocA2 = await BillingNumberService.allocateNumbers(today, 'fra_primary', 'main_branch');
+    const allocA2 = await BillingNumberService.allocateNumbers(today, 'fra_rajnandgaon', 'main_branch');
     assert.ok(allocA2.permanentBillNo > allocA1.permanentBillNo, 'Permanent bill number increments monotonically');
     assert.strictEqual(allocA2.dailyOrderNo, allocA1.dailyOrderNo + 1, 'Branch daily order number increments monotonically');
 
@@ -111,7 +111,7 @@ test('Layerbase PostgreSQL & Redis Live Integration Suite', async (t) => {
       totalAmount: 397.50,
       paymentMethod: 'UPI',
       paymentStatus: 'PAID',
-      franchiseId: 'fra_primary',
+      franchiseId: 'fra_rajnandgaon',
       branchId: 'main_branch'
     };
 
@@ -164,7 +164,7 @@ test('Layerbase PostgreSQL & Redis Live Integration Suite', async (t) => {
       totalAmount: 420,
       paymentMethod: 'CASH',
       paymentStatus: 'PAID',
-      franchiseId: 'fra_primary',
+      franchiseId: 'fra_rajnandgaon',
       branchId: 'main_branch'
     };
 
