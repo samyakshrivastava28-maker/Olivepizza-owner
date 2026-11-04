@@ -91,9 +91,10 @@ export class NotificationQueueService {
     // This mirrors the BackgroundTaskWorker pattern and prevents notifications from
     // silently sitting in the queue forever.
     this.processingTimer = setInterval(() => {
+      if ((pgPool as any)?.ending || (pgPool as any)?.ended) return;
       this.processQueue().catch(err => {
         // Only log real errors, not "no work" cases
-        if (err && err.message !== 'No work') {
+        if (err && err.message !== 'No work' && !err.message.includes('calling end on the pool')) {
           console.error('[NotifQueue] Polling processQueue error:', err.message);
         }
       });

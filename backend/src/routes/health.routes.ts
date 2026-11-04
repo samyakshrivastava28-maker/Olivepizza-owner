@@ -56,7 +56,7 @@ router.get(['/ready', '/health/readiness', '/api/ready'], async (req, res) => {
   let postgresError: string | undefined;
   let redisError: string | undefined;
 
-  const probeTimeoutMs = 2500;
+  const probeTimeoutMs = 5000;
 
   // Run all probes concurrently for rapid HAProxy health responses
   const [firestoreResult, postgresResult, redisResult] = await Promise.allSettled([

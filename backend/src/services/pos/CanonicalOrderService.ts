@@ -83,16 +83,60 @@ export class CanonicalOrderService {
    * Deterministically computes a SHA-256 fingerprint for order idempotency
    */
   public static computeOrderFingerprint(params: any): string {
-    return (params as any).requestFingerprint || crypto.createHash('sha256').update(JSON.stringify({
-      id: params.id,
-      customerPhone: params.customerPhone,
-      totalAmount: params.totalAmount,
-      items: (params.items || []).map((it: any) => ({
-        id: it.menuItemId || it.id,
-        quantity: it.quantity,
-        price: it.price
-      }))
-    })).digest('hex');
+    if ((params as any).requestFingerprint) {
+      return (params as any).requestFingerprint;
+    }
+
+    const toIntegerPaise = (amount: any): number => {
+      const num = Number(amount);
+      if (isNaN(num)) return 0;
+      return Math.round(num * 100);
+    };
+
+    const normalizeAddons = (addons: any[]): any[] => {
+      if (!Array.isArray(addons)) return [];
+      return addons.map(a => ({
+        id: String(a.id || a.addonId || a.name || '').trim().toLowerCase(),
+        name: String(a.name || '').trim(),
+        pricePaise: toIntegerPaise(a.price || a.unitPrice || 0)
+      })).sort((a, b) => a.id.localeCompare(b.id));
+    };
+
+    const normalizeItems = (items: any[]): any[] => {
+      if (!Array.isArray(items)) return [];
+      return items.map((it: any) => ({
+        id: String(it.menuItemId || it.id || it.productId || '').trim(),
+        name: String(it.name || '').trim(),
+        size: String(it.size || 'regular').trim().toLowerCase(),
+        crust: String(it.crust || 'normal').trim().toLowerCase(),
+        variant: String(it.variant || '').trim().toLowerCase(),
+        quantity: Math.max(1, Math.floor(Number(it.quantity) || 1)),
+        unitPricePaise: toIntegerPaise(it.unitPrice || it.price || 0),
+        addons: normalizeAddons(it.addons)
+      })).sort((a, b) => (a.id + a.size + a.crust).localeCompare(b.id + b.size + b.crust));
+    };
+
+    const canonicalPayload = {
+      orderId: String(params.id || '').trim(),
+      franchiseId: String(params.franchiseId || '').trim(),
+      branchId: String(params.branchId || '').trim(),
+      customerPhone: String(params.customerPhone || '').trim(),
+      customerId: String(params.customerId || params.userId || '').trim(),
+      currency: 'INR',
+      orderType: String(params.orderType || params.deliveryType || 'delivery').trim().toLowerCase(),
+      paymentMethod: String(params.paymentMethod || 'COD').trim().toUpperCase(),
+      paymentStatus: String(params.paymentStatus || 'PENDING').trim().toUpperCase(),
+      subtotalPaise: toIntegerPaise(params.subtotal || params.totalAmount || 0),
+      discountPaise: toIntegerPaise(params.discountAmount || params.discount || 0),
+      taxPaise: toIntegerPaise(params.taxAmount || params.tax || 0),
+      cgstPaise: toIntegerPaise(params.cgst || 0),
+      sgstPaise: toIntegerPaise(params.sgst || 0),
+      deliveryFeePaise: toIntegerPaise(params.deliveryFee || 0),
+      totalAmountPaise: toIntegerPaise(params.totalAmount || 0),
+      items: normalizeItems(params.items)
+    };
+
+    return crypto.createHash('sha256').update(JSON.stringify(canonicalPayload)).digest('hex');
   }
   /**
    * Atomically commits a new order, immutable line items, and financial bill to PostgreSQL.
@@ -129,16 +173,7 @@ export class CanonicalOrderService {
       }
     }
 
-    const requestFingerprint = (params as any).requestFingerprint || crypto.createHash('sha256').update(JSON.stringify({
-      id: orderId,
-      customerPhone: params.customerPhone,
-      totalAmount: params.totalAmount,
-      items: (params.items || []).map((it: any) => ({
-        id: it.menuItemId || it.id,
-        quantity: it.quantity,
-        price: it.price
-      }))
-    })).digest('hex');
+    const requestFingerprint = this.computeOrderFingerprint({ ...params, id: orderId });
 
     // 0. Idempotent check: if order with this ID already exists in canonical PostgreSQL ledger, return existing details
     if (params.id) {
@@ -155,6 +190,9 @@ export class CanonicalOrderService {
           const existingTotal = Number(row.total_amount);
           const incomingTotal = Number(params.totalAmount);
 
+          const existingPaise = Math.round(existingTotal * 100);
+          const incomingPaise = Math.round(incomingTotal * 100);
+
           if (existingFingerprint) {
             if (existingFingerprint !== requestFingerprint) {
               const conflictErr: any = new Error(`[CanonicalOrderService] Idempotency conflict: Order ${orderId} was previously committed with a different request fingerprint.`);
@@ -162,8 +200,8 @@ export class CanonicalOrderService {
               conflictErr.statusCode = 409;
               throw conflictErr;
             }
-          } else if (incomingTotal > 0 && Math.abs(incomingTotal - existingTotal) > 0.05) {
-            const conflictErr: any = new Error(`[CanonicalOrderService] Idempotency conflict: Order ${orderId} was previously committed with total ${existingTotal}, but received conflicting payload with total ${incomingTotal}.`);
+          } else if (incomingTotal > 0 && existingPaise !== incomingPaise) {
+            const conflictErr: any = new Error(`[CanonicalOrderService] Idempotency conflict: Order ${orderId} was previously committed with total ${existingTotal} (${existingPaise} paise), but received conflicting payload with total ${incomingTotal} (${incomingPaise} paise).`);
             conflictErr.code = 'IDEMPOTENCY_CONFLICT';
             conflictErr.statusCode = 409;
             throw conflictErr;
@@ -422,6 +460,13 @@ export class CanonicalOrderService {
       console.error('[CanonicalOrderService] Transaction FAILED with error:', txError.message || txError);
       throw txError;
     }
+
+    // Post-commit: Reconcile any provisional dispatch intent for this order
+    import('../delivery/ProvisionalDispatchService.js').then(({ ProvisionalDispatchService }) => {
+      ProvisionalDispatchService.reconcileProvisionalDispatch(orderId).catch(err => {
+        console.warn(`[CanonicalOrderService] Post-commit provisional reconciliation notice for ${orderId}:`, err.message);
+      });
+    }).catch(() => {});
 
     // 2.4 Authoritative Firestore Billing Record Persistence
     try {

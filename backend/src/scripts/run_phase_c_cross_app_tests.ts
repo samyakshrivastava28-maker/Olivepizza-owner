@@ -160,11 +160,24 @@ async function runWorkflowB() {
   console.log('📌 WORKFLOW B: POS Billing & Statutory Sequence Allocation');
   console.log('======================================================');
 
+  // Ensure Cashier test fixture exists in PostgreSQL
+  await query(`
+    INSERT INTO app_users (id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active, metadata)
+    VALUES ('staff_cashier_01', 'cashier@olivepizza.in', '+919876543211', 'POS Cashier', 'cashier', 'ACTIVE', 'fra_rajnandgaon', 'main_branch', '["POS"]'::jsonb, true, '{"allowed_terminals": ["POS-01", "ALL"]}'::jsonb)
+    ON CONFLICT (id) DO UPDATE SET
+      role = EXCLUDED.role,
+      status = EXCLUDED.status,
+      is_active = EXCLUDED.is_active,
+      allowed_apps = EXCLUDED.allowed_apps,
+      metadata = EXCLUDED.metadata;
+  `);
+
   // 1. Authorize Cashier
   const cashierAuth = await FranchiseAccessService.resolveAuthorization({
-    uid: 'ONXCYjWmN1hNVv6bVjwCYxi76Sz1',
+    uid: 'staff_cashier_01',
     email: 'cashier@olivepizza.in',
-    targetApp: 'POS'
+    targetApp: 'POS',
+    terminalId: 'POS-01'
   });
   assert.strictEqual(cashierAuth.authorized, true, 'Cashier must be authorized for POS');
   assert.ok(['cashier', 'pos_operator'].includes(cashierAuth.user?.role || ''), `Role must be cashier or pos_operator, got: ${cashierAuth.user?.role}`);
@@ -319,7 +332,7 @@ async function captureScreenshots() {
   for (const t of targets) {
     try {
       const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-      await page.goto(t.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await page.goto(t.url, { waitUntil: 'domcontentloaded', timeout: 2000 });
       await page.waitForTimeout(2000);
       const outPath = path.join(artifactDir, t.name);
       await page.screenshot({ path: outPath, fullPage: true });

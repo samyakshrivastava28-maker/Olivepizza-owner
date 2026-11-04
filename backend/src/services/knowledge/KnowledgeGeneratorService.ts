@@ -242,7 +242,7 @@ export class KnowledgeGeneratorService {
       const nextVersion = this.currentVersion;
       const updatedAt = new Date().toISOString();
 
-      // Build collections hash manifest for version.json (Requirement 4)
+      // Build collections hash manifest for version.json manifest
       const collectionsManifest: Record<string, { version: number; hash: string }> = {};
       this.checksumCache.forEach((hash, file) => {
         const colName = file.replace('.json', '');

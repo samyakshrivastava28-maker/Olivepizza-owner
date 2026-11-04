@@ -388,8 +388,9 @@ export const processEmailQueue = async () => {
 
 // Background polling timer: Drains queued emails every 5 seconds
 const emailPollingTimer = setInterval(() => {
+  if ((pgPool as any)?.ending || (pgPool as any)?.ended) return;
   processEmailQueue().catch(err => {
-    if (err && err.message !== 'No work') {
+    if (err && err.message !== 'No work' && !err.message.includes('calling end on the pool')) {
       console.warn('[EmailQueue] Polling warning:', err.message);
     }
   });

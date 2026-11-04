@@ -1,4 +1,4 @@
-﻿import { Router, Response } from 'express';
+import { Router, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
 import { verifyToken, AuthRequest, requireRole } from '../middleware/auth.middleware.js';
 import { idempotency } from '../middleware/idempotency.middleware.js';
@@ -98,7 +98,7 @@ const requirePOSRole = async (req: AuthRequest, res: Response, next: any): Promi
         }
       }
     } catch (pgErr: any) {
-      console.error('[requirePOSRole] PostgreSQL authoritative check failure (fail-closed):', pgErr.message);
+      console.error('[requirePOSRole] PostgreSQL authoritative check failure:', pgErr.message);
       res.status(503).json({ error: 'Database unavailable: Authoritative check failed', code: 'DATABASE_UNAVAILABLE' });
       return;
     }
@@ -434,7 +434,7 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
     const branchId = user.branchId!;
     let franchiseId = user.franchiseId!;
 
-    // Fail-Closed Branch Ownership Enforcement (Defect 3)
+    // Enforce branch ownership validation against authenticated franchise tenant
     try {
       const branchAuthCheck = await query(
         `SELECT id, franchise_id, is_open FROM restaurant_branches WHERE id = $1 LIMIT 1`,
@@ -525,7 +525,7 @@ router.post('/orders', verifyToken, requirePOSRole, idempotency(), async (req: A
         paymentStatus = 'PARTIAL'; // Underpaid cash tender
       }
     } else if (resolvedPaymentMethod === 'CARD' || resolvedPaymentMethod === 'UPI') {
-      // Server-Verified Payments & Anti-Reuse Binding (P0 Defect 1):
+      // Server-verified payments and anti-reuse binding:
       // Client-supplied flags (isCardVerified, isUpiVerified, verified) and arbitrary reference strings (edcAuthCode, upiRef, transactionId)
       // are NEVER trusted as proof of payment.
       // Payment can only be marked PAID if a captured server-side record exists in PostgreSQL `payments`
@@ -2616,7 +2616,7 @@ router.post(['/bills/sync-offline', '/bills/offline-sync'], verifyToken, require
     const branchId = user.branchId!;
     let franchiseId = user.franchiseId!;
 
-    // Fail-Closed Branch Ownership Enforcement (Defect 3)
+    // Enforce branch ownership validation against authenticated franchise tenant
     try {
       const branchAuthCheck = await query(
         `SELECT id, franchise_id, is_open FROM restaurant_branches WHERE id = $1 LIMIT 1`,

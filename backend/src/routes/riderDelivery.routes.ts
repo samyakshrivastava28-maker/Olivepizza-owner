@@ -764,6 +764,21 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           return;
         }
 
+        // Section 4.2 Enforce Provisional Dispatch Reconciliation Gate:
+        // A provisional dispatch cannot complete delivery until canonically reconciled in PostgreSQL
+        if (orderData.isProvisionalDispatch) {
+          const { ProvisionalDispatchService } = await import('../services/delivery/ProvisionalDispatchService.js');
+          const recon = await ProvisionalDispatchService.reconcileProvisionalDispatch(orderId);
+          if (!recon.reconciled) {
+            res.status(400).json({
+              success: false,
+              code: 'PROVISIONAL_RECONCILIATION_REQUIRED',
+              error: `Delivery completion blocked: ${recon.reason || 'Order is currently provisional and awaiting canonical reconciliation in PostgreSQL.'}`
+            });
+            return;
+          }
+        }
+
         const updates: any = {
           status: 'delivered',
           deliveredAt: new Date().toISOString(),

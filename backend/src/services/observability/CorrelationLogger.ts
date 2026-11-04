@@ -1,8 +1,8 @@
-﻿import { Request, Response, NextFunction } from 'express';
+import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 
 /**
- * 🛰️ Olive Pizza Structured Observability & Correlation Logger
+ * Olive Pizza Structured Observability & Correlation Logger
  * Injects a unique `x-correlation-id` into every incoming request and produces
  * JSON structured logs with latency, status codes, user identity, and route paths.
  */

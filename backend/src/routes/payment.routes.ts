@@ -28,7 +28,7 @@ router.post('/create-intent', optionalAuth, async (req: AuthRequest, res: Respon
       return;
     }
 
-    // Distributed Idempotency Key Handling (Requirement 14)
+    // Verify distributed idempotency key to prevent double charge or duplicate session creation
     const idempotencyKey = ((req.headers['idempotency-key'] || req.headers['x-idempotency-key'] || '') as string).trim();
     const payloadHash = crypto.createHash('sha256').update(JSON.stringify({
       userId,
@@ -54,7 +54,7 @@ router.post('/create-intent', optionalAuth, async (req: AuthRequest, res: Respon
       }
     }
 
-    // Requirement 8: Server Delivery Fee Authority — Never trust client deliveryFee for customers
+    // Authoritative delivery fee calculation: only authorized staff roles can supply manual fee adjustments
     const userRole = (req.user?.role || 'customer').toLowerCase();
     const isStaff = ['owner', 'admin', 'restaurant_manager', 'cashier'].includes(userRole);
     const authorizedCustomDeliveryFee = isStaff && req.body.deliveryFee != null ? Number(req.body.deliveryFee) : undefined;
@@ -153,7 +153,7 @@ router.post('/verify', verifyToken, async (req: AuthRequest, res: Response) => {
       }
     });
 
-    // 5. Enforce Strict Provider Verification, Amount Matching and Captured Status (Requirement 1.C)
+    // Enforce payment provider verification: require captured status and matching transaction details
     const finalTxId = verifyResult.providerTransactionId || providerTransactionId;
     if (!verifyResult.verified || verifyResult.status !== 'captured') {
       console.warn(`[PaymentSecurity][${requestId}] Verification rejected for ${paymentId}: ${verifyResult.errorReason || 'Not captured'}`);

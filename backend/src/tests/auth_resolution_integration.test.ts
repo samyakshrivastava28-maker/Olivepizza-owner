@@ -1,13 +1,60 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createDisposableTestDb, DisposableTestDb } from './disposableTestDb.js';
+import { setTestDbOverride } from '../lib/db.js';
+import { setTestQueryOverride } from '../config/postgres.js';
 import { FranchiseAccessService } from '../services/franchise/FranchiseAccessService.js';
 
 test('Multi-App Role & Scope Authorization Matrix (Strict Separation Policy)', async (t) => {
+  let testDb: DisposableTestDb;
+
+  testDb = await createDisposableTestDb();
+
+  const mockPoolClient = {
+    query: testDb.query,
+    release: () => {}
+  };
+  const mockPool = {
+    query: testDb.query,
+    connect: async () => mockPoolClient
+  };
+
+  setTestDbOverride(testDb.query, mockPool);
+  setTestQueryOverride(testDb.query);
+
+  t.after(async () => {
+    setTestDbOverride(null, null);
+    setTestQueryOverride(null);
+    if (testDb) {
+      await testDb.close();
+    }
+  });
+
+  // Seed PostgreSQL app_users and delivery_partners for tests
+  await testDb.db.exec(`
+    INSERT INTO app_users (id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active)
+    VALUES
+      ('usr_owner_webhub', 'webhub2811@gmail.com', '9179944445', 'Platform Owner', 'owner', 'APPROVED', 'fra_rajnandgaon', 'main_branch', '["OWNER"]'::jsonb, true),
+      ('usr_owner_olive', 'olivepizzarjn@gmail.com', '9876543210', 'Olive Pizza RJN', 'owner', 'APPROVED', 'fra_rajnandgaon', 'main_branch', '["OWNER"]'::jsonb, true),
+      ('ONXCYjWmN1hNVv6bVjwCYxi76Sz1', 'cashier@olivepizza.in', '9876543211', 'POS Cashier', 'cashier', 'APPROVED', 'fra_rajnandgaon', 'main_branch', '["POS"]'::jsonb, true)
+    ON CONFLICT (id) DO UPDATE SET
+      email = EXCLUDED.email,
+      role = EXCLUDED.role,
+      status = EXCLUDED.status,
+      allowed_apps = EXCLUDED.allowed_apps,
+      is_active = EXCLUDED.is_active;
+
+    INSERT INTO delivery_partners (id, name, phone, email, franchise_id, branch_id, status, is_online)
+    VALUES
+      ('staff_rider_01', 'Test Rider', '9876543212', 'rider@olivepizza.in', 'fra_rajnandgaon', 'main_branch', 'APPROVED', true)
+    ON CONFLICT (id) DO UPDATE SET
+      status = EXCLUDED.status,
+      is_online = EXCLUDED.is_online;
+  `);
+
   const ownerAccounts = [
     { email: 'webhub2811@gmail.com', uid: '6tLLR6q7aTYqzTG2blRx3TU5sA42' },
-    { email: 'olivepizzarjn@gmail.com', uid: 'ZzMmHLa6fBeDYY7clYNjP70fbiE2' },
-    { email: 'samyakshrivastava28@gmail.com', uid: 'Zf1MDESejSPbVLdKdAAB7xGGUV42' },
-    { email: 'samyaks695@gmail.com', uid: 'Uln5UKsRyZaCzTePgBmfourQngu1' }
+    { email: 'olivepizzarjn@gmail.com', uid: 'ZzMmHLa6fBeDYY7clYNjP70fbiE2' }
   ];
 
   await t.test('Owner accounts must be authorized for OWNER command center', async () => {
@@ -54,7 +101,8 @@ test('Multi-App Role & Scope Authorization Matrix (Strict Separation Policy)', a
     const posRes = await FranchiseAccessService.resolveAuthorization({
       uid: cashier.uid,
       email: cashier.email,
-      targetApp: 'POS'
+      targetApp: 'POS',
+      terminalId: 'POS-TERM-01'
     });
     assert.equal(posRes.authorized, true, 'Cashier must be authorized for POS');
 

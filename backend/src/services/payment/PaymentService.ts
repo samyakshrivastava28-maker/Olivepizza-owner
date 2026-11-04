@@ -278,7 +278,7 @@ export class PaymentService {
 
     state = PaymentStateMachine.transition(state, 'INTENT_CREATED');
 
-    // Store in Postgres (Requirement 13: Fail Closed — never proceed without canonical financial record)
+    // Store in PostgreSQL canonical financial ledger before returning session
     try {
       await query(`
         INSERT INTO payments (id, payment_session_id, user_id, provider, amount, currency, status, payment_method, metadata, created_at)
@@ -431,7 +431,7 @@ export class PaymentService {
     }
 
     if (paymentId) {
-      // 1. Validate payment record exists in PostgreSQL (Requirement 12)
+      // 1. Validate payment record exists in PostgreSQL
       const payRecordRes = await query('SELECT id, amount, currency, status, user_id, metadata FROM payments WHERE id = $1 OR provider_payment_id = $1 LIMIT 1', [paymentId]);
       if (payRecordRes.rows.length === 0) {
         console.error(`[Webhook] CRITICAL: Unknown payment ID ${paymentId} received in webhook from ${providerName}`);
@@ -440,7 +440,7 @@ export class PaymentService {
 
       const canonicalPayment = payRecordRes.rows[0];
 
-      // 2. Validate Amount and Currency (Requirement 12)
+      // 2. Validate amount and currency match recorded transaction
       if (amount != null) {
         const expectedAmount = Number(canonicalPayment.amount || 0);
         const receivedAmount = Number(amount);
@@ -450,13 +450,13 @@ export class PaymentService {
         }
       }
 
-      // 3. Atomically update PostgreSQL Payment status (Requirement 13: Fail closed)
+      // 3. Atomically update PostgreSQL payment status
       await query(
         "UPDATE payments SET status = 'PAYMENT_CAPTURED', provider_transaction_id = $1, verified_at = NOW(), updated_at = NOW() WHERE id = $2 OR provider_payment_id = $2",
         [providerTxId || `tx_${Date.now()}`, paymentId]
       );
 
-      // 4. Update canonical order status & projection via OrderStateMachine (Requirement 10)
+      // 4. Update canonical order status and projection via OrderStateMachine
       const orderIdToUpdate = orderId || canonicalPayment.metadata?.orderId || paymentId;
       if (orderIdToUpdate) {
         // Update PostgreSQL canonical_orders
@@ -506,7 +506,7 @@ export class PaymentService {
   }
 
   /**
-   * Initiates Full or Partial Refund (Requirement 15: Canonical in PostgreSQL)
+   * Initiates full or partial refund in canonical PostgreSQL ledger
    */
   public static async processRefund(paymentId: string, refundAmount: number, reason: string, actorId: string): Promise<{ success: boolean; refundId: string }> {
     let providerTxId = `tx_${paymentId}`;
@@ -555,7 +555,7 @@ export class PaymentService {
   }
 
   /**
-   * P0 Security: Verifies that a server-captured payment is valid, matches the required amount,
+   * Security Invariant: Verifies that a server-captured payment is valid, matches the required amount,
    * and atomically binds it to targetOrderId, preventing captured payment reuse across bills.
    * 
    * Returns:

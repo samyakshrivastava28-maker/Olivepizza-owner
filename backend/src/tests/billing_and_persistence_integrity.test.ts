@@ -8,7 +8,7 @@
  * 4. Multi-app role & scope authorization matrix across all identity-data pathways and fail-closed rules.
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
 import { query, withTransaction } from '../config/postgres.js';
 import { billingRepository } from '../repositories/billing.repository.js';
@@ -336,6 +336,33 @@ describe('Phase G: Release Candidate & Final Integrity Verification', () => {
   });
 
   describe('4. Multi-App Role & Scope Authorization Matrix', () => {
+    before(async () => {
+      await query(`
+        INSERT INTO app_users (id, email, name, role, status, is_active, franchise_id, branch_id, allowed_apps, metadata)
+        VALUES ('staff_cashier_01', 'cashier@olivepizza.in', 'Test Cashier', 'cashier', 'APPROVED', true, 'fra_rajnandgaon', 'main_branch', '["POS"]'::jsonb, '{"terminalId": "POS-01"}'::jsonb)
+        ON CONFLICT (id) DO UPDATE SET
+          email = EXCLUDED.email,
+          role = EXCLUDED.role,
+          status = EXCLUDED.status,
+          is_active = EXCLUDED.is_active,
+          allowed_apps = EXCLUDED.allowed_apps,
+          metadata = EXCLUDED.metadata;
+
+        INSERT INTO delivery_partners (id, name, phone, email, status, is_online, branch_id, franchise_id)
+        VALUES ('staff_rider_01', 'Test Rider', '+919988776655', 'rider@olivepizza.in', 'APPROVED', true, 'main_branch', 'fra_rajnandgaon')
+        ON CONFLICT (id) DO UPDATE SET
+          status = EXCLUDED.status,
+          is_online = EXCLUDED.is_online;
+      `);
+    });
+
+    after(async () => {
+      await query(`
+        DELETE FROM app_users WHERE id = 'staff_cashier_01';
+        DELETE FROM delivery_partners WHERE id = 'staff_rider_01';
+      `);
+    });
+
     it('Owner account without staff grant fails closed for RESTAURANT_MANAGER', async () => {
       const auth = await FranchiseAccessService.resolveAuthorization({
         uid: 'owner_unauthorized_staff_uid',
@@ -377,7 +404,8 @@ describe('Phase G: Release Candidate & Final Integrity Verification', () => {
       const posAuth = await FranchiseAccessService.resolveAuthorization({
         uid: 'staff_cashier_01',
         email: 'cashier@olivepizza.in',
-        targetApp: 'POS'
+        targetApp: 'POS',
+        terminalId: 'POS-01'
       });
       assert.strictEqual(posAuth.authorized, true);
 

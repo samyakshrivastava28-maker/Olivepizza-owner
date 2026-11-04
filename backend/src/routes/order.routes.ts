@@ -1302,12 +1302,12 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
     const timeoutMinutes = Number(process.env.ORDER_ACCEPT_TIMEOUT_MINUTES || 10);
     const acceptanceDeadline = new Date(Date.now() + timeoutMinutes * 60 * 1000).toISOString();
 
-      // Requirement 7 & 13: Online Payment Authority — Verify captured payment in PostgreSQL
+      // Verify captured online payment in PostgreSQL ledger before order confirmation
       let initialPaymentStatus = 'PENDING';
       const rawPaymentMethod = (req.body.paymentMethod || 'COD').toUpperCase();
 
       if (resolvedOrderSource !== 'ONLINE') {
-        // Enforce POS payment authority (Requirement 1.E)
+        // Authoritative verification for POS payments against canonical records
         if (!isStaff) {
           res.status(403).json({
             error: 'Forbidden: Non-online order creation requires authenticated staff credentials.',

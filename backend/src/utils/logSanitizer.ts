@@ -165,3 +165,6 @@ export const safeLogger = {
     console.error(`[${tag}] ❌ ${message}`, meta !== undefined ? redactSensitiveData(meta) : '');
   },
 };
+
+export const sanitizeLogData = redactSensitiveData;
+

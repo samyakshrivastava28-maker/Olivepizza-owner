@@ -11,15 +11,44 @@
  * 7. Server Readiness Semantics & Credential Leakage Defense.
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';
+import express from 'express';
+import http from 'http';
+import apiApp from '../app.js';
+import healthRoutes from '../routes/health.routes.js';
 import { generateTrackingToken } from '../utils/trackingToken.js';
-import { query } from '../config/postgres.js';
+import { query, pgPool } from '../config/postgres.js';
+import { redisService } from '../services/redis/RedisService.js';
 import { FranchiseAccessService } from '../services/franchise/FranchiseAccessService.js';
 
-const BASE_URL = process.env.TEST_API_URL || 'http://localhost:5000';
+let BASE_URL = process.env.TEST_API_URL || 'http://localhost:5000';
+let server: http.Server;
 
-describe('Phase H: Backend Security Hardening & Release Verification', () => {
+describe('Security Hardening Routes & Boundary Verification', () => {
+  before(async () => {
+    const testApp = express();
+    testApp.use(healthRoutes);
+    testApp.use('/api', healthRoutes);
+    testApp.use('/api', apiApp);
+    testApp.use(apiApp);
+
+    await new Promise<void>((resolve) => {
+      server = testApp.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as any;
+        BASE_URL = `http://127.0.0.1:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  after(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    try { await redisService.disconnect(); } catch {}
+    try { await pgPool.end(); } catch {}
+  });
 
   describe('1. Data Manager Unauthorized Access Prevention', () => {
     it('GET /api/data-manager/overview is rejected with 401 when unauthenticated', async () => {

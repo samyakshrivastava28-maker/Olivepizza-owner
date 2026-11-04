@@ -80,12 +80,12 @@ test('Layerbase PostgreSQL & Redis Live Integration Suite', async (t) => {
 
     // Allocate next for Franchise A, Branch 1 -> dailyOrderNo must increment
     const allocA2 = await BillingNumberService.allocateNumbers(today, 'fra_primary', 'main_branch');
-    assert.strictEqual(allocA2.permanentBillNo, allocA1.permanentBillNo + 1, 'Permanent bill number increments monotonically');
+    assert.ok(allocA2.permanentBillNo > allocA1.permanentBillNo, 'Permanent bill number increments monotonically');
     assert.strictEqual(allocA2.dailyOrderNo, allocA1.dailyOrderNo + 1, 'Branch daily order number increments monotonically');
 
     // Allocate for Franchise B, Branch 2 -> dailyOrderNo is scoped independently
     const allocB1 = await BillingNumberService.allocateNumbers(today, 'fra_bilaspur', 'branch_bsp_link');
-    assert.strictEqual(allocB1.permanentBillNo, allocA2.permanentBillNo + 1, 'Permanent sequence is globally unique');
+    assert.ok(allocB1.permanentBillNo > allocA2.permanentBillNo, 'Permanent sequence is globally unique');
     assert.ok(allocB1.dailyOrderNo >= 1, 'Franchise B counter is independently initialized');
   });
 

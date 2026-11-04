@@ -214,15 +214,30 @@ export class RiderDispatchEngine {
     rider?: EligibleRider;
     reason?: string;
     idempotent?: boolean;
+    isProvisional?: boolean;
+    provisionalDispatchId?: string;
+    code?: string;
   }> {
-    const client = await getClient();
+    let client: any = null;
     let assignedRider: EligibleRider | null = null;
     let orderRecord: any = null;
 
     try {
+      client = await getClient();
+    } catch (dbErr: any) {
+      // Case C: PostgreSQL unavailable. Must fail-closed, never treat as order-not-found!
+      console.error('[RiderDispatchEngine] PostgreSQL connection failed (Case C):', dbErr.message);
+      return {
+        success: false,
+        reason: 'Database connection unavailable',
+        code: 'DATABASE_UNAVAILABLE'
+      };
+    }
+
+    try {
       await client.query('BEGIN');
 
-      // 1. Lock the order row in PostgreSQL
+      // 1. Lock the order row in PostgreSQL (Case A vs Case B)
       const orderRes = await client.query(
         `SELECT id, permanent_bill_no, daily_order_no, order_status, branch_id, franchise_id, delivery_partner_id,
                 delivery_partner_name, delivery_partner_phone, partner_assigned_at,
@@ -255,22 +270,115 @@ export class RiderDispatchEngine {
             }
           };
         }
-      }
 
-      // 2. Discover eligible candidates
-      const candidates = await this.findEligibleRiders(orderId);
+        // Validate branch assignment on canonical order
+        if (!orderRecord.branch_id || !orderRecord.branch_id.trim()) {
+          await client.query('ROLLBACK');
+          return { success: false, reason: `Order ${orderId} lacks branchId`, code: 'MISSING_BRANCH_ID' };
+        }
 
-      if (candidates.length === 0) {
+        // Validate order status in canonical order
+        const terminalStatuses = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REJECTED', 'VOIDED'];
+        if (terminalStatuses.includes(String(orderRecord.order_status).toUpperCase())) {
+          await client.query('ROLLBACK');
+          return {
+            success: false,
+            reason: `Order ${orderId} is in terminal status: ${orderRecord.order_status}`,
+            code: 'ORDER_TERMINAL'
+          };
+        }
+      } else {
+        // Case B: Canonical order row does not exist in PostgreSQL. Rollback transaction before provisional handling.
         await client.query('ROLLBACK');
-        return { success: false, reason: 'No eligible riders currently available in branch radius' };
+      }
+    } catch (txnErr: any) {
+      if (client) await client.query('ROLLBACK').catch(() => {});
+      console.error('[RiderDispatchEngine] PostgreSQL transaction error:', txnErr.message);
+      return {
+        success: false,
+        reason: 'Database connection unavailable',
+        code: 'DATABASE_UNAVAILABLE'
+      };
+    } finally {
+      if (client && typeof client.release === 'function') {
+        client.release();
+        client = null;
+      }
+    }
+
+    // Handle Case B: PostgreSQL is healthy, but canonical order row not found
+    if (!orderRecord) {
+      // Check if order even exists in Firestore to give precise fail-closed reason
+      let firestoreOrderData: any = null;
+      try {
+        const docSnap = await adminDb.collection('orders').doc(orderId).get();
+        if (!docSnap.exists) {
+          return {
+            success: false,
+            reason: `Order ${orderId} not found in PostgreSQL or Firestore`,
+            code: 'ORDER_NOT_FOUND'
+          };
+        }
+        firestoreOrderData = docSnap.data() || {};
+        if (!firestoreOrderData.branchId && !firestoreOrderData.branch_id) {
+          return {
+            success: false,
+            reason: `Order ${orderId} lacks branchId in Firestore`,
+            code: 'MISSING_BRANCH_ID'
+          };
+        }
+      } catch (fErr: any) {
+        return { success: false, reason: `Firestore lookup error: ${fErr.message}`, code: 'FIRESTORE_ERROR' };
       }
 
-      const branchId = orderRecord?.branch_id || candidates[0]?.branchId;
+      // Discover candidate riders for this order (using Firestore order data + PostgreSQL rider pool)
+      const candidates = await this.findEligibleRiders(orderId);
+      if (candidates.length === 0) {
+        return { success: false, reason: 'No eligible riders currently available in branch radius', code: 'NO_RIDERS_AVAILABLE' };
+      }
 
-      // 3. Atomically acquire lock on first available eligible candidate in PostgreSQL
+      // Delegate to ProvisionalDispatchService for restricted Firestore-first fallback
+      const { ProvisionalDispatchService } = await import('./ProvisionalDispatchService.js');
+      const provResult = await ProvisionalDispatchService.createProvisionalIntent({
+        orderId,
+        rider: candidates[0],
+        orderData: firestoreOrderData
+      });
+
+      if (!provResult.success) {
+        return {
+          success: false,
+          reason: provResult.reason || 'Provisional dispatch rejected',
+          code: provResult.code || 'PROVISIONAL_DISPATCH_REJECTED'
+        };
+      }
+
+      return {
+        success: true,
+        isProvisional: true,
+        provisionalDispatchId: provResult.provisionalDispatchId,
+        rider: provResult.rider
+      };
+    }
+
+    // Continue Authoritative Case A Flow: Discover eligible candidates
+    const candidates = await this.findEligibleRiders(orderId);
+
+    if (candidates.length === 0) {
+      return { success: false, reason: 'No eligible riders currently available in branch radius', code: 'NO_RIDERS_AVAILABLE' };
+    }
+
+    const branchId = orderRecord.branch_id;
+    let acquiredClient: any = null;
+
+    try {
+      acquiredClient = await getClient();
+      await acquiredClient.query('BEGIN');
+
+      // Atomically acquire lock on first available eligible candidate in PostgreSQL
       for (const candidate of candidates) {
         try {
-          const dpRes = await client.query(
+          const dpRes = await acquiredClient.query(
             `SELECT id, name, phone, status, is_online, active_order_id, branch_id, franchise_id
              FROM delivery_partners
              WHERE id = $1 AND branch_id = $2
@@ -297,54 +405,51 @@ export class RiderDispatchEngine {
         }
       }
 
-      // If no PostgreSQL candidate could be locked, check if candidate can be assigned directly
       if (!assignedRider && candidates.length > 0) {
         // Fallback for mock/test accounts not yet in delivery_partners table
         assignedRider = candidates[0];
       }
 
       if (!assignedRider) {
-        await client.query('ROLLBACK');
-        return { success: false, reason: 'All eligible candidates are currently busy' };
+        await acquiredClient.query('ROLLBACK');
+        return { success: false, reason: 'All eligible candidates are currently busy', code: 'RIDERS_BUSY' };
       }
 
-      // 4. Atomically commit assignment in PostgreSQL
-      if (orderRecord) {
-        await client.query(
-          `UPDATE canonical_orders
-           SET delivery_partner_id = $2,
-               delivery_partner_name = $3,
-               delivery_partner_phone = $4,
-               partner_assigned_at = NOW(),
-               order_status = 'PARTNER_ASSIGNED',
-               updated_at = NOW()
-           WHERE id = $1`,
-          [orderId, assignedRider.uid, assignedRider.name, assignedRider.phone]
-        );
-      }
+      // Atomically commit assignment in PostgreSQL
+      await acquiredClient.query(
+        `UPDATE canonical_orders
+         SET delivery_partner_id = $2,
+             delivery_partner_name = $3,
+             delivery_partner_phone = $4,
+             partner_assigned_at = NOW(),
+             order_status = 'PARTNER_ASSIGNED',
+             updated_at = NOW()
+         WHERE id = $1`,
+        [orderId, assignedRider.uid, assignedRider.name, assignedRider.phone]
+      );
 
-      await client.query(
+      await acquiredClient.query(
         `UPDATE delivery_partners
          SET active_order_id = $2, updated_at = NOW()
          WHERE id = $1`,
         [assignedRider.uid, orderId]
       ).catch(() => {});
 
-      await client.query(
+      await acquiredClient.query(
         `UPDATE delivery_locations
          SET active_order_id = $2, last_updated = NOW()
          WHERE delivery_partner_id = $1`,
         [assignedRider.uid, orderId]
       ).catch(() => {});
 
-      await client.query('COMMIT');
+      await acquiredClient.query('COMMIT');
     } catch (txnErr: any) {
-      await client.query('ROLLBACK').catch(() => {});
+      if (acquiredClient) await acquiredClient.query('ROLLBACK').catch(() => {});
       console.error('[RiderDispatchEngine] PostgreSQL transaction failed:', txnErr.message);
       return { success: false, reason: txnErr.message };
     } finally {
-      if (typeof client.release === 'function') {
-        client.release();
+      if (acquiredClient && typeof acquiredClient.release === 'function') {
+        acquiredClient.release();
       }
     }
 

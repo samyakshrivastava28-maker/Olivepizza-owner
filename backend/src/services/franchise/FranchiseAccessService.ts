@@ -456,7 +456,7 @@ export class FranchiseAccessService {
     let pgUserData: any = null;
     try {
       const pgUserRes = await query(
-        `SELECT id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active 
+        `SELECT id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active, metadata 
          FROM app_users 
          WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) 
             OR id = $2 

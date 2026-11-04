@@ -1,26 +1,55 @@
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import express from 'express';
+import http from 'http';
+import healthRoutes from '../routes/health.routes.js';
 import { OrderStateMachine, CanonicalOrderStatus } from '../services/order/OrderStateMachine.js';
 import { FranchiseAccessService } from '../services/franchise/FranchiseAccessService.js';
 import { BillingNumberService } from '../services/pos/BillingNumberService.js';
-import { query } from '../config/postgres.js';
+import { query, pgPool } from '../config/postgres.js';
+import { redisService } from '../services/redis/RedisService.js';
 import { executeGraphQL } from '../graphql/index.js';
 
-describe('Phase D: Release Gate & State Machine Reconciliation Suite', () => {
+describe('Order Lifecycle & State Machine Reconciliation Suite', () => {
+  let server: http.Server;
+  let baseUrl: string;
+
+  before(async () => {
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.use('/', healthRoutes);
+    testApp.use('/api', healthRoutes);
+
+    await new Promise<void>((resolve) => {
+      server = testApp.listen(0, '127.0.0.1', () => {
+        const addr = server.address() as any;
+        baseUrl = `http://127.0.0.1:${addr.port}`;
+        resolve();
+      });
+    });
+  });
+
+  after(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    try { await redisService.disconnect(); } catch {}
+    try { await pgPool.end(); } catch {}
+  });
 
   describe('1. Readiness & Liveness Semantic Contracts', () => {
     it('Liveness endpoint (/live) must respond with HTTP 200 without DB dependency', async () => {
-      const res = await fetch('http://127.0.0.1:5000/live');
+      const res = await fetch(`${baseUrl}/live`);
       assert.strictEqual(res.status, 200);
-      const data = await res.json();
+      const data = (await res.json()) as any;
       assert.strictEqual(data.status, 'ok');
       assert.ok(typeof data.uptime === 'number');
     });
 
     it('Readiness endpoint (/ready) must confirm core service readiness', async () => {
-      const res = await fetch('http://127.0.0.1:5000/ready');
+      const res = await fetch(`${baseUrl}/ready`);
       assert.ok([200, 503].includes(res.status), `Readiness returned ${res.status}`);
-      const data = await res.json();
+      const data = (await res.json()) as any;
       assert.ok(['ready', 'not_ready'].includes(data.status));
       assert.ok(['healthy', 'unhealthy'].includes(data.firestore));
       assert.ok(['healthy', 'unhealthy'].includes(data.postgres));
@@ -28,9 +57,9 @@ describe('Phase D: Release Gate & State Machine Reconciliation Suite', () => {
     });
 
     it('/api/ready alias must behave identically to /ready', async () => {
-      const res = await fetch('http://127.0.0.1:5000/api/ready');
+      const res = await fetch(`${baseUrl}/api/ready`);
       assert.ok([200, 503].includes(res.status), `Readiness returned ${res.status}`);
-      const data = await res.json();
+      const data = (await res.json()) as any;
       assert.ok(['ready', 'not_ready'].includes(data.status));
       assert.ok(['healthy', 'unhealthy'].includes(data.checks.firestore));
       assert.ok(['healthy', 'unhealthy'].includes(data.checks.postgres));
@@ -127,6 +156,33 @@ describe('Phase D: Release Gate & State Machine Reconciliation Suite', () => {
   });
 
   describe('4. Approved Owner & Staff Account Verification Matrix', () => {
+    before(async () => {
+      await query(`
+        INSERT INTO app_users (id, email, name, role, status, is_active, franchise_id, branch_id, allowed_apps, metadata)
+        VALUES ('staff_cashier_01', 'cashier@olivepizza.in', 'Test Cashier', 'cashier', 'APPROVED', true, 'fra_rajnandgaon', 'main_branch', '["POS"]'::jsonb, '{"terminalId": "POS-01"}'::jsonb)
+        ON CONFLICT (id) DO UPDATE SET
+          email = EXCLUDED.email,
+          role = EXCLUDED.role,
+          status = EXCLUDED.status,
+          is_active = EXCLUDED.is_active,
+          allowed_apps = EXCLUDED.allowed_apps,
+          metadata = EXCLUDED.metadata;
+
+        INSERT INTO delivery_partners (id, name, phone, email, status, is_online, branch_id, franchise_id)
+        VALUES ('staff_rider_01', 'Test Rider', '+919988776655', 'rider@olivepizza.in', 'APPROVED', true, 'main_branch', 'fra_rajnandgaon')
+        ON CONFLICT (id) DO UPDATE SET
+          status = EXCLUDED.status,
+          is_online = EXCLUDED.is_online;
+      `);
+    });
+
+    after(async () => {
+      await query(`
+        DELETE FROM app_users WHERE id = 'staff_cashier_01';
+        DELETE FROM delivery_partners WHERE id = 'staff_rider_01';
+      `);
+    });
+
     it('Platform owner accounts are authorized for OWNER Command Center', async () => {
       const ownerAuth = await FranchiseAccessService.resolveAuthorization({
         uid: '6tLLR6q7aTYqzTG2blRx3TU5sA42',
@@ -150,7 +206,8 @@ describe('Phase D: Release Gate & State Machine Reconciliation Suite', () => {
       const cashierPos = await FranchiseAccessService.resolveAuthorization({
         uid: 'staff_cashier_01',
         email: 'cashier@olivepizza.in',
-        targetApp: 'POS'
+        targetApp: 'POS',
+        terminalId: 'POS-01'
       });
       assert.strictEqual(cashierPos.authorized, true);
 

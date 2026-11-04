@@ -92,7 +92,7 @@ export class OrderPersistenceArchiveService {
       else if (rawStatus === 'cancelled' || rawStatus === 'rejected') pgOrderStatus = 'CANCELLED';
 
       const paymentMethod = (orderData.paymentMethod || 'COD').toUpperCase();
-      // Requirement (PHASES 32-36): Payment status whitelist validation
+      // Validate payment status against permitted enum whitelist
       const VALID_PAYMENT_STATUSES = ['paid', 'pending', 'failed', 'refunded', 'cod_pending', 'cod_collected', 'waived', 'free'];
       const rawPaymentStatusLower = orderData.paymentStatus ? String(orderData.paymentStatus).toLowerCase() : null;
       if (rawPaymentStatusLower && !VALID_PAYMENT_STATUSES.includes(rawPaymentStatusLower)) {
@@ -220,7 +220,7 @@ export class OrderPersistenceArchiveService {
           (rawStatus.toLowerCase() === 'delivered' || rawStatus.toLowerCase() === 'cancelled' || pgOrderStatus === 'DELIVERED' || pgOrderStatus === 'CANCELLED') ? 'TERMINAL' : (orderData.live_lifecycle || 'ACTIVE')
         ]);
 
-        // 2. Insert/Upsert line items deterministically (Requirement 1.A)
+        // 2. Insert or upsert line items deterministically
         const rawItems = Array.isArray(orderData.items) ? orderData.items : [];
         const currentItemIds: string[] = [];
 
@@ -503,7 +503,7 @@ export class OrderPersistenceArchiveService {
         };
       }
 
-      // Requirement (PHASES 32-36): Payment status whitelist validation before archiving
+      // Validate payment status against permitted enum whitelist before archiving
       const VALID_PAYMENT_STATUSES = ['paid', 'pending', 'failed', 'refunded', 'cod_pending', 'cod_collected', 'waived', 'free'];
       const rawPaymentStatusLower = orderData.paymentStatus ? String(orderData.paymentStatus).toLowerCase() : null;
       if (rawPaymentStatusLower && !VALID_PAYMENT_STATUSES.includes(rawPaymentStatusLower)) {
