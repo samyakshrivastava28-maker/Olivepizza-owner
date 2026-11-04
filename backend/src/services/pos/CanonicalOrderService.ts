@@ -78,27 +78,50 @@ export interface SearchOrderFilters {
   offset?: number;
 }
 
+/**
+ * Exact paise integer conversion avoiding floating point rounding errors.
+ */
+export function parseAmountToPaise(val: any): bigint {
+  if (val === null || val === undefined || val === '') return 0n;
+  if (typeof val === 'bigint') return val;
+  if (typeof val === 'number') {
+    if (!Number.isFinite(val)) return 0n;
+    const isNeg = val < 0;
+    const absVal = Math.abs(val);
+    const fixed = absVal.toFixed(2);
+    const [whole, frac = ''] = fixed.split('.');
+    const paddedFrac = frac.padEnd(2, '0').slice(0, 2);
+    const bi = BigInt(whole + paddedFrac);
+    return isNeg ? -bi : bi;
+  }
+  let s = String(val).trim().replace(/,/g, '');
+  if (!s) return 0n;
+  const isNeg = s.startsWith('-');
+  if (isNeg) s = s.slice(1);
+  const parts = s.split('.');
+  const whole = parts[0] || '0';
+  const frac = (parts[1] || '').padEnd(2, '0').slice(0, 2);
+  try {
+    const bi = BigInt(whole + frac);
+    return isNeg ? -bi : bi;
+  } catch {
+    return 0n;
+  }
+}
+
 export class CanonicalOrderService {
   /**
-   * Deterministically computes a SHA-256 fingerprint for order idempotency
+   * Deterministically computes a SHA-256 fingerprint for order idempotency.
+   * Server-side authoritative: caller-provided fingerprints are always recomputed.
+   * Mutable fields (like paymentStatus) are strictly excluded from identity.
    */
   public static computeOrderFingerprint(params: any): string {
-    if ((params as any).requestFingerprint) {
-      return (params as any).requestFingerprint;
-    }
-
-    const toIntegerPaise = (amount: any): number => {
-      const num = Number(amount);
-      if (isNaN(num)) return 0;
-      return Math.round(num * 100);
-    };
-
     const normalizeAddons = (addons: any[]): any[] => {
       if (!Array.isArray(addons)) return [];
       return addons.map(a => ({
         id: String(a.id || a.addonId || a.name || '').trim().toLowerCase(),
         name: String(a.name || '').trim(),
-        pricePaise: toIntegerPaise(a.price || a.unitPrice || 0)
+        pricePaise: Number(parseAmountToPaise(a.price || a.unitPrice || 0))
       })).sort((a, b) => a.id.localeCompare(b.id));
     };
 
@@ -111,9 +134,9 @@ export class CanonicalOrderService {
         crust: String(it.crust || 'normal').trim().toLowerCase(),
         variant: String(it.variant || '').trim().toLowerCase(),
         quantity: Math.max(1, Math.floor(Number(it.quantity) || 1)),
-        unitPricePaise: toIntegerPaise(it.unitPrice || it.price || 0),
+        unitPricePaise: Number(parseAmountToPaise(it.unitPrice || it.price || 0)),
         addons: normalizeAddons(it.addons)
-      })).sort((a, b) => (a.id + a.size + a.crust).localeCompare(b.id + b.size + b.crust));
+      })).sort((a, b) => [a.id, a.size, a.crust].join('\0').localeCompare([b.id, b.size, b.crust].join('\0')));
     };
 
     const canonicalPayload = {
@@ -125,14 +148,14 @@ export class CanonicalOrderService {
       currency: 'INR',
       orderType: String(params.orderType || params.deliveryType || 'delivery').trim().toLowerCase(),
       paymentMethod: String(params.paymentMethod || 'COD').trim().toUpperCase(),
-      paymentStatus: String(params.paymentStatus || 'PENDING').trim().toUpperCase(),
-      subtotalPaise: toIntegerPaise(params.subtotal || params.totalAmount || 0),
-      discountPaise: toIntegerPaise(params.discountAmount || params.discount || 0),
-      taxPaise: toIntegerPaise(params.taxAmount || params.tax || 0),
-      cgstPaise: toIntegerPaise(params.cgst || 0),
-      sgstPaise: toIntegerPaise(params.sgst || 0),
-      deliveryFeePaise: toIntegerPaise(params.deliveryFee || 0),
-      totalAmountPaise: toIntegerPaise(params.totalAmount || 0),
+      // paymentStatus is excluded from fingerprint because it is mutable across order lifecycle
+      subtotalPaise: Number(parseAmountToPaise(params.subtotal || params.totalAmount || 0)),
+      discountPaise: Number(parseAmountToPaise(params.discountAmount || params.discount || 0)),
+      taxPaise: Number(parseAmountToPaise(params.taxAmount || params.tax || 0)),
+      cgstPaise: Number(parseAmountToPaise(params.cgst || 0)),
+      sgstPaise: Number(parseAmountToPaise(params.sgst || 0)),
+      deliveryFeePaise: Number(parseAmountToPaise(params.deliveryFee || 0)),
+      totalAmountPaise: Number(parseAmountToPaise(params.totalAmount || 0)),
       items: normalizeItems(params.items)
     };
 
@@ -187,11 +210,8 @@ export class CanonicalOrderService {
         if (existing.rows.length > 0) {
           const row = existing.rows[0];
           const existingFingerprint = row.request_fingerprint;
-          const existingTotal = Number(row.total_amount);
-          const incomingTotal = Number(params.totalAmount);
-
-          const existingPaise = Math.round(existingTotal * 100);
-          const incomingPaise = Math.round(incomingTotal * 100);
+          const existingPaise = parseAmountToPaise(row.total_amount);
+          const incomingPaise = parseAmountToPaise(params.totalAmount);
 
           if (existingFingerprint) {
             if (existingFingerprint !== requestFingerprint) {
@@ -200,8 +220,8 @@ export class CanonicalOrderService {
               conflictErr.statusCode = 409;
               throw conflictErr;
             }
-          } else if (incomingTotal > 0 && existingPaise !== incomingPaise) {
-            const conflictErr: any = new Error(`[CanonicalOrderService] Idempotency conflict: Order ${orderId} was previously committed with total ${existingTotal} (${existingPaise} paise), but received conflicting payload with total ${incomingTotal} (${incomingPaise} paise).`);
+          } else if (incomingPaise > 0n && existingPaise !== incomingPaise) {
+            const conflictErr: any = new Error(`[CanonicalOrderService] Idempotency conflict: Order ${orderId} was previously committed with total ${row.total_amount} (${existingPaise} paise), but received conflicting payload with total ${params.totalAmount} (${incomingPaise} paise).`);
             conflictErr.code = 'IDEMPOTENCY_CONFLICT';
             conflictErr.statusCode = 409;
             throw conflictErr;
@@ -351,10 +371,51 @@ export class CanonicalOrderService {
     const cashierName = params.cashierName || (params.orderSource === 'ONLINE' ? 'Online Customer App' : 'Cashier');
 
     // 2. Execute atomic PostgreSQL transaction for Order, Line Items, and Bill (Authoritative Canonical Ledger)
+    let existingOrderReturn: any = null;
     try {
       await withTransaction(async (client) => {
-        // 2.1 Insert canonical order
-        const orderInsertRes = await client.query(`
+        // Concurrency Lock: Check if canonical_orders row already exists
+        const lockRes = await client.query(
+          `SELECT id, permanent_bill_no, daily_order_no, order_date, order_time, total_amount, payment_status, order_status, request_fingerprint 
+           FROM canonical_orders 
+           WHERE id = $1 FOR UPDATE`,
+          [orderId]
+        );
+
+        if (lockRes.rows.length > 0) {
+          const row = lockRes.rows[0];
+          const existingFingerprint = row.request_fingerprint;
+          const existingPaise = parseAmountToPaise(row.total_amount);
+          const incomingPaise = parseAmountToPaise(params.totalAmount);
+
+          if (existingFingerprint && existingFingerprint !== requestFingerprint) {
+            const conflictErr: any = new Error(`[CanonicalOrderService] Idempotency conflict: Order ${orderId} was previously committed with a different request fingerprint.`);
+            conflictErr.code = 'IDEMPOTENCY_CONFLICT';
+            conflictErr.statusCode = 409;
+            throw conflictErr;
+          } else if (incomingPaise > 0n && existingPaise !== incomingPaise) {
+            const conflictErr: any = new Error(`[CanonicalOrderService] Idempotency conflict: Order ${orderId} was previously committed with total ${row.total_amount} (${existingPaise} paise), but received conflicting payload with total ${params.totalAmount} (${incomingPaise} paise).`);
+            conflictErr.code = 'IDEMPOTENCY_CONFLICT';
+            conflictErr.statusCode = 409;
+            throw conflictErr;
+          }
+
+          existingOrderReturn = {
+            id: row.id,
+            permanentBillNo: Number(row.permanent_bill_no),
+            dailyOrderNo: Number(row.daily_order_no),
+            orderDate: row.order_date,
+            orderTime: row.order_time,
+            totalAmount: Number(row.total_amount),
+            paymentStatus: row.payment_status,
+            orderStatus: row.order_status,
+            isDuplicate: true
+          };
+          return;
+        }
+
+        // 2.1 Insert canonical order (Immutable conflict safety: ON CONFLICT DO NOTHING)
+        await client.query(`
           INSERT INTO canonical_orders (
             id, permanent_bill_no, daily_order_no, order_date, order_time,
             order_source, order_type, order_status, payment_method, payment_status,
@@ -369,12 +430,7 @@ export class CanonicalOrderService {
             $15, $16, $17, $18, $19, $20,
             $21, $22, $23, $24, $25,
             $26, $27, $28, $29
-          ) ON CONFLICT (id) DO UPDATE SET
-            order_status = EXCLUDED.order_status,
-            payment_status = EXCLUDED.payment_status,
-            total_amount = EXCLUDED.total_amount,
-            request_fingerprint = EXCLUDED.request_fingerprint,
-            updated_at = NOW();
+          ) ON CONFLICT (id) DO NOTHING;
         `, [
           orderId, permanentBillNo, dailyOrderNo, orderDate, orderTime,
           params.orderSource, resolvedOrderType, orderStatus, paymentMethod, paymentStatus,
@@ -385,9 +441,10 @@ export class CanonicalOrderService {
           cashierName, params.terminalId || 'POS-TERM-01', params.notes || '', requestFingerprint
         ]);
 
-        // 2.2 Insert immutable line items
-        for (const item of processedItems) {
-          const itemId = crypto.randomUUID();
+        // 2.2 Insert immutable line items with deterministic line item IDs
+        for (let idx = 0; idx < processedItems.length; idx++) {
+          const item = processedItems[idx];
+          const lineItemId = `${orderId}_item_${idx + 1}`;
           await client.query(`
             INSERT INTO canonical_order_items (
               id, order_id, menu_item_id, item_name, size_variant,
@@ -397,13 +454,13 @@ export class CanonicalOrderService {
               $6, $7, $8, $9::jsonb, $10
             ) ON CONFLICT (id) DO NOTHING;
           `, [
-            itemId, orderId, item.menuItemId || null, item.name, item.size || 'Regular',
+            lineItemId, orderId, item.menuItemId || null, item.name, item.size || 'Regular',
             item.crust || 'Normal', item.quantity, item.unitPrice, JSON.stringify(item.addons || []), item.lineTotal
           ]);
         }
 
-        // 2.3 Insert canonical financial bill
-        const billId = crypto.randomUUID();
+        // 2.3 Insert canonical financial bill (enforcing exactly 1 bill per order via order_id unique constraint)
+        const billId = `bill_${orderId}`;
         await client.query(`
           INSERT INTO canonical_bills (
             id, permanent_bill_no, order_id, bill_date, subtotal,
@@ -411,9 +468,7 @@ export class CanonicalOrderService {
           ) VALUES (
             $1, $2, $3, $4::date, $5,
             $6, $7, $8, $9, $10
-          ) ON CONFLICT (permanent_bill_no) DO UPDATE SET
-            net_amount = EXCLUDED.net_amount,
-            payment_status = EXCLUDED.payment_status;
+          ) ON CONFLICT (order_id) DO NOTHING;
         `, [
           billId, permanentBillNo, orderId, orderDate, subtotal,
           discountAmount, taxAmount, totalAmount, paymentMethod, paymentStatus
@@ -433,6 +488,31 @@ export class CanonicalOrderService {
         `, [
           paymentId, orderId, params.customerPhone || 'customer', paymentMethod, totalAmount, 'INR',
           paymentStatus === 'PAID' ? 'PAYMENT_CAPTURED' : 'PENDING', paymentMethod
+        ]);
+
+        // 2.5 Insert record into order_idempotency_records
+        const idempotencyKey = (params as any).idempotencyKey || (`ord_idem_${orderId}`);
+        const responsePayload = {
+          id: orderId,
+          permanentBillNo,
+          dailyOrderNo,
+          orderDate,
+          orderTime,
+          totalAmount,
+          paymentStatus,
+          orderStatus
+        };
+        await client.query(`
+          INSERT INTO order_idempotency_records (
+            idempotency_key, request_fingerprint, order_id, franchise_id, branch_id, status, response_payload
+          ) VALUES (
+            $1, $2, $3, $4, $5, 'COMMITTED', $6::jsonb
+          ) ON CONFLICT (idempotency_key) DO UPDATE SET
+            status = 'COMMITTED',
+            response_payload = EXCLUDED.response_payload,
+            request_fingerprint = EXCLUDED.request_fingerprint;
+        `, [
+          idempotencyKey, requestFingerprint, orderId, franchiseId, branchId, JSON.stringify(responsePayload)
         ]);
 
         // 2.5 Update customer total_orders and total_spent in app_users
@@ -459,6 +539,10 @@ export class CanonicalOrderService {
     } catch (txError: any) {
       console.error('[CanonicalOrderService] Transaction FAILED with error:', txError.message || txError);
       throw txError;
+    }
+
+    if (existingOrderReturn) {
+      return existingOrderReturn;
     }
 
     // Post-commit: Reconcile any provisional dispatch intent for this order

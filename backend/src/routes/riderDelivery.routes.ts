@@ -886,6 +886,14 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           }
         });
 
+        // Trigger queue retry for this branch since rider is now free
+        const deliveryBranchId = orderData.branchId || orderData.branch_id || 'main_branch';
+        import('../services/delivery/PendingDispatchQueueService.js').then(({ PendingDispatchQueueService }) => {
+          PendingDispatchQueueService.onRiderAvailable(deliveryBranchId).catch((err: any) => {
+            console.warn('[RiderDelivery] onRiderAvailable trigger error on delivery completion:', err.message);
+          });
+        }).catch(() => {});
+
         res.json({
           success: true,
           message: 'Delivery successfully completed and verified',
@@ -1060,6 +1068,32 @@ router.post('/status', async (req: AuthRequest, res: Response): Promise<void> =>
 
     await adminDb.collection('users').doc(uid).set(updates, { merge: true });
     await adminDb.collection('delivery_partners').doc(uid).set(updates, { merge: true });
+
+    // Synchronize working status to PostgreSQL delivery_partners
+    try {
+      const { getClient } = await import('../config/postgres.js');
+      const pgClient = await getClient();
+      try {
+        await pgClient.query(
+          `UPDATE delivery_partners SET is_online = $2, updated_at = NOW() WHERE id = $1`,
+          [uid, targetOnline]
+        );
+      } finally {
+        pgClient.release();
+      }
+    } catch (pgErr: any) {
+      // Non-fatal PostgreSQL sync warning
+    }
+
+    // When rider goes online, trigger pending dispatch queue retry for their branch
+    if (targetOnline) {
+      const riderBranchId = statusUser.branchId || statusUser.branch_id || statusRider.branchId || statusRider.branch_id || 'main_branch';
+      import('../services/delivery/PendingDispatchQueueService.js').then(({ PendingDispatchQueueService }) => {
+        PendingDispatchQueueService.onRiderAvailable(riderBranchId).catch((e: any) => {
+          console.warn('[RiderDelivery] onRiderAvailable trigger error on checkin:', e.message);
+        });
+      }).catch(() => {});
+    }
 
     res.json({
       success: true,

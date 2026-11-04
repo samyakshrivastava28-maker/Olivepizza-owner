@@ -83,15 +83,20 @@ class EmailRulesEngine {
 export class NotificationQueueService {
   private isProcessing = false;
   private processingTimer: NodeJS.Timeout | null = null;
+  private abortController: AbortController | null = null;
 
   constructor() {
-    // Safety-net polling processor. enqueue() triggers processQueue() reactively,
-    // but if the server is busy, the event loop is saturated, or the process restarts
-    // with queued items left in 'queued' status, this 5s interval guarantees they drain.
-    // This mirrors the BackgroundTaskWorker pattern and prevents notifications from
-    // silently sitting in the queue forever.
+    this.start();
+  }
+
+  /**
+   * Start the polling processor with explicit AbortController lifecycle.
+   */
+  public start(): void {
+    if (this.processingTimer) return;
+    this.abortController = new AbortController();
     this.processingTimer = setInterval(() => {
-      if ((pgPool as any)?.ending || (pgPool as any)?.ended) return;
+      if (this.abortController?.signal.aborted) return;
       this.processQueue().catch(err => {
         // Only log real errors, not "no work" cases
         if (err && err.message !== 'No work' && !err.message.includes('calling end on the pool')) {
@@ -99,7 +104,6 @@ export class NotificationQueueService {
         }
       });
     }, 5000);
-    // Don't keep the event loop alive solely for this timer (clean shutdown support)
     if (this.processingTimer.unref) this.processingTimer.unref();
     console.log('[NotifQueue] Background polling processor started (5s interval).');
   }
@@ -108,6 +112,10 @@ export class NotificationQueueService {
    * Stop the polling processor (for graceful shutdown / tests).
    */
   public stop(): void {
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
     if (this.processingTimer) {
       clearInterval(this.processingTimer);
       this.processingTimer = null;

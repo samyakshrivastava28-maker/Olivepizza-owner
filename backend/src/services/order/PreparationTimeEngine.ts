@@ -54,6 +54,19 @@ export interface PreparationEstimateResult {
   };
 }
 
+export function getBranchLocalHour(date: Date = new Date(), timezone: string = 'Asia/Kolkata'): number {
+  try {
+    const str = new Intl.DateTimeFormat('en-US', {
+      hour: 'numeric',
+      hour12: false,
+      timeZone: timezone
+    }).format(date);
+    return parseInt(str, 10) % 24;
+  } catch {
+    return date.getHours();
+  }
+}
+
 export const DEFAULT_PREP_CONFIG: PrepTimeConfig = {
   baseMinutesByCategory: {
     pizza: 12,
@@ -68,7 +81,7 @@ export const DEFAULT_PREP_CONFIG: PrepTimeConfig = {
   peakHourBufferMinutes: 4,
   defaultBaseMinutes: 12,
   minAllowedMinutes: 5,
-  maxAllowedMinutes: 90,
+  maxAllowedMinutes: 60,
 };
 
 export class PreparationTimeEngine {
@@ -289,19 +302,30 @@ export class PreparationTimeEngine {
 
     if (timeOfDay && timeOfDay !== 'all') {
       if (timeOfDay === 'lunch') {
-        whereConditions.push(`EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') BETWEEN 11 AND 15`);
+        whereConditions.push(`(
+          EXTRACT(HOUR FROM created_at AT TIME ZONE 'Asia/Kolkata') BETWEEN 12 AND 15 OR
+          EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') BETWEEN 11 AND 15
+        )`);
       } else if (timeOfDay === 'dinner') {
-        whereConditions.push(`EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') BETWEEN 18 AND 22`);
+        whereConditions.push(`(
+          EXTRACT(HOUR FROM created_at AT TIME ZONE 'Asia/Kolkata') BETWEEN 19 AND 22 OR
+          EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') BETWEEN 18 AND 22
+        )`);
       } else if (timeOfDay === 'late_night') {
-        whereConditions.push(`(EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') >= 23 OR EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') < 5)`);
+        whereConditions.push(`(
+          EXTRACT(HOUR FROM created_at AT TIME ZONE 'Asia/Kolkata') >= 23 OR 
+          EXTRACT(HOUR FROM created_at AT TIME ZONE 'Asia/Kolkata') < 5 OR 
+          EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') >= 23 OR 
+          EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC') < 5
+        )`);
       }
     }
 
     const sql = `
-      SELECT ${durationExpr} as duration_minutes
+      SELECT ${durationExpr} as duration_minutes, created_at
       FROM canonical_orders
       WHERE ${whereConditions.join(' AND ')}
-      ORDER BY duration_minutes ASC
+      ORDER BY created_at DESC
       LIMIT 200;
     `;
 
@@ -325,6 +349,16 @@ export class PreparationTimeEngine {
         return report;
       }
 
+      // Calculate EWMA with alpha = 0.3 across chronological order (oldest to newest)
+      const chronological = rows.slice().reverse();
+      const chronDurations = chronological.map((r: any) => Number(r.duration_minutes)).filter((d: number) => !isNaN(d) && d > 0);
+      let ewma = chronDurations[0] || 0;
+      const alpha = 0.3;
+      for (let i = 1; i < chronDurations.length; i++) {
+        ewma = alpha * chronDurations[i] + (1 - alpha) * ewma;
+      }
+      const roundedEwma = Math.round(ewma * 10) / 10;
+
       durations.sort((a: number, b: number) => a - b);
       const p50Idx = Math.floor(durations.length * 0.5);
       const p90Idx = Math.floor(durations.length * 0.9);
@@ -343,8 +377,9 @@ export class PreparationTimeEngine {
         source: 'ESTIMATED',
         confidence,
         sample_count: durations.length,
-        methodology: `Transparent historical quantile estimation (p50 median) computed across ${durations.length} canonical order records.`
+        methodology: `Transparent historical quantile estimation (p50 median) & EWMA (alpha=0.3: ${roundedEwma}m) computed across ${durations.length} canonical order records.`
       };
+      (report as any).ewma_minutes = roundedEwma;
 
       this.historicalStatsCache.set(cacheKey, { report, cachedAt: now });
       return report;
@@ -366,21 +401,30 @@ export class PreparationTimeEngine {
   /**
    * Fetches historical preparation statistics for branch backwards-compatibility
    */
-  public static async getHistoricalBranchStats(branchId?: string): Promise<{ p50: number; p90: number; sampleCount: number }> {
+  public static async getHistoricalBranchStats(branchId?: string): Promise<{
+    p50: number;
+    p90: number;
+    sampleCount: number;
+    ewma: number;
+    source: 'ESTIMATED' | 'UNAVAILABLE';
+  }> {
     let report = await this.getHistoricalMetricStats('KITCHEN_PREPARATION', { branchId });
     if (report.source === 'UNAVAILABLE' || !report.value_minutes) {
       report = await this.getHistoricalMetricStats('ACCEPTANCE_TO_READY', { branchId });
     }
 
-    if (report.source === 'ESTIMATED' && report.value_minutes !== null) {
+    if (report.source === 'ESTIMATED' && report.value_minutes !== null && report.sample_count >= 5) {
+      const ewmaVal = Number((report as any).ewma_minutes) || Number(report.p50_minutes) || Number(report.value_minutes);
       return {
         p50: Math.round(report.p50_minutes || report.value_minutes),
         p90: Math.round(report.p90_minutes || (report.value_minutes + 10)),
-        sampleCount: report.sample_count
+        sampleCount: report.sample_count,
+        ewma: Math.round(ewmaVal),
+        source: 'ESTIMATED'
       };
     }
 
-    return { p50: 15, p90: 25, sampleCount: 0 };
+    return { p50: 15, p90: 25, sampleCount: report.sample_count || 0, ewma: 15, source: 'UNAVAILABLE' };
   }
 
   /**
@@ -405,7 +449,7 @@ export class PreparationTimeEngine {
   public static calculateEstimatedPreparationMinutes(
     items: Array<{ category?: string; quantity?: number; isCombo?: boolean }>,
     workloadPendingOrders: number = 0,
-    options?: { isPeakHour?: boolean }
+    options?: { isPeakHour?: boolean; timezone?: string }
   ): number {
     if (!items || items.length === 0) return this.config.defaultBaseMinutes;
 
@@ -440,14 +484,16 @@ export class PreparationTimeEngine {
 
     const workloadBuffer = Math.min(15, Math.floor(workloadPendingOrders / 2) * 2);
 
-    const now = new Date();
-    const currentHour = now.getHours();
+    // Peak hour evaluation in branch local time (Asia/Kolkata): Lunch (12:00-15:00) and Dinner (19:00-22:00)
+    const branchHour = getBranchLocalHour(new Date(), options?.timezone || 'Asia/Kolkata');
     const isPeakHour = options?.isPeakHour !== undefined 
       ? options.isPeakHour 
-      : ((currentHour >= 19 && currentHour <= 22) || (currentHour >= 13 && currentHour <= 14));
-    const peakBuffer = isPeakHour ? this.config.peakHourBufferMinutes : 0;
+      : ((branchHour >= 12 && branchHour < 15) || (branchHour >= 19 && branchHour < 22));
 
-    const totalMinutes = maxBaseMinutes + additionalItemBuffer + comboBuffer + quantityBuffer + workloadBuffer + peakBuffer;
+    const subtotalMinutes = maxBaseMinutes + additionalItemBuffer + comboBuffer + quantityBuffer + workloadBuffer;
+    const peakMultiplier = isPeakHour ? 1.25 : 1.0;
+    const totalMinutes = Math.round(subtotalMinutes * peakMultiplier);
+
     return Math.min(this.config.maxAllowedMinutes, Math.max(this.config.minAllowedMinutes, totalMinutes));
   }
 
@@ -458,33 +504,53 @@ export class PreparationTimeEngine {
     items: Array<{ category?: string; quantity?: number; isCombo?: boolean }>;
     branchId?: string;
     workloadPendingOrders?: number;
+    timezone?: string;
   }): Promise<PreparationEstimateResult> {
-    const { items, branchId, workloadPendingOrders = 0 } = params;
-    const baselineMinutes = this.calculateEstimatedPreparationMinutes(items, workloadPendingOrders);
+    const { items, branchId, workloadPendingOrders = 0, timezone = 'Asia/Kolkata' } = params;
+    const baselineMinutes = this.calculateEstimatedPreparationMinutes(items, workloadPendingOrders, { timezone });
     const historicalStats = await this.getHistoricalBranchStats(branchId);
 
-    let finalEstimate = baselineMinutes;
-    let confidence = 0.70;
+    const branchHour = getBranchLocalHour(new Date(), timezone);
+    const isPeakHour = (branchHour >= 12 && branchHour < 15) || (branchHour >= 19 && branchHour < 22);
 
-    if (historicalStats.sampleCount >= 10) {
-      finalEstimate = Math.round(baselineMinutes * 0.7 + historicalStats.p50 * 0.3);
+    let finalEstimate: number;
+    let confidence: number;
+    let modelVersion: string;
+
+    if (historicalStats.sampleCount >= 5 && historicalStats.source === 'ESTIMATED') {
+      // EWMA model with alpha = 0.3 smoothed historical blend
+      const ewmaValue = historicalStats.ewma || historicalStats.p50;
+      const combined = Math.round(baselineMinutes * 0.7 + ewmaValue * 0.3);
+      finalEstimate = isPeakHour ? Math.round(combined * 1.25) : combined;
       confidence = Math.min(0.95, 0.70 + (historicalStats.sampleCount / 100) * 0.25);
+      modelVersion = 'v2.0-ewma-historical-hybrid';
+    } else {
+      // Rule-based deterministic baseline (< 5 samples: source UNAVAILABLE)
+      finalEstimate = baselineMinutes;
+      confidence = 0.70;
+      modelVersion = 'v1.0-deterministic-baseline';
     }
 
-    const p50 = Math.max(this.config.minAllowedMinutes, finalEstimate);
-    const p90 = Math.min(this.config.maxAllowedMinutes, Math.max(p50 + 5, historicalStats.p90));
+    const p50 = Math.min(this.config.maxAllowedMinutes, Math.max(this.config.minAllowedMinutes, finalEstimate));
+    const p90 = Math.min(this.config.maxAllowedMinutes, Math.max(p50 + 5, historicalStats.p90 || (p50 + 10)));
+
+    const distinctCount = items.length;
+    const baseCategory = items.length > 0 ? (this.config.baseMinutesByCategory[(items[0].category || 'pizza').toLowerCase()] || 12) : 12;
+    const concurrencyBuffer = Math.max(0, distinctCount - 1) * this.config.additionalItemIncrementMinutes;
+    const workloadBuffer = Math.min(15, Math.floor(workloadPendingOrders / 2) * 2);
+    const peakBuffer = isPeakHour ? Math.round((baseCategory + concurrencyBuffer + workloadBuffer) * 0.25) : 0;
 
     return {
       estimatedMinutes: p50,
       p50Minutes: p50,
       p90Minutes: p90,
-      modelVersion: historicalStats.sampleCount >= 10 ? 'v1.2-historical-hybrid' : 'v1.0-deterministic-baseline',
+      modelVersion,
       confidenceScore: Number(confidence.toFixed(2)),
       breakdown: {
-        baseCategoryMinutes: items.length > 0 ? (this.config.baseMinutesByCategory[(items[0].category || 'pizza').toLowerCase()] || 12) : 12,
-        concurrencyBufferMinutes: Math.max(0, items.length - 1) * this.config.additionalItemIncrementMinutes,
-        workloadBufferMinutes: Math.min(15, Math.floor(workloadPendingOrders / 2) * 2),
-        peakBufferMinutes: 0,
+        baseCategoryMinutes: baseCategory,
+        concurrencyBufferMinutes: concurrencyBuffer,
+        workloadBufferMinutes: workloadBuffer,
+        peakBufferMinutes: peakBuffer,
       }
     };
   }

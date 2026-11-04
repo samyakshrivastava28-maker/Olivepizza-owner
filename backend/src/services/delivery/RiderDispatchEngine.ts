@@ -217,6 +217,9 @@ export class RiderDispatchEngine {
     isProvisional?: boolean;
     provisionalDispatchId?: string;
     code?: string;
+    queued?: boolean;
+    queueId?: string;
+    status?: string;
   }> {
     let client: any = null;
     let assignedRider: EligibleRider | null = null;
@@ -287,6 +290,8 @@ export class RiderDispatchEngine {
             code: 'ORDER_TERMINAL'
           };
         }
+
+        await client.query('COMMIT');
       } else {
         // Case B: Canonical order row does not exist in PostgreSQL. Rollback transaction before provisional handling.
         await client.query('ROLLBACK');
@@ -334,7 +339,21 @@ export class RiderDispatchEngine {
       // Discover candidate riders for this order (using Firestore order data + PostgreSQL rider pool)
       const candidates = await this.findEligibleRiders(orderId);
       if (candidates.length === 0) {
-        return { success: false, reason: 'No eligible riders currently available in branch radius', code: 'NO_RIDERS_AVAILABLE' };
+        const { PendingDispatchQueueService } = await import('./PendingDispatchQueueService.js');
+        const queueRes = await PendingDispatchQueueService.enqueueOrder({
+          orderId,
+          branchId: firestoreOrderData.branchId || firestoreOrderData.branch_id || 'main_branch',
+          franchiseId: firestoreOrderData.franchiseId || firestoreOrderData.franchise_id || 'fra_rajnandgaon',
+          failureReason: 'No eligible riders currently available in branch radius'
+        });
+        return {
+          success: false,
+          queued: true,
+          status: 'WAITING_FOR_RIDER',
+          queueId: queueRes.entryId,
+          reason: 'No eligible riders currently available in branch radius. Order added to persistent dispatch queue.',
+          code: 'WAITING_FOR_RIDER'
+        };
       }
 
       // Delegate to ProvisionalDispatchService for restricted Firestore-first fallback
@@ -365,7 +384,21 @@ export class RiderDispatchEngine {
     const candidates = await this.findEligibleRiders(orderId);
 
     if (candidates.length === 0) {
-      return { success: false, reason: 'No eligible riders currently available in branch radius', code: 'NO_RIDERS_AVAILABLE' };
+      const { PendingDispatchQueueService } = await import('./PendingDispatchQueueService.js');
+      const queueRes = await PendingDispatchQueueService.enqueueOrder({
+        orderId,
+        branchId: orderRecord.branch_id,
+        franchiseId: orderRecord.franchise_id,
+        failureReason: 'No eligible riders currently available in branch radius'
+      });
+      return {
+        success: false,
+        queued: true,
+        status: 'WAITING_FOR_RIDER',
+        queueId: queueRes.entryId,
+        reason: 'No eligible riders currently available in branch radius. Order added to persistent dispatch queue.',
+        code: 'WAITING_FOR_RIDER'
+      };
     }
 
     const branchId = orderRecord.branch_id;
@@ -412,7 +445,21 @@ export class RiderDispatchEngine {
 
       if (!assignedRider) {
         await acquiredClient.query('ROLLBACK');
-        return { success: false, reason: 'All eligible candidates are currently busy', code: 'RIDERS_BUSY' };
+        const { PendingDispatchQueueService } = await import('./PendingDispatchQueueService.js');
+        const queueRes = await PendingDispatchQueueService.enqueueOrder({
+          orderId,
+          branchId: orderRecord.branch_id,
+          franchiseId: orderRecord.franchise_id,
+          failureReason: 'All eligible candidates are currently busy'
+        });
+        return {
+          success: false,
+          queued: true,
+          status: 'WAITING_FOR_RIDER',
+          queueId: queueRes.entryId,
+          reason: 'All eligible candidates are currently busy. Order added to persistent dispatch queue.',
+          code: 'WAITING_FOR_RIDER'
+        };
       }
 
       // Atomically commit assignment in PostgreSQL
@@ -440,6 +487,16 @@ export class RiderDispatchEngine {
          SET active_order_id = $2, last_updated = NOW()
          WHERE delivery_partner_id = $1`,
         [assignedRider.uid, orderId]
+      ).catch(() => {});
+
+      await acquiredClient.query(
+        `UPDATE pending_dispatch_queue
+         SET status = 'ASSIGNED',
+             assigned_rider_id = $2,
+             resolved_at = NOW(),
+             updated_at = NOW()
+         WHERE order_id = $1 AND status IN ('WAITING_FOR_RIDER', 'ASSIGNMENT_IN_PROGRESS', 'FAILED_RETRYABLE', 'PENDING', 'RETRYING')`,
+        [orderId, assignedRider.uid]
       ).catch(() => {});
 
       await acquiredClient.query('COMMIT');

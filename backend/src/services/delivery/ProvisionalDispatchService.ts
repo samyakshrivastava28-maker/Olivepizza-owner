@@ -347,6 +347,14 @@ export class ProvisionalDispatchService {
         ).catch(() => {});
         await client.query('COMMIT');
 
+        // Conditionally release rider in PostgreSQL only if still bound to this cancelled order
+        await client.query(
+          `UPDATE delivery_partners 
+           SET active_order_id = NULL, updated_at = NOW() 
+           WHERE id = $1 AND active_order_id = $2`,
+          [intent.rider_id, orderId]
+        ).catch(() => {});
+
         // Unassign rider in Firestore
         await adminDb.collection('orders').doc(orderId).set({
           isProvisionalDispatch: false,
@@ -354,9 +362,6 @@ export class ProvisionalDispatchService {
           deliveryPartnerId: null,
           updatedAt: new Date()
         }, { merge: true }).catch(() => {});
-
-        await adminDb.collection('users').doc(intent.rider_id).set({ activeOrderId: null }, { merge: true }).catch(() => {});
-        await adminDb.collection('delivery_partners').doc(intent.rider_id).set({ activeOrderId: null }, { merge: true }).catch(() => {});
 
         return {
           reconciled: false,
@@ -473,14 +478,21 @@ export class ProvisionalDispatchService {
 
   /**
    * Sweeper to detect and expire abandoned provisional assignments (> 15 mins).
+   * Atomically claims rows using FOR UPDATE SKIP LOCKED to prevent duplicate execution across workers.
    */
   public static async cleanupExpiredIntents(): Promise<{ expiredCount: number }> {
     try {
       const expiredRes = await query(`
-        SELECT id, order_id, rider_id
-        FROM provisional_dispatch_intents
-        WHERE status = 'PENDING_RECONCILIATION'
-          AND expires_at < NOW()
+        UPDATE provisional_dispatch_intents
+        SET status = 'EXPIRED', reconciliation_status = 'EXPIRED', updated_at = NOW()
+        WHERE id IN (
+          SELECT id
+          FROM provisional_dispatch_intents
+          WHERE status = 'PENDING_RECONCILIATION'
+            AND expires_at < NOW()
+          FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, order_id, rider_id
       `);
 
       if (expiredRes.rows.length === 0) {
@@ -489,11 +501,13 @@ export class ProvisionalDispatchService {
 
       let expiredCount = 0;
       for (const row of expiredRes.rows) {
-        await query(`
-          UPDATE provisional_dispatch_intents
-          SET status = 'EXPIRED', reconciliation_status = 'EXPIRED'
-          WHERE id = $1
-        `, [row.id]).catch(() => {});
+        // Conditionally release rider in PostgreSQL only if still bound to this expired order
+        await query(
+          `UPDATE delivery_partners 
+           SET active_order_id = NULL, updated_at = NOW() 
+           WHERE id = $1 AND active_order_id = $2`,
+          [row.rider_id, row.order_id]
+        ).catch(() => {});
 
         // Release Firestore lock
         await adminDb.collection('orders').doc(row.order_id).set({
@@ -503,8 +517,6 @@ export class ProvisionalDispatchService {
           updatedAt: new Date()
         }, { merge: true }).catch(() => {});
 
-        await adminDb.collection('users').doc(row.rider_id).set({ activeOrderId: null }, { merge: true }).catch(() => {});
-        await adminDb.collection('delivery_partners').doc(row.rider_id).set({ activeOrderId: null }, { merge: true }).catch(() => {});
         expiredCount++;
       }
 

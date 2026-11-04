@@ -559,46 +559,104 @@ export class FranchiseAccessService {
       // Delivery app requires explicit delivery_partners record; do not authorize via general app_users grant
       if (hasAppAccess && targetApp !== 'DELIVERY') {
         const resolvedTerminal = (terminalId || pgUserData.terminal_id || pgUserData.metadata?.terminalId || pgUserData.metadata?.terminal_id || '').trim();
-        if (targetApp === 'POS' && !resolvedTerminal) {
-          return {
-            authorized: false,
-            code: 'TERMINAL_REQUIRED',
-            reason: 'POS access requires a valid assigned terminal identifier.'
-          };
+        if (targetApp === 'POS') {
+          if (!resolvedTerminal) {
+            return {
+              authorized: false,
+              code: 'TERMINAL_REQUIRED',
+              reason: 'POS access requires a valid assigned terminal identifier.'
+            };
+          }
+
+          // Strict terminal authorization: enforce metadata.allowed_terminals if configured
+          const allowedTerminals = pgUserData.metadata?.allowed_terminals || pgUserData.metadata?.allowedTerminals;
+          if (Array.isArray(allowedTerminals) && allowedTerminals.length > 0) {
+            if (!allowedTerminals.includes(resolvedTerminal)) {
+              return {
+                authorized: false,
+                code: 'TERMINAL_NOT_PERMITTED',
+                reason: `Terminal "${resolvedTerminal}" is not permitted for this operator. Allowed terminals: ${allowedTerminals.join(', ')}.`
+              };
+            }
+          }
         }
 
         // Branch and Franchise Scope Validation
         let resolvedBranch = pgUserData.branch_id;
         let resolvedFranchise = pgUserData.franchise_id;
 
-        if (requestedBranchId && resolvedBranch && resolvedBranch !== 'all' && !isOwner) {
-          if (requestedBranchId !== resolvedBranch) {
+        // Strict multi-tenant isolation: non-owner staff must fail closed if branch or franchise is missing
+        if (!isOwner) {
+          if (!resolvedBranch || !resolvedFranchise) {
+            return {
+              authorized: false,
+              code: 'BRANCH_SCOPE_REQUIRED',
+              reason: 'Staff account must be explicitly assigned to an active branch and franchise scope in the system database.'
+            };
+          }
+          if (requestedBranchId && requestedBranchId !== resolvedBranch) {
             return {
               authorized: false,
               code: 'BRANCH_SCOPE_VIOLATION',
               reason: `Forbidden: Your account is authorized for branch "${resolvedBranch}", not "${requestedBranchId}".`
             };
           }
+        } else {
+          // Owner can optionally switch branch context
+          if (requestedBranchId) {
+            resolvedBranch = requestedBranchId;
+          } else if (!resolvedBranch) {
+            resolvedBranch = 'main_branch';
+          }
+          if (!resolvedFranchise) {
+            resolvedFranchise = 'fra_rajnandgaon';
+          }
         }
 
-        if (requestedBranchId && (resolvedBranch === 'all' || isOwner || !resolvedBranch)) {
-          resolvedBranch = requestedBranchId;
-        }
-
-        if (resolvedFranchise === 'fra_primary' || resolvedFranchise === 'fra_rajnandgaon') {
+        if (resolvedFranchise === 'fra_primary') {
           resolvedFranchise = 'fra_rajnandgaon';
         }
-        if (!resolvedBranch) {
+
+        // Validate branch existence, active status, and franchise ownership against PostgreSQL restaurant_branches
+        if (resolvedBranch && resolvedBranch !== 'all') {
           try {
-            const bRes = await query(`SELECT id, franchise_id FROM restaurant_branches WHERE is_active = true ORDER BY created_at ASC LIMIT 1`);
-            if (bRes.rows.length > 0) {
-              resolvedBranch = bRes.rows[0].id;
-              resolvedFranchise = resolvedFranchise || bRes.rows[0].franchise_id;
+            const bRes = await query(
+              `SELECT id, name, franchise_id, is_open FROM restaurant_branches WHERE id = $1 LIMIT 1`,
+              [resolvedBranch]
+            );
+            if (bRes.rows.length === 0) {
+              return {
+                authorized: false,
+                code: 'BRANCH_NOT_FOUND',
+                reason: `Assigned branch "${resolvedBranch}" does not exist in system database.`
+              };
             }
-          } catch (_) {}
+            const bRow = bRes.rows[0];
+            if (bRow.is_open === false) {
+              return {
+                authorized: false,
+                code: 'BRANCH_INACTIVE',
+                reason: `Branch "${resolvedBranch}" is currently deactivated.`
+              };
+            }
+            const branchFranchise = bRow.franchise_id === 'fra_primary' ? 'fra_rajnandgaon' : bRow.franchise_id;
+            const userFranchise = resolvedFranchise === 'fra_primary' ? 'fra_rajnandgaon' : resolvedFranchise;
+            if (userFranchise && userFranchise !== 'all' && branchFranchise !== userFranchise) {
+              return {
+                authorized: false,
+                code: 'CROSS_FRANCHISE_VIOLATION',
+                reason: `Branch "${resolvedBranch}" does not belong to user franchise "${resolvedFranchise}".`
+              };
+            }
+          } catch (dbErr: any) {
+            console.error('[FranchiseAccessService] Branch validation error (fail-closed):', dbErr.message);
+            return {
+              authorized: false,
+              code: 'DATABASE_UNAVAILABLE',
+              reason: 'Failed to validate branch assignment.'
+            };
+          }
         }
-        resolvedBranch = resolvedBranch || 'main_branch';
-        resolvedFranchise = resolvedFranchise || 'fra_rajnandgaon';
 
         const roleMap = {
           OWNER: 'owner',
@@ -669,6 +727,13 @@ export class FranchiseAccessService {
             };
           }
           if (dp.status === 'APPROVED' || dp.is_online === true) {
+            if (!dp.branch_id || !dp.franchise_id) {
+              return {
+                authorized: false,
+                code: 'BRANCH_SCOPE_REQUIRED',
+                reason: 'Delivery partner must be explicitly assigned to an active branch and franchise scope in the system database.'
+              };
+            }
             return {
               authorized: true,
               requiresPin: false,
@@ -678,10 +743,10 @@ export class FranchiseAccessService {
                 email: dp.email || emailLower,
                 name: dp.name || 'Delivery Partner',
                 role: 'delivery_partner',
-                branchId: dp.branch_id || 'main_branch',
+                branchId: dp.branch_id,
                 branchName: 'Olive Pizza',
-                branchIds: [dp.branch_id || 'main_branch'],
-                franchiseId: dp.franchise_id || 'fra_rajnandgaon',
+                branchIds: [dp.branch_id],
+                franchiseId: dp.franchise_id,
                 permissions: ['delivery.orders', 'delivery.location'],
                 allowedApps: ['DELIVERY'],
                 applicationAccess: { app_delivery: true }

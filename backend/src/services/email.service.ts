@@ -386,15 +386,37 @@ export const processEmailQueue = async () => {
   }
 };
 
-// Background polling timer: Drains queued emails every 5 seconds
-const emailPollingTimer = setInterval(() => {
-  if ((pgPool as any)?.ending || (pgPool as any)?.ended) return;
-  processEmailQueue().catch(err => {
-    if (err && err.message !== 'No work' && !err.message.includes('calling end on the pool')) {
-      console.warn('[EmailQueue] Polling warning:', err.message);
-    }
-  });
-}, 5000);
+// Lifecycle management: explicit worker controls with AbortController
+let emailWorkerTimer: NodeJS.Timeout | null = null;
+let emailWorkerAbortController: AbortController | null = null;
 
-if (emailPollingTimer.unref) emailPollingTimer.unref();
-console.log('📧 [EmailQueue] Asynchronous background queue worker active (5s polling interval).');
+export const startEmailWorker = (): void => {
+  if (emailWorkerTimer) return;
+  emailWorkerAbortController = new AbortController();
+  emailWorkerTimer = setInterval(() => {
+    if (emailWorkerAbortController?.signal.aborted) return;
+    processEmailQueue().catch(err => {
+      if (err && err.message !== 'No work' && !err.message.includes('calling end on the pool')) {
+        console.warn('[EmailQueue] Polling warning:', err.message);
+      }
+    });
+  }, 5000);
+
+  if (emailWorkerTimer.unref) emailWorkerTimer.unref();
+  console.log('📧 [EmailQueue] Asynchronous background queue worker active (5s polling interval).');
+};
+
+export const stopEmailWorker = (): void => {
+  if (emailWorkerAbortController) {
+    emailWorkerAbortController.abort();
+    emailWorkerAbortController = null;
+  }
+  if (emailWorkerTimer) {
+    clearInterval(emailWorkerTimer);
+    emailWorkerTimer = null;
+    console.log('📧 [EmailQueue] Background queue worker stopped.');
+  }
+};
+
+// Start worker with unref for background drain
+startEmailWorker();

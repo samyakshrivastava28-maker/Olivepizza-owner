@@ -155,6 +155,10 @@ export async function query<T = any>(text: string, params: any[] = []): Promise<
  * Execute an atomic transaction block with automatic BEGIN, COMMIT, and ROLLBACK.
  * Every client query executed within the transaction is guarded against cloud mutation during tests.
  */
+export async function getClient(): Promise<PoolClient> {
+  return await pgPool.connect();
+}
+
 export async function withTransaction<T>(callback: (client: PoolClient) => Promise<T>): Promise<T> {
   if (testTransactionOverride) {
     return testTransactionOverride(callback as any);
