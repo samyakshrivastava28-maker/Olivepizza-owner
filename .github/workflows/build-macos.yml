@@ -39,7 +39,7 @@ jobs:
           VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
           VITE_FIREBASE_PROJECT_ID: olive-pizza-08
           VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
-      - run: npx electron-builder --mac --config electron-builder.json
+      - run: npx electron-builder --mac -p never --config electron-builder.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
