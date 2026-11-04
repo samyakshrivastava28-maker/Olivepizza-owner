@@ -7,7 +7,7 @@ import { setTestQueryOverride } from '../config/postgres.js';
 import { FranchiseAccessService } from '../services/franchise/FranchiseAccessService.js';
 import { mockSandboxProvider } from '../services/payment/MockSandboxProvider.js';
 import { PaymentService } from '../services/payment/PaymentService.js';
-import { resolveApiBaseUrl, DEV_BACKEND_URL, PRODUCTION_BACKEND_URL } from '../../../../Olive Pizza restaurant manager/src/lib/routing.js';
+import { resolveApiBaseUrl, DEV_BACKEND_URL, PRODUCTION_BACKEND_URL } from '../utils/routing.js';
 
 test('Phase 6 Targeted Remediation — Master Regression Suite', async (t) => {
   let testDb: DisposableTestDb;

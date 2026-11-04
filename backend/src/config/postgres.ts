@@ -96,9 +96,14 @@ pgPool.on('error', (err) => {
  * Asserts that the database connection target is safe for the active environment.
  * If running under test mode, prevents connecting to cloud PostgreSQL hosts before any socket opens.
  */
-export function assertSafeDatabaseTarget(): void {
+export function assertSafeDatabaseTarget(overrideUrl?: string): void {
   if (process.env.NODE_ENV === 'test' || process.env.TEST_SAFETY_FAILSAFE === 'strict') {
-    if (isCloudPostgres && process.env.ALLOW_CLOUD_TEST_CONNECTION !== 'true') {
+    const target = overrideUrl || process.env.DATABASE_URL || dbUrl;
+    const isTargetCloud = overrideUrl
+      ? Boolean(target && (target.includes('layerbase.dev') || target.includes('render.com') || target.includes('dpg-') || target.includes('supabase.co')) && !target.includes('localhost') && !target.includes('127.0.0.1') && !target.includes('::1'))
+      : isCloudPostgres;
+
+    if (isTargetCloud && process.env.ALLOW_CLOUD_TEST_CONNECTION !== 'true') {
       throw new Error(
         `[DATABASE TARGET BLOCKED] Test execution cannot target cloud PostgreSQL host. ` +
         `Use disposable in-memory PGlite instance or local PostgreSQL container.`
@@ -111,9 +116,10 @@ export function assertSafeDatabaseTarget(): void {
  * Fail-safe guard: Refuses to run mutating queries against cloud databases during test execution.
  * Covers direct queries, transaction clients, writable CTEs (WITH ... INSERT/UPDATE/DELETE), MERGE, and DDL.
  */
-export function assertSafeDatabaseForMutation(sqlText: string): void {
+export function assertSafeDatabaseForMutation(sqlText: string, overrideIsCloud?: boolean): void {
   if (process.env.NODE_ENV === 'test' || process.env.TEST_SAFETY_FAILSAFE === 'strict') {
-    if (isCloudPostgres && process.env.ALLOW_CLOUD_TEST_CONNECTION !== 'true') {
+    const isCloud = overrideIsCloud !== undefined ? overrideIsCloud : isCloudPostgres;
+    if (isCloud && process.env.ALLOW_CLOUD_TEST_CONNECTION !== 'true') {
       const normalized = sqlText.trim().replace(/\/\*[\s\S]*?\*\/|--.*$/gm, '').trim();
       const isDirectMutation = /^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|MERGE)\b/i.test(normalized);
       const isWritableCTE = /^\s*WITH\b[\s\S]*?\b(INSERT|UPDATE|DELETE|MERGE)\b/i.test(normalized);

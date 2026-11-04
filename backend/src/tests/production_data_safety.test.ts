@@ -43,7 +43,7 @@ describe('Phase I: Production Data Safety, Security Regression & Release Integri
 
         // When connecting to cloud (render.com / dpg- / supabase), assertSafeDatabaseTarget must throw
         assert.throws(
-          () => assertSafeDatabaseTarget(),
+          () => assertSafeDatabaseTarget('postgres://cloud-user:pass@dpg-test.render.com:5432/prod_db'),
           /DATABASE TARGET BLOCKED/
         );
       } finally {
@@ -59,31 +59,31 @@ describe('Phase I: Production Data Safety, Security Regression & Release Integri
 
         // 1. Direct INSERT
         assert.throws(
-          () => assertSafeDatabaseForMutation("INSERT INTO canonical_orders (id) VALUES ('test')"),
+          () => assertSafeDatabaseForMutation("INSERT INTO canonical_orders (id) VALUES ('test')", true),
           /DATABASE SAFETY BLOCKER/
         );
 
         // 2. Direct UPDATE
         assert.throws(
-          () => assertSafeDatabaseForMutation("UPDATE canonical_bills SET is_cancelled = true WHERE id = 'test'"),
+          () => assertSafeDatabaseForMutation("UPDATE canonical_bills SET is_cancelled = true WHERE id = 'test'", true),
           /DATABASE SAFETY BLOCKER/
         );
 
         // 3. Direct DELETE
         assert.throws(
-          () => assertSafeDatabaseForMutation("DELETE FROM canonical_orders WHERE id = 'test'"),
+          () => assertSafeDatabaseForMutation("DELETE FROM canonical_orders WHERE id = 'test'", true),
           /DATABASE SAFETY BLOCKER/
         );
 
         // 4. Writable CTE (WITH ... INSERT)
         assert.throws(
-          () => assertSafeDatabaseForMutation("WITH new_order AS (INSERT INTO canonical_orders (id) VALUES ('test') RETURNING id) SELECT * FROM new_order"),
+          () => assertSafeDatabaseForMutation("WITH new_order AS (INSERT INTO canonical_orders (id) VALUES ('test') RETURNING id) SELECT * FROM new_order", true),
           /DATABASE SAFETY BLOCKER/
         );
 
         // 5. MERGE statement
         assert.throws(
-          () => assertSafeDatabaseForMutation("MERGE INTO canonical_orders USING dual ON (id = 'test') WHEN MATCHED THEN UPDATE SET is_active = false"),
+          () => assertSafeDatabaseForMutation("MERGE INTO canonical_orders USING dual ON (id = 'test') WHEN MATCHED THEN UPDATE SET is_active = false", true),
           /DATABASE SAFETY BLOCKER/
         );
 

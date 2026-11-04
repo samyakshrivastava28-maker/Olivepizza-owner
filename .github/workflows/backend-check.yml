@@ -50,6 +50,8 @@ jobs:
       NODE_ENV: test
       PG_SSL: 'false'
       DATABASE_ENV: testing
+      FIREBASE_PROJECT_ID: olive-pizza-08
+      FIREBASE_SERVICE_ACCOUNT_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BASE64 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -79,6 +81,8 @@ jobs:
           PG_SSL: 'false'
           DATABASE_ENV: testing
           NODE_ENV: test
+          FIREBASE_PROJECT_ID: olive-pizza-08
+          FIREBASE_SERVICE_ACCOUNT_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BASE64 }}
 
       - name: Run backend tests
         run: npm test
@@ -90,3 +94,5 @@ jobs:
           PG_SSL: 'false'
           DATABASE_ENV: testing
           NODE_ENV: test
+          FIREBASE_PROJECT_ID: olive-pizza-08
+          FIREBASE_SERVICE_ACCOUNT_BASE64: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_BASE64 }}
