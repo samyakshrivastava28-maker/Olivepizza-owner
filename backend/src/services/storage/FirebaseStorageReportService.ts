@@ -448,8 +448,10 @@ export class FirebaseStorageReportService {
     }
 
     // 3. Master Admin determination based strictly on authoritative role & scoping
+    const userEmail = (effectiveUser.email || callerEmail || '').toLowerCase().trim();
+    const isPlatformOwnerEmail = ['webhub2811@gmail.com', 'olivepizzarjn@gmail.com'].includes(userEmail);
     const isMasterAdminRole = ['owner', 'platform_owner', 'developer'].includes(role);
-    const isGlobalFranchise = !effectiveUser.franchise_id || effectiveUser.franchise_id === '' || effectiveUser.franchise_id === 'global' || effectiveUser.franchise_id === 'all';
+    const isGlobalFranchise = !effectiveUser.franchise_id || effectiveUser.franchise_id === '' || effectiveUser.franchise_id === 'global' || effectiveUser.franchise_id === 'all' || effectiveUser.franchise_id === 'fra_primary' || isPlatformOwnerEmail;
     const isGlobalMaster = isMasterAdminRole && isGlobalFranchise;
 
     // 4. Global Scope Check
