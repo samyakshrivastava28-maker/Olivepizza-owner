@@ -486,7 +486,24 @@ export class FranchiseAccessService {
 
     if (pgUserData && pgUserData.is_active !== false) {
       const userRole = (pgUserData.role || '').toLowerCase();
-      let allowedApps: string[] = Array.isArray(pgUserData.allowed_apps) ? pgUserData.allowed_apps : [];
+      let allowedApps: string[] = [];
+      if (Array.isArray(pgUserData.allowed_apps)) {
+        allowedApps = pgUserData.allowed_apps;
+      } else if (typeof pgUserData.allowed_apps === 'string') {
+        try {
+          const parsed = JSON.parse(pgUserData.allowed_apps);
+          if (Array.isArray(parsed)) allowedApps = parsed;
+        } catch {}
+      }
+
+      let metadataObj: any = pgUserData.metadata || {};
+      if (typeof metadataObj === 'string') {
+        try {
+          metadataObj = JSON.parse(metadataObj);
+        } catch {
+          metadataObj = {};
+        }
+      }
       const isOwner = userRole === 'owner' || userRole === 'platform_owner' || userRole === 'admin';
 
       if (targetApp === 'OWNER') {
@@ -558,7 +575,7 @@ export class FranchiseAccessService {
 
       // Delivery app requires explicit delivery_partners record; do not authorize via general app_users grant
       if (hasAppAccess && targetApp !== 'DELIVERY') {
-        const resolvedTerminal = (terminalId || pgUserData.terminal_id || pgUserData.metadata?.terminalId || pgUserData.metadata?.terminal_id || '').trim();
+        const resolvedTerminal = (terminalId || pgUserData.terminal_id || metadataObj.terminalId || metadataObj.terminal_id || '').trim();
         if (targetApp === 'POS') {
           if (!resolvedTerminal) {
             return {
@@ -569,7 +586,7 @@ export class FranchiseAccessService {
           }
 
           // Strict terminal authorization: enforce metadata.allowed_terminals if configured
-          const allowedTerminals = pgUserData.metadata?.allowed_terminals || pgUserData.metadata?.allowedTerminals;
+          const allowedTerminals = metadataObj.allowed_terminals || metadataObj.allowedTerminals;
           if (Array.isArray(allowedTerminals) && allowedTerminals.length > 0) {
             if (!allowedTerminals.includes(resolvedTerminal)) {
               return {
@@ -585,6 +602,10 @@ export class FranchiseAccessService {
         let resolvedBranch = pgUserData.branch_id;
         let resolvedFranchise = pgUserData.franchise_id;
 
+        if (resolvedFranchise === 'fra_primary') {
+          resolvedFranchise = 'fra_rajnandgaon';
+        }
+
         // Strict multi-tenant isolation: non-owner staff must fail closed if branch or franchise is missing
         if (!isOwner) {
           if (!resolvedBranch || !resolvedFranchise) {
@@ -594,15 +615,24 @@ export class FranchiseAccessService {
               reason: 'Staff account must be explicitly assigned to an active branch and franchise scope in the system database.'
             };
           }
-          if (requestedBranchId && requestedBranchId !== resolvedBranch) {
-            return {
-              authorized: false,
-              code: 'BRANCH_SCOPE_VIOLATION',
-              reason: `Forbidden: Your account is authorized for branch "${resolvedBranch}", not "${requestedBranchId}".`
-            };
+
+          if (isFranchiseStaff && targetApp === 'FRANCHISE_MANAGER') {
+            // Franchise managers can scope to any branch within their assigned franchise
+            if (requestedBranchId && requestedBranchId !== resolvedFranchise && requestedBranchId !== 'all') {
+              resolvedBranch = requestedBranchId;
+            }
+          } else {
+            // Branch-scoped staff (POS cashier, Restaurant Manager) are locked to their assigned branch
+            if (requestedBranchId && requestedBranchId !== resolvedBranch && requestedBranchId !== resolvedFranchise) {
+              return {
+                authorized: false,
+                code: 'BRANCH_SCOPE_VIOLATION',
+                reason: `Forbidden: Your account is authorized for branch "${resolvedBranch}", not "${requestedBranchId}".`
+              };
+            }
           }
         } else {
-          // Owner can optionally switch branch context
+          // Platform Owner can dynamically switch branch and franchise context
           if (requestedBranchId) {
             resolvedBranch = requestedBranchId;
           } else if (!resolvedBranch) {
@@ -611,10 +641,6 @@ export class FranchiseAccessService {
           if (!resolvedFranchise) {
             resolvedFranchise = 'fra_rajnandgaon';
           }
-        }
-
-        if (resolvedFranchise === 'fra_primary') {
-          resolvedFranchise = 'fra_rajnandgaon';
         }
 
         // Validate branch existence, active status, and franchise ownership against PostgreSQL restaurant_branches
@@ -640,13 +666,19 @@ export class FranchiseAccessService {
               };
             }
             const branchFranchise = bRow.franchise_id === 'fra_primary' ? 'fra_rajnandgaon' : bRow.franchise_id;
-            const userFranchise = resolvedFranchise === 'fra_primary' ? 'fra_rajnandgaon' : resolvedFranchise;
-            if (userFranchise && userFranchise !== 'all' && branchFranchise !== userFranchise) {
-              return {
-                authorized: false,
-                code: 'CROSS_FRANCHISE_VIOLATION',
-                reason: `Branch "${resolvedBranch}" does not belong to user franchise "${resolvedFranchise}".`
-              };
+
+            if (isOwner) {
+              // Platform owner automatically adopts target branch's franchise scope
+              resolvedFranchise = branchFranchise;
+            } else {
+              const userFranchise = resolvedFranchise === 'fra_primary' ? 'fra_rajnandgaon' : resolvedFranchise;
+              if (userFranchise && userFranchise !== 'all' && branchFranchise !== userFranchise) {
+                return {
+                  authorized: false,
+                  code: 'CROSS_FRANCHISE_VIOLATION',
+                  reason: `Branch "${resolvedBranch}" does not belong to user franchise "${resolvedFranchise}".`
+                };
+              }
             }
           } catch (dbErr: any) {
             console.error('[FranchiseAccessService] Branch validation error (fail-closed):', dbErr.message);

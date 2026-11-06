@@ -10,6 +10,7 @@
  */
 
 import { adminDb } from '../../config/firebase.js';
+import { query } from '../../lib/db.js';
 import crypto from 'crypto';
 import { OrderStateMachine } from '../order/OrderStateMachine.js';
 import { AuthoritativePricingResolver } from '../menu/AuthoritativePricingResolver.js';
@@ -109,6 +110,34 @@ export class POSService {
     }
 
     try {
+      // 0. Primary: PostgreSQL menu_products & menu_combos
+      try {
+        const pgProd = await query('SELECT * FROM menu_products WHERE id =  LIMIT 1', [itemId]);
+        if (pgProd.rows.length > 0) {
+          const r = pgProd.rows[0];
+          const item = {
+            id: r.id,
+            productName: r.name,
+            name: r.name,
+            description: r.description,
+            basePrice: Number(r.base_price),
+            price: Number(r.base_price),
+            imageUrl: r.image_url,
+            isVegetarian: r.is_vegetarian,
+            isActive: r.is_active,
+            variants: r.variants,
+            crusts: r.crusts,
+            addons: r.addons,
+            channelAvailability: r.channel_availability,
+            rating: Number(r.rating)
+          };
+          this.catalogCache.set(itemId, { item, timestamp: now });
+          return item;
+        }
+      } catch (pgErr: any) {
+        console.warn('[POSService] PostgreSQL catalog query notice for ' + itemId + ':', pgErr.message);
+      }
+
       // 1. Check products collection
       let docSnap = await adminDb.collection('products').doc(itemId).get();
       if (docSnap.exists) {

@@ -18,6 +18,7 @@ import { appEventBus, OrderStatusChangedEvent, OrderCreatedEvent } from '../even
 import { adminAuth, adminDb } from '../../config/firebase.js';
 import { sanitizeError } from '../../utils/logSanitizer.js';
 import { redisEventBusBridge } from '../eventBus/RedisEventBusBridge.js';
+import { query } from '../../lib/db.js';
 
 export interface AuthoritativeUserInfo {
   role: string;

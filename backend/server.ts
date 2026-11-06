@@ -4,7 +4,7 @@ import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import apiApp from './src/app.ts';
+import apiApp, { corsMiddleware } from './src/app.ts';
 import healthRoutes from './src/routes/health.routes.ts';
 import { DataRetentionJob } from './src/jobs/DataRetentionJob.ts';
 import './src/services/DataLifecycleService.ts';
@@ -41,6 +41,7 @@ validateEnvironmentVariables();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+app.use(corsMiddleware);
 app.use(healthRoutes);
 app.use('/api', healthRoutes);
 /* legacy */ app.get(['/legacy-health-unused'], (req, res) => {

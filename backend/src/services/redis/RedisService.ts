@@ -10,6 +10,7 @@ import '../../config/env.js';
  */
 
 import { Redis } from 'ioredis';
+import crypto from 'crypto';
 import { adminDb } from '../../config/firebase.js';
 
 class RedisService {
@@ -252,9 +253,10 @@ class RedisService {
       return await loader();
     }
 
-    // 2. Try acquiring distributed mutex lock
+    // 2. Try acquiring distributed mutex lock with unique ownership token
     const lockKey = `stampede:${cacheKey}`;
-    const acquired = await this.acquireLock(lockKey, lockTtl, false);
+    const lockToken = crypto.randomUUID();
+    const acquired = await this.acquireLockWithToken(lockKey, lockToken, lockTtl);
 
     if (acquired) {
       try {
@@ -273,7 +275,7 @@ class RedisService {
 
         return freshData;
       } finally {
-        await this.releaseLock(lockKey);
+        await this.releaseLockWithToken(lockKey, lockToken);
       }
     }
 
@@ -348,6 +350,8 @@ class RedisService {
     }
     await this.delByPattern('bootstrap:home:*');
     await this.delByPattern('bootstrap:pos:*');
+    await this.delByPattern('olive:menu:bootstrap:*');
+    await this.delByPattern('olive:home:bootstrap:*');
   }
 
   /**
@@ -471,6 +475,36 @@ class RedisService {
 
   public async releaseLock(lockKey: string): Promise<void> {
     await this.del(`lock:${lockKey}`);
+  }
+
+  private static readonly SAFE_RELEASE_LOCK_LUA = `
+    if redis.call("get", KEYS[1]) == ARGV[1] then
+      return redis.call("del", KEYS[1])
+    else
+      return 0
+    end
+  `;
+
+  public async acquireLockWithToken(lockKey: string, token: string, ttlSeconds = 10): Promise<boolean> {
+    if (!this.isConnected || !this.client) return false;
+    try {
+      const namespacedKey = this.normalizeKey(`lock:${lockKey}`);
+      const result = await this.client.set(namespacedKey, token, 'EX', ttlSeconds, 'NX');
+      return result === 'OK';
+    } catch {
+      return false;
+    }
+  }
+
+  public async releaseLockWithToken(lockKey: string, token: string): Promise<boolean> {
+    if (!this.isConnected || !this.client) return false;
+    try {
+      const namespacedKey = this.normalizeKey(`lock:${lockKey}`);
+      const result = await this.client.eval(RedisService.SAFE_RELEASE_LOCK_LUA, 1, namespacedKey, token);
+      return result === 1;
+    } catch {
+      return false;
+    }
   }
 
   public isAvailable(): boolean {

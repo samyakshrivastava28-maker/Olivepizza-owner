@@ -1097,7 +1097,8 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
           });
         }
       }
-      serverCalculatedTotal += (itemPrice + addonsCost) * qty;
+      // itemPrice is authoritativePrice.unitPrice, which already includes base + crust + addons
+      serverCalculatedTotal += itemPrice * qty;
 
       validatedItems.push({
         menuItemId: itemId,
@@ -1255,6 +1256,24 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
 
     const packagingCharge = Math.max(0, Number(req.body.packagingCharge) || 0);
     const finalOrderTotal = Math.max(0, serverCalculatedTotal - discountAmount) + deliveryFee + taxes + packagingCharge;
+
+    // Authoritative Price Revalidation against Client Expected Total (Tamper & Stale Cart Protection)
+    const clientExpectedTotal = req.body.clientExpectedTotal !== undefined 
+      ? Number(req.body.clientExpectedTotal) 
+      : (req.body.totalAmount !== undefined ? Number(req.body.totalAmount) : undefined);
+
+    if (resolvedOrderSource === 'ONLINE' && clientExpectedTotal !== undefined && !isNaN(clientExpectedTotal)) {
+      if (Math.abs(clientExpectedTotal - finalOrderTotal) > 1.0) {
+        res.status(409).json({
+          success: false,
+          error: 'Price mismatch detected. Menu prices, discounts, or delivery fees have updated. Please review your cart.',
+          code: 'PRICE_MISMATCH_RETRY',
+          serverTotal: finalOrderTotal,
+          clientTotal: clientExpectedTotal
+        });
+        return;
+      }
+    }
 
 
     // 2.5 Duplicate Order Prevention (Idempotency / Distributed Lock)

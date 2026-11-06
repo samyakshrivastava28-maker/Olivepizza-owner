@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { adminDb } from '../config/firebase.js';
-import { pgPool } from '../config/postgres.js';
+import { pgPool, query } from '../config/postgres.js';
 import { verifyToken, requireRole, optionalAuth, AuthRequest } from '../middleware/auth.middleware.js';
 import { FranchiseScopeService } from '../services/franchise/FranchiseScopeService.js';
 import { InventoryService } from '../services/inventory/InventoryService.js';
@@ -10,6 +10,7 @@ import { computeEffectiveStatus } from './restaurant.routes.js';
 import { DataExpiryJob } from '../jobs/DataExpiryJob.js';
 import { redisService } from '../services/redis/RedisService.js';
 import { verifyTrackingToken } from '../utils/trackingToken.js';
+import { FranchisePricingSyncService } from '../services/menu/FranchisePricingSyncService.js';
 
 const router = Router();
 
@@ -94,6 +95,9 @@ router.get(['/home/bootstrap', '/v1/home/bootstrap'], optionalAuth, async (req: 
   }
 
   const branchId = (req.query.branchId as string) || DEFAULT_BRANCH_ID;
+  const franchiseId = (req.query.franchiseId as string) || (req.query.franchise as string) || 'fra_primary';
+  const channel = (req.query.channel as string) || 'web';
+  const locale = (req.query.locale as string) || 'en';
   const userUid = req.user?.uid;
 
   try {
@@ -103,7 +107,7 @@ router.get(['/home/bootstrap', '/v1/home/bootstrap'], optionalAuth, async (req: 
       offersRaw: any[];
       storeSettingsRaw: any;
     }>(
-      `bootstrap:home:base:${branchId}`,
+      `olive:home:bootstrap:${franchiseId}:${branchId}:${channel}:${locale}`,
       async () => {
         const [
           featuredProductsRaw,
@@ -114,30 +118,74 @@ router.get(['/home/bootstrap', '/v1/home/bootstrap'], optionalAuth, async (req: 
           // 1. Featured products (limit 8)
       (async () => {
         try {
-          const snap = await adminDb.collection('products')
-            .where('isActive', '==', true)
-            .limit(16)
-            .get()
-            .catch(async () => {
-              return await adminDb.collection('products').limit(16).get();
-            });
+          let items: any[] = [];
+          try {
+            const snap = await adminDb.collection('products')
+              .where('isActive', '==', true)
+              .limit(16)
+              .get()
+              .catch(async () => {
+                return await adminDb.collection('products').limit(16).get().catch(() => ({ docs: [] }));
+              });
+            if (snap && snap.docs && snap.docs.length > 0) {
+              items = snap.docs.map((doc: any) => {
+                const data = doc.data();
+                return {
+                  id: doc.id,
+                  name: data.productName || data.name || 'Artisan Pizza',
+                  description: data.description || '',
+                  category: data.category || 'Pizzas',
+                  basePrice: Number(data.basePrice || data.price || 299),
+                  price: Number(data.basePrice || data.price || 299),
+                  imageUrl: data.imageUrl || data.image || 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=500',
+                  isVegetarian: data.isVegetarian ?? true,
+                  isFeatured: data.isFeatured ?? true,
+                  variants: data.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
+                  rating: data.rating || 4.8
+                };
+              });
+            }
+          } catch (fsErr: any) {
+            console.warn('[Bootstrap] Home products Firestore notice:', fsErr.message);
+          }
+          if (items.length === 0) {
+            const pgProds = await query('SELECT * FROM menu_products WHERE is_active = true ORDER BY is_featured DESC, rating DESC LIMIT 16').catch(() => ({ rows: [] }));
+            if (pgProds.rows.length > 0) {
+              items = pgProds.rows.map((r: any) => ({
+                id: r.id,
+                name: r.name,
+                description: r.description || '',
+                category: r.category_name || 'Pizzas',
+                basePrice: Number(r.base_price || 299),
+                price: Number(r.base_price || 299),
+                imageUrl: r.image_url || 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=500',
+                isVegetarian: r.is_vegetarian ?? true,
+                isFeatured: r.is_featured ?? true,
+                variants: r.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
+                rating: Number(r.rating || 4.8)
+              }));
+            }
+          }
 
-          let items = snap.docs.map(doc => {
-            const data = doc.data();
-            return {
-              id: doc.id,
-              name: data.productName || data.name || 'Artisan Pizza',
-              description: data.description || '',
-              category: data.category || 'Pizzas',
-              basePrice: Number(data.basePrice || data.price || 299),
-              price: Number(data.basePrice || data.price || 299),
-              imageUrl: data.imageUrl || data.image || 'https://res.cloudinary.com/dxmlvkff1/image/upload/v1786517437/olive-pizza/ai-product-images/dv4uty06rq4tznlpqz2i.jpg',
-              isVegetarian: data.isVegetarian ?? true,
-              isFeatured: data.isFeatured ?? true,
-              variants: data.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
-              rating: data.rating || 4.8
-            };
-          });
+          // Apply PostgreSQL authoritative franchise prices first
+          try {
+            const pgPricesMap = await FranchisePricingSyncService.getBranchPricesMap(branchId);
+            if (pgPricesMap.size > 0) {
+              items = items.map(it => {
+                const ov = pgPricesMap.get(it.id);
+                if (!ov) return it;
+                const sellingPrice = ov.sellingPrice ? Number(ov.sellingPrice) : undefined;
+                return {
+                  ...it,
+                  price: sellingPrice && sellingPrice > 0 ? sellingPrice : it.price,
+                  basePrice: sellingPrice && sellingPrice > 0 ? sellingPrice : it.basePrice,
+                  isAvailable: ov.isAvailable
+                };
+              });
+            }
+          } catch (pgErr: any) {
+            console.warn('[Bootstrap] Home PostgreSQL franchise_prices lookup warning:', pgErr?.message);
+          }
 
           // Apply branch overrides (custom price and availability)
           try {
@@ -174,8 +222,32 @@ router.get(['/home/bootstrap', '/v1/home/bootstrap'], optionalAuth, async (req: 
       // 2. Categories with subcategories
       (async () => {
         try {
-          const snap = await adminDb.collection('categories').get();
-          if (snap.empty) return DEFAULT_CATEGORIES;
+          let snap = await adminDb.collection('categories').get().catch(() => ({ empty: true, docs: [] }));
+          if (!snap.empty) {
+            return snap.docs.map(doc => {
+              const data = doc.data();
+              return {
+                id: doc.id,
+                name: data.name || 'Category',
+                description: data.description || '',
+                emoji: data.emoji || '🍕',
+                imageUrl: data.imageUrl || data.image || '',
+                subcategories: data.subcategories || data.subCategories || []
+              };
+            });
+          }
+          const pgCats = await query('SELECT * FROM menu_categories WHERE is_active = true ORDER BY display_order ASC').catch(() => ({ rows: [] }));
+          if (pgCats.rows.length > 0) {
+            return pgCats.rows.map((r: any) => ({
+              id: r.id,
+              name: r.name,
+              description: r.description || '',
+              emoji: r.emoji || '🍕',
+              imageUrl: r.image_url || '',
+              subcategories: r.subcategories || []
+            }));
+          }
+          return DEFAULT_CATEGORIES;
 
           return snap.docs.map(doc => {
             const data = doc.data();
@@ -408,6 +480,9 @@ router.get(['/home/bootstrap', '/v1/home/bootstrap'], optionalAuth, async (req: 
 router.get(['/menu/bootstrap', '/v1/menu/bootstrap'], async (req: AuthRequest, res: Response): Promise<void> => {
   res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
   const branchId = (req.query.branchId as string) || DEFAULT_BRANCH_ID;
+  const franchiseId = (req.query.franchiseId as string) || (req.query.franchise as string) || 'fra_primary';
+  const channel = (req.query.channel as string) || 'web';
+  const locale = (req.query.locale as string) || 'en';
 
   try {
     const data = await redisService.fetchWithStampedeProtection<{
@@ -416,7 +491,7 @@ router.get(['/menu/bootstrap', '/v1/menu/bootstrap'], async (req: AuthRequest, r
       offers: any[];
       availability: Record<string, any>;
     }>(
-      `bootstrap:menu:${branchId}`,
+      `olive:menu:bootstrap:${franchiseId}:${branchId}:${channel}:${locale}`,
       async () => {
         const [
           categoriesRaw,
@@ -427,19 +502,32 @@ router.get(['/menu/bootstrap', '/v1/menu/bootstrap'], async (req: AuthRequest, r
           // 1. Categories
       (async () => {
         try {
-          const snap = await adminDb.collection('categories').get();
-          if (snap.empty) return DEFAULT_CATEGORIES;
-          return snap.docs.map(doc => {
-            const data = doc.data();
-            return {
-              id: doc.id,
-              name: data.name || 'Category',
-              description: data.description || '',
-              emoji: data.emoji || '🍕',
-              imageUrl: data.imageUrl || data.image || '',
-              subcategories: data.subcategories || data.subCategories || []
-            };
-          });
+          let snap = await adminDb.collection('categories').get().catch(() => ({ empty: true, docs: [] }));
+          if (!snap.empty) {
+            return snap.docs.map(doc => {
+              const data = doc.data();
+              return {
+                id: doc.id,
+                name: data.name || 'Category',
+                description: data.description || '',
+                emoji: data.emoji || '🍕',
+                imageUrl: data.imageUrl || data.image || '',
+                subcategories: data.subcategories || data.subCategories || []
+              };
+            });
+          }
+          const pgCats = await query('SELECT * FROM menu_categories WHERE is_active = true ORDER BY display_order ASC').catch(() => ({ rows: [] }));
+          if (pgCats.rows.length > 0) {
+            return pgCats.rows.map((r: any) => ({
+              id: r.id,
+              name: r.name,
+              description: r.description || '',
+              emoji: r.emoji || '🍕',
+              imageUrl: r.image_url || '',
+              subcategories: r.subcategories || []
+            }));
+          }
+          return DEFAULT_CATEGORIES;
         } catch {
           return DEFAULT_CATEGORIES;
         }
@@ -448,29 +536,61 @@ router.get(['/menu/bootstrap', '/v1/menu/bootstrap'], async (req: AuthRequest, r
       // 2. All active products (with variants and addons)
       (async () => {
         try {
-          const snap = await adminDb.collection('products').get();
-          let items = snap.docs.map(doc => {
-            const data = doc.data();
-            return {
-              id: doc.id,
-              name: data.productName || data.name || 'Master Product',
-              description: data.description || '',
-              category: data.category || 'Pizzas',
-              basePrice: Number(data.basePrice || data.price || 299),
-              price: Number(data.basePrice || data.price || 299),
-              imageUrl: data.imageUrl || data.image || 'https://res.cloudinary.com/dxmlvkff1/image/upload/v1786517437/olive-pizza/ai-product-images/dv4uty06rq4tznlpqz2i.jpg',
-              isVegetarian: data.isVegetarian ?? true,
-              isActive: data.isActive ?? data.isAvailable ?? true,
-              variants: data.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
-              crusts: data.crusts || ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst'],
-              addons: data.addons || [
-                { id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 },
-                { id: 'add_jalapeno', name: 'Pickled Jalapenos', price: 40 },
-                { id: 'add_olives', name: 'Black Olives', price: 45 }
-              ],
-              channelAvailability: data.channelAvailability || { online: true, dineIn: true, takeaway: true, posDelivery: true }
-            };
-          });
+          let items: any[] = [];
+          try {
+            const snap = await adminDb.collection('products').get().catch(() => ({ docs: [] }));
+            if (snap && snap.docs && snap.docs.length > 0) {
+              items = snap.docs.map((doc: any) => {
+                const data = doc.data();
+                return {
+                  id: doc.id,
+                  name: data.productName || data.name || 'Master Product',
+                  description: data.description || '',
+                  category: data.category || 'Pizzas',
+                  basePrice: Number(data.basePrice || data.price || 299),
+                  price: Number(data.basePrice || data.price || 299),
+                  imageUrl: data.imageUrl || data.image || 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=500',
+                  isVegetarian: data.isVegetarian ?? true,
+                  isActive: data.isActive ?? data.isAvailable ?? true,
+                  variants: data.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
+                  crusts: data.crusts || ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst'],
+                  addons: data.addons || [
+                    { id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 },
+                    { id: 'add_jalapeno', name: 'Pickled Jalapenos', price: 40 },
+                    { id: 'add_olives', name: 'Black Olives', price: 45 }
+                  ],
+                  channelAvailability: data.channelAvailability || { online: true, dineIn: true, takeaway: true, posDelivery: true }
+                };
+              });
+            }
+          } catch (fsErr: any) {
+            console.warn('[Bootstrap] Menu products Firestore notice:', fsErr.message);
+          }
+
+          if (items.length === 0) {
+            const pgProds = await query('SELECT * FROM menu_products WHERE is_active = true ORDER BY is_featured DESC, rating DESC').catch(() => ({ rows: [] }));
+            if (pgProds.rows.length > 0) {
+              items = pgProds.rows.map((r: any) => ({
+                id: r.id,
+                name: r.name,
+                description: r.description || '',
+                category: r.category_name || 'Pizzas',
+                basePrice: Number(r.base_price || 299),
+                price: Number(r.base_price || 299),
+                imageUrl: r.image_url || 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=500',
+                isVegetarian: r.is_vegetarian ?? true,
+                isActive: r.is_active ?? true,
+                variants: r.variants || ['Regular (7")', 'Medium (10")', 'Large (12")'],
+                crusts: r.crusts || ['Classic Hand Tossed', 'Thin Crust', 'Cheese Burst'],
+                addons: r.addons || [
+                  { id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 },
+                  { id: 'add_jalapeno', name: 'Pickled Jalapenos', price: 40 },
+                  { id: 'add_olives', name: 'Black Olives', price: 45 }
+                ],
+                channelAvailability: r.channel_availability || { online: true, dineIn: true, takeaway: true, posDelivery: true }
+              }));
+            }
+          }
 
           if (items.length === 0) {
             items = [
@@ -516,33 +636,52 @@ router.get(['/menu/bootstrap', '/v1/menu/bootstrap'], async (req: AuthRequest, r
       // 3. Current menu offers / coupon codes
       (async () => {
         try {
-          const snap = await adminDb.collection('coupons').where('isActive', '==', true).get();
-          const coupons: any[] = [];
-          const now = new Date();
+          let coupons: any[] = [];
+          try {
+            const snap = await adminDb.collection('coupons').where('isActive', '==', true).get().catch(() => ({ empty: true, forEach: () => {} }));
+            const now = new Date();
+            if (snap && typeof snap.forEach === 'function') {
+              snap.forEach((doc: any) => {
+                const data = doc.data();
+                const expiryDate = DataExpiryJob.extractExpiryDate(data);
+                if (expiryDate && expiryDate < now) return;
 
-          snap.forEach(doc => {
-            const data = doc.data();
-            const expiryDate = DataExpiryJob.extractExpiryDate(data);
-            if (expiryDate && expiryDate < now) return;
+                coupons.push({
+                  id: doc.id,
+                  code: data.code,
+                  type: data.type || 'percentage',
+                  discountValue: data.discountValue || 0,
+                  minOrderValue: data.minOrderValue || data.minOrderAmount || 0,
+                  maxDiscount: data.maxDiscount || data.maxDiscountAmount || 0,
+                  description: data.description || `Get ${data.discountValue}% off`
+                });
+              });
+            }
+          } catch (fsErr: any) {
+            console.warn('[Bootstrap] Menu coupons Firestore notice:', fsErr.message);
+          }
 
-            coupons.push({
-              id: doc.id,
-              code: data.code,
-              type: data.type || 'percentage',
-              discountValue: data.discountValue || 0,
-              minOrderValue: data.minOrderValue || data.minOrderAmount || 0,
-              maxDiscount: data.maxDiscount || data.maxDiscountAmount || 0,
-              description: data.description || `Get ${data.discountValue}% off`
-            });
-          });
-
+          if (coupons.length === 0) {
+            const pgCoups = await query('SELECT * FROM menu_coupons WHERE is_active = true ORDER BY discount_value DESC LIMIT 10').catch(() => ({ rows: [] }));
+            if (pgCoups.rows.length > 0) {
+              coupons = pgCoups.rows.map((r: any) => ({
+                id: r.id,
+                code: r.code,
+                type: r.discount_type || 'percentage',
+                discountValue: Number(r.discount_value || 0),
+                minOrderValue: Number(r.min_order_amount || 0),
+                maxDiscount: Number(r.max_discount_amount || 0),
+                description: r.description || `Get ${r.discount_value}% off`
+              }));
+            }
+          }
           return coupons;
         } catch {
           return [];
         }
       })(),
 
-      // 4. Realtime stock availability map
+      // 4. Realtime stock availability map (authoritative PostgreSQL franchise_prices with Firestore fallback)
       (async () => {
         try {
           const snap = await adminDb.collection('branch_menu_overrides')
@@ -551,6 +690,19 @@ router.get(['/menu/bootstrap', '/v1/menu/bootstrap'], async (req: AuthRequest, r
             .catch(() => ({ docs: [] } as any));
 
           const map: Record<string, { inStock: boolean; stockStatus: string; isEnabled: boolean; customPrice?: number }> = {};
+          try {
+            const pgPricesMap = await FranchisePricingSyncService.getBranchPricesMap(branchId);
+            for (const [prodId, data] of pgPricesMap.entries()) {
+              map[prodId] = {
+                inStock: data.isAvailable,
+                stockStatus: data.isAvailable ? 'IN_STOCK' : 'OUT_OF_STOCK',
+                isEnabled: data.isAvailable,
+                customPrice: data.sellingPrice
+              };
+            }
+          } catch (pgErr: any) {
+            console.warn('[Bootstrap] Menu Postgres franchise_prices lookup warning:', pgErr?.message);
+          }
           snap.docs.forEach((doc: any) => {
             const data = doc.data();
             map[data.productId] = {
@@ -816,6 +968,9 @@ router.get(['/orders/:orderId/tracking/bootstrap', '/v1/orders/:orderId/tracking
 router.get(['/cart/bootstrap', '/v1/cart/bootstrap'], async (req: AuthRequest, res: Response): Promise<void> => {
   res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
   const branchId = (req.query.branchId as string) || DEFAULT_BRANCH_ID;
+  const franchiseId = (req.query.franchiseId as string) || (req.query.franchise as string) || 'fra_primary';
+  const channel = (req.query.channel as string) || 'web';
+  const locale = (req.query.locale as string) || 'en';
 
   try {
     const data = await redisService.fetchWithStampedeProtection<{
@@ -1302,7 +1457,7 @@ router.get(
         (async () => {
           try {
             const snap = await adminDb.collection('products').get();
-            return snap.docs.map(doc => {
+            let items = snap.docs.map(doc => {
               const data = doc.data();
               return {
                 id: doc.id,
@@ -1318,6 +1473,27 @@ router.get(
                 addons: data.addons || [{ id: 'add_extra_cheese', name: 'Extra Cheese', price: 60 }]
               };
             });
+
+            try {
+              const pgPricesMap = await FranchisePricingSyncService.getBranchPricesMap(branchId);
+              if (pgPricesMap.size > 0) {
+                items = items.map(it => {
+                  const ov = pgPricesMap.get(it.id);
+                  if (!ov) return it;
+                  const customPrice = ov.sellingPrice ? Number(ov.sellingPrice) : undefined;
+                  return {
+                    ...it,
+                    price: customPrice && customPrice > 0 ? customPrice : it.price,
+                    basePrice: customPrice && customPrice > 0 ? customPrice : it.basePrice,
+                    isAvailable: ov.isAvailable
+                  };
+                });
+              }
+            } catch (pgErr: any) {
+              console.warn('[Bootstrap] POS Postgres franchise_prices lookup warning:', pgErr?.message);
+            }
+
+            return items;
           } catch {
             return [];
           }

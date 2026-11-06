@@ -4,6 +4,7 @@ import { adminDb } from '../config/firebase.js';
 import { verifyToken, requireRole, optionalAuth, AuthRequest } from '../middleware/auth.middleware.js';
 import { generateTrackingToken, verifyTrackingToken } from '../utils/trackingToken.js';
 import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
+import { RedisGpsService } from '../services/gps/RedisGpsService.js';
 
 const router = Router();
 
@@ -101,71 +102,83 @@ router.post('/location/update', verifyToken, requireRole(['delivery', 'delivery_
       status: 'ONLINE'
     });
 
-    // 1. Authoritative Supabase delivery_locations update (Triggers Supabase Realtime)
-    await SupabaseGpsService.upsertLatestLocation({
+    // 1. Authoritative Capacity-Safe Redis live GPS telemetry update (Layerbase Redis 7.2.15)
+    await RedisGpsService.updateLocation({
       deliveryPartnerId: actualPartnerId,
+      franchiseId: req.user?.franchiseId || 'fra_primary',
+      branchId: req.user?.branchId || 'main_branch',
       activeOrderId: orderId || null,
       latitude: Number(actualLat),
       longitude: Number(actualLng),
       accuracy: accuracy ? Number(accuracy) : null,
       speed: speed ? Number(speed) : null,
       heading: heading ? Number(heading) : null,
-      onlineStatus: true
+      battery: battery ? Number(battery) : null,
+      onlineStatus: true,
+      timestamp: req.body.timestamp
     });
 
-    const client = await pgPool.connect();
+    let client: any = null;
+    try {
+      client = await pgPool.connect();
 
-    // ── 300M RESTAURANT DEPARTURE REMINDER RULE ──────────────────────────
-    if (orderId) {
-      try {
-        const orderSnap = await adminDb.collection('orders').doc(orderId).get();
-        if (orderSnap.exists) {
-          const oData = orderSnap.data()!;
-          const oStatus = (oData.status || '').toLowerCase();
-          
-          // Trigger reminder if rider is assigned/ready but has not moved to 'picked_up' or 'out_for_delivery'
-          if (['partner_assigned', 'ready'].includes(oStatus)) {
-            const restLat = oData.branchLat || DEFAULT_BRANCH_LAT;
-            const restLng = oData.branchLng || DEFAULT_BRANCH_LNG;
-            const distFromRestM = calculateDistance(Number(actualLat), Number(actualLng), Number(restLat), Number(restLng)) * 1000;
+      // ── 300M RESTAURANT DEPARTURE REMINDER RULE ──────────────────────────
+      if (orderId) {
+        try {
+          const orderSnap = await adminDb.collection('orders').doc(orderId).get();
+          if (orderSnap.exists) {
+            const oData = orderSnap.data()!;
+            const oStatus = (oData.status || '').toLowerCase();
             
-            if (distFromRestM >= 300 && (accuracy || 10) <= 35) {
-              console.log(`[DepartureRule] Rider ${actualPartnerId} is ${Math.round(distFromRestM)}m from store for order ${orderId}. Reminder triggered.`);
-              // Emit instant departure reminder event to rider
-              webSocketServer.broadcastToUser(actualPartnerId, {
-                type: 'DEPARTURE_REMINDER',
-                data: {
-                  orderId,
-                  distanceMeters: Math.round(distFromRestM),
-                  message: 'You have moved 300m away from the restaurant. Please update your order status to Picked Up.'
-                }
-              });
+            // Trigger reminder if rider is assigned/ready but has not moved to 'picked_up' or 'out_for_delivery'
+            if (['partner_assigned', 'ready'].includes(oStatus)) {
+              const restLat = oData.branchLat || DEFAULT_BRANCH_LAT;
+              const restLng = oData.branchLng || DEFAULT_BRANCH_LNG;
+              const distFromRestM = calculateDistance(Number(actualLat), Number(actualLng), Number(restLat), Number(restLng)) * 1000;
+              
+              if (distFromRestM >= 300 && (accuracy || 10) <= 35) {
+                console.log(`[DepartureRule] Rider ${actualPartnerId} is ${Math.round(distFromRestM)}m from store for order ${orderId}. Reminder triggered.`);
+                // Emit instant departure reminder event to rider
+                webSocketServer.broadcastToUser(actualPartnerId, {
+                  type: 'DEPARTURE_REMINDER',
+                  data: {
+                    orderId,
+                    distanceMeters: Math.round(distFromRestM),
+                    message: 'You have moved 300m away from the restaurant. Please update your order status to Picked Up.'
+                  }
+                });
+              }
             }
           }
+        } catch (depErr: any) {
+          console.warn('[DepartureRule] Check notice:', depErr.message);
         }
-      } catch (depErr: any) {
-        console.warn('[DepartureRule] Check notice:', depErr.message);
-      }
 
-    // If there's an active order, update distance and ETA in delivery_routes
-      const routeResult = await client.query('SELECT customer_lat, customer_lng FROM delivery_routes WHERE order_id = $1 AND delivery_partner_id = $2', [orderId, actualPartnerId]);
-      
-      if (routeResult.rows.length > 0) {
-        const route = routeResult.rows[0];
-        if (route.customer_lat && route.customer_lng) {
-          const distance = calculateDistance(actualLat, actualLng, route.customer_lat, route.customer_lng);
-          const eta = calculateETA(distance, speed ? speed * 3.6 : 30); // speed in m/s to km/h if available
+        // If there's an active order, update distance and ETA in delivery_routes
+        try {
+          const routeResult = await client.query('SELECT customer_lat, customer_lng FROM delivery_routes WHERE order_id = $1 AND delivery_partner_id = $2', [orderId, actualPartnerId]);
+          
+          if (routeResult.rows.length > 0) {
+            const route = routeResult.rows[0];
+            if (route.customer_lat && route.customer_lng) {
+              const distance = calculateDistance(actualLat, actualLng, route.customer_lat, route.customer_lng);
+              const eta = calculateETA(distance, speed ? speed * 3.6 : 30); // speed in m/s to km/h if available
 
-          await client.query(`
-            UPDATE delivery_routes 
-            SET distance_km = $1, estimated_minutes = $2 
-            WHERE order_id = $3 AND delivery_partner_id = $4
-          `, [distance, eta, orderId, actualPartnerId]);
+              await client.query(`
+                UPDATE delivery_routes 
+                SET distance_km = $1, estimated_minutes = $2 
+                WHERE order_id = $3 AND delivery_partner_id = $4
+              `, [distance, eta, orderId, actualPartnerId]);
+            }
+          }
+        } catch (rErr: any) {
+          // delivery_routes table might not exist in all environments; fail safely
         }
       }
+    } finally {
+      if (client) client.release();
     }
 
-    client.release();
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating location:', error);
