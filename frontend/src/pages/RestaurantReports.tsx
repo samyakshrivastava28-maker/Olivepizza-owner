@@ -21,6 +21,7 @@ import {
   ShieldCheck,
   Building2,
   Eye,
+  ChevronDown,
 } from 'lucide-react';
 import { db } from '../lib/firebase';
 import { collection, onSnapshot } from 'firebase/firestore';
@@ -199,6 +200,40 @@ export default function RestaurantReports() {
   const lastMonthStats = useMemo(() => aggregateOrders(lastMonthOrders), [lastMonthOrders]);
 
   // Sync Live Google Sheets On-Demand
+  // Export Authoritative CSV directly from PostgreSQL 18.6
+  const [exportingCsv, setExportingCsv] = useState(false);
+  const handleExportCsv = async (type: 'orders' | 'financial' | 'items') => {
+    setExportingCsv(true);
+    const label = type === 'financial' ? 'Financial Summary' : type === 'items' ? 'Item Sales' : 'Orders';
+    const toastId = toast.loading(`Generating ${label} CSV from PostgreSQL...`);
+    try {
+      const endpoint = type === 'financial'
+        ? '/api/reports/export/financial'
+        : type === 'items'
+        ? '/api/reports/export/items'
+        : '/api/reports/export/orders';
+      const res = await fetchApi(endpoint);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Export failed' }));
+        throw new Error(err.error || 'Server error exporting CSV');
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `olive-pizza-${type}-${new Date().toISOString().split('T')[0]}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      toast.success(`${label} CSV downloaded successfully!`, { id: toastId });
+    } catch (err: any) {
+      toast.error('Export failed: ' + err.message, { id: toastId });
+    } finally {
+      setExportingCsv(false);
+    }
+  };
+
   const handleSyncGoogleSheets = async () => {
     setSyncingSheet(true);
     const toastId = toast.loading('Syncing latest POS bills to Google Sheets monthly workbook...');
@@ -357,6 +392,44 @@ export default function RestaurantReports() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              {/* Export PostgreSQL CSV Dropdown */}
+              <div className="relative group">
+                <button
+                  disabled={exportingCsv}
+                  className="px-3 py-1.5 bg-[#0B0F17] hover:bg-slate-800 border border-slate-700/70 text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all disabled:opacity-50 cursor-pointer"
+                >
+                  <Download className={`w-3.5 h-3.5 text-orange-400 ${exportingCsv ? 'animate-bounce' : ''}`} />
+                  Export CSV
+                  <ChevronDown className="w-3 h-3 opacity-60" />
+                </button>
+                <div className="absolute right-0 top-full mt-1 w-52 bg-[#0E1524] border border-slate-800 rounded-xl shadow-2xl p-1 z-30 hidden group-hover:block transition-all">
+                  <button
+                    onClick={() => handleExportCsv('orders')}
+                    disabled={exportingCsv}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-orange-400" />
+                    Orders CSV (All Channels)
+                  </button>
+                  <button
+                    onClick={() => handleExportCsv('financial')}
+                    disabled={exportingCsv}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <DollarSign className="w-3.5 h-3.5 text-emerald-400" />
+                    Financial Summary CSV
+                  </button>
+                  <button
+                    onClick={() => handleExportCsv('items')}
+                    disabled={exportingCsv}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <Pizza className="w-3.5 h-3.5 text-purple-400" />
+                    Item Sales Breakdown CSV
+                  </button>
+                </div>
+              </div>
+
               {/* Sync Now */}
               <button
                 onClick={handleSyncGoogleSheets}

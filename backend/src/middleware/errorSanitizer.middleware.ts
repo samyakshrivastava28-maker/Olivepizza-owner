@@ -99,6 +99,30 @@ export function sanitizeErrorDetails(errOrMsg: any, statusCode: number): {
   }
 
   // 3. Permissions / RBAC
+  const SAFE_AUTH_CODES = [
+    'APP_ACCESS_DENIED',
+    'ACCESS_DENIED',
+    'STAFF_GRANT_REQUIRED',
+    'TERMINAL_NOT_PERMITTED',
+    'TERMINAL_REQUIRED',
+    'BRANCH_SCOPE_VIOLATION',
+    'BRANCH_SCOPE_REQUIRED',
+    'CROSS_FRANCHISE_VIOLATION',
+    'ACCOUNT_REVOKED',
+    'NOT_REGISTERED',
+    'BRANCH_INACTIVE',
+    'BRANCH_NOT_FOUND',
+    'ROLE_RESTRICTED',
+    'DATABASE_UNAVAILABLE'
+  ];
+
+  if (SAFE_AUTH_CODES.includes(rawCode)) {
+    return {
+      code: rawCode,
+      message: containsTechnicalLeak(rawMsg) ? 'You do not have permission to perform this action.' : (rawMsg || 'Access denied.')
+    };
+  }
+
   if (lower.includes('permission-denied') || lower.includes('permission_denied') || lower.includes('insufficient permissions') || statusCode === 403) {
     // If there is an explicit safe reason (e.g. Owner operational boundary)
     if (lower.includes('restricted from pos') || lower.includes('restricted from restaurant') || lower.includes('restricted from delivery')) {
