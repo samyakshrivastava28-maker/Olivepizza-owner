@@ -1,42 +1,45 @@
 import React from 'react';
 import { Navigate, Outlet, useLocation } from 'react-router';
-import { useAuthStore, isAuthorizedOwnerEmail } from '../../lib/store';
+import { useAuthStore } from '../../lib/store';
 import { PizzaLoader } from '../ui/PizzaLoader';
+import { AlertTriangle, RefreshCw } from 'lucide-react';
 
 export const OwnerGuard: React.FC = () => {
-  const { user, role, isAuthenticated, isLoading, isInitialized } = useAuthStore();
+  const { user, role, isAuthenticated, isLoading, isInitialized, isDatabaseUnavailable } = useAuthStore();
   const location = useLocation();
 
-  // If auth is completely uninitialized and no cached session exists, show smooth loader
-  if (isLoading && !user) {
+  // 1. While loading or initializing, display smooth loader
+  if (isLoading || !isInitialized) {
     return <PizzaLoader text="Verifying owner authorization..." />;
   }
 
-  // Validate owner / staff role, granted application access, or whitelisted email
-  const isEmailApproved = isAuthorizedOwnerEmail(user?.email);
-  const hasAppAccess = Boolean(
-    (user?.allowedApps && user.allowedApps.length > 0) ||
-    (user?.applicationAccess && Object.values(user.applicationAccess).some(Boolean))
-  );
+  // 2. If the authoritative database is down (503), retain session and show reconnect state
+  if (isDatabaseUnavailable) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-6 text-white text-center">
+        <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mb-4 text-amber-400 animate-pulse">
+          <AlertTriangle className="w-8 h-8" />
+        </div>
+        <h2 className="text-xl font-bold mb-2">Authoritative Database Temporarily Unavailable (HTTP 503)</h2>
+        <p className="text-sm text-slate-400 max-w-md mb-6 leading-relaxed">
+          Your authenticated session is securely retained. The platform is waiting for the database service to resume.
+        </p>
+        <button
+          onClick={() => window.location.reload()}
+          className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-sm transition-all shadow-lg shadow-amber-500/20 flex items-center gap-2 cursor-pointer"
+        >
+          <RefreshCw className="w-4 h-4" />
+          Retry Connection
+        </button>
+      </div>
+    );
+  }
 
-  const isAuthorized = !!user && (
-    role === 'owner' || 
-    role === 'admin' || 
-    role === 'developer' || 
-    role === 'platform_owner' ||
-    role === 'restaurant_manager' ||
-    role === 'franchise_owner' ||
-    role === 'franchise_manager' ||
-    role === 'manager' ||
-    role === 'staff' ||
-    role === 'cashier' ||
-    role === 'delivery_partner' ||
-    hasAppAccess ||
-    isEmailApproved
-  );
+  // 3. Strict Database-Authoritative Authorization Check:
+  // Must be authenticated AND have the platform owner role confirmed by the server
+  const isAuthorized = isAuthenticated && !!user && (role === 'owner' || role === 'platform_owner');
 
-  // If initialization complete and user is not authenticated or not authorized, redirect to login
-  if (isInitialized && (!user || !isAuthorized)) {
+  if (!isAuthorized) {
     const shouldAttachRedirect = location.pathname && location.pathname !== '/' && location.pathname !== '/login' && location.pathname !== '/dashboard';
     const redirectParam = shouldAttachRedirect ? `?redirect=${encodeURIComponent(location.pathname)}` : '';
     return <Navigate to={`/login${redirectParam}`} replace />;

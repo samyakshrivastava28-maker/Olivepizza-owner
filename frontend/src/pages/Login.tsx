@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router';
 import { auth, googleProvider } from '../lib/firebase';
 import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, signInWithCustomToken, GoogleAuthProvider, signOut } from 'firebase/auth';
-import { useAuthStore, isAuthorizedOwnerEmail } from '../lib/store';
+import { useAuthStore } from '../lib/store';
 import { Lock, Mail, AlertCircle, ArrowRight, ShieldCheck } from 'lucide-react';
 import { AppLogo } from '../components/common/AppLogo';
 import { Capacitor } from '@capacitor/core';
@@ -17,7 +17,7 @@ export default function Login() {
 
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, isAuthenticated, setUser } = useAuthStore();
+  const { user, isAuthenticated, setUser, setDatabaseUnavailable, setRestricted } = useAuthStore();
 
   const getCleanRedirectTarget = (): string => {
     const raw = new URLSearchParams(location.search).get('redirect');
@@ -27,33 +27,22 @@ export default function Login() {
     return raw;
   };
 
-  // Proactive redirection: If already authenticated as authorized owner, navigate to dashboard immediately
+  // Proactive redirection: If already authenticated with confirmed database authorization, navigate to target
   React.useEffect(() => {
-    if (isAuthenticated && user && (isAuthorizedOwnerEmail(user.email) || user.role === 'owner' || user.role === 'platform_owner')) {
+    if (isAuthenticated && user && (user.role === 'owner' || user.role === 'platform_owner')) {
       navigate(getCleanRedirectTarget(), { replace: true });
     }
   }, [isAuthenticated, user, location.search, navigate]);
 
-  const validateAndAuthenticate = async (user: any): Promise<boolean> => {
+  const validateAndAuthenticate = async (firebaseUser: any): Promise<boolean> => {
     try {
-      const userEmail = (user.email || '').toLowerCase().trim();
-      const isOwnerEmail = isAuthorizedOwnerEmail(userEmail);
-      if (!isOwnerEmail) {
-        await signOut(auth);
-        const denialReason = 'Access denied. Only the platform owner (olivepizzarjn@gmail.com) is authorized to access the Owner Console.';
-        useAuthStore.getState().setRestricted(denialReason, userEmail);
-        setError(denialReason);
-        toast.error(denialReason);
-        return false;
-      }
+      // 1. Obtain fresh Firebase ID Token
+      const token = await firebaseUser.getIdToken(true);
 
-      const token = await user.getIdToken();
-      let isAuthorized = false;
-      let serverUser: any = null;
-      let denialReason = 'This account is not authorized to access the Olive Pizza Owner & Executive Console.';
-
+      // 2. Authoritative Database Handshake
+      let authRes: Response;
       try {
-        const authRes = await fetch(getApiUrl('/api/auth/authorize-app'), {
+        authRes = await fetch(getApiUrl('/api/auth/authorize-app'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -61,55 +50,101 @@ export default function Login() {
           },
           body: JSON.stringify({ targetApp: 'OWNER' })
         });
-
-        if (authRes.ok) {
-          const data = await authRes.json();
-          if (data.authorized) {
-            isAuthorized = true;
-            serverUser = data.user;
-          } else {
-            denialReason = data.reason || denialReason;
-          }
-        } else {
-          const data = await authRes.json().catch(() => ({}));
-          denialReason = data.reason || denialReason;
-          if (authRes.status !== 403 && isOwnerEmail) {
-            isAuthorized = true;
-          }
-        }
       } catch (networkErr: any) {
-        console.warn('[Login] Network error checking authorization:', networkErr);
-        if (isOwnerEmail) {
-          isAuthorized = true;
-        }
+        console.warn('[Login] Network error connecting to backend:', networkErr);
+        // Fail-closed with session retention
+        setDatabaseUnavailable(true);
+        const msg = 'Unable to reach the central authorization service. Please check your network connection.';
+        setError(msg);
+        toast.error(msg);
+        return false;
       }
 
-      if (!isAuthorized) {
-        console.warn(`[Login] Access restricted for ${user.email}: ${denialReason}`);
+      // 3. Handle Database Outage (HTTP 503)
+      if (authRes.status === 503) {
+        console.warn('[Login] Database temporarily unavailable (503). Retaining Firebase session.');
+        setDatabaseUnavailable(true);
+        const msg = 'Authoritative database is temporarily unavailable. Session retained; please retry shortly.';
+        setError(msg);
+        toast.error(msg);
+        return false;
+      }
+
+      // 4. Handle Access Denied (HTTP 403)
+      if (authRes.status === 403) {
+        const data = await authRes.json().catch(() => ({}));
+        const denialReason = data.reason || 'This account is not authorized to access the Olive Pizza Owner & Executive Console.';
+        console.warn(`[Login] Access denied for ${firebaseUser.email}: ${denialReason}`);
         await signOut(auth);
-        useAuthStore.getState().setRestricted(denialReason, user.email);
+        setRestricted(denialReason, firebaseUser.email);
         setError(denialReason);
         toast.error(denialReason);
         return false;
       }
 
-      const resolvedRole = serverUser?.role || (isOwnerEmail ? 'owner' : 'admin');
-      const resolvedName = serverUser?.name || user.displayName || user.name || user.email?.split('@')[0] || 'Owner';
+      // 5. Handle Expired / Invalid Token (HTTP 401)
+      if (authRes.status === 401) {
+        await signOut(auth);
+        const msg = 'Authentication expired or invalid. Please sign in again.';
+        setError(msg);
+        toast.error(msg);
+        return false;
+      }
 
-      setUser(
-        {
-          uid: user.uid,
-          email: user.email,
-          name: resolvedName,
-          photoURL: user.photoURL || undefined,
-          role: resolvedRole,
-        },
-        resolvedRole
-      );
-      toast.success(`Welcome back, ${resolvedName}!`);
-      const target = getCleanRedirectTarget();
-      navigate(target, { replace: true });
-      return true;
+      // 6. Handle Successful Handshake (HTTP 200)
+      if (authRes.ok) {
+        const data = await authRes.json();
+        if (!data.authorized || !data.user) {
+          const denialReason = data.reason || 'Access denied by server authorization policy.';
+          await signOut(auth);
+          setRestricted(denialReason, firebaseUser.email);
+          setError(denialReason);
+          toast.error(denialReason);
+          return false;
+        }
+
+        const serverRole = data.user.role;
+        if (serverRole !== 'owner' && serverRole !== 'platform_owner') {
+          const denialReason = `Access denied: Role "${serverRole}" is not authorized for the Owner Portal. Platform Owner role required.`;
+          await signOut(auth);
+          setRestricted(denialReason, firebaseUser.email);
+          setError(denialReason);
+          toast.error(denialReason);
+          return false;
+        }
+
+        const resolvedName = data.user.name || firebaseUser.displayName || 'Platform Owner';
+        setUser(
+          {
+            uid: data.user.uid || firebaseUser.uid,
+            email: data.user.email || firebaseUser.email,
+            name: resolvedName,
+            photoURL: firebaseUser.photoURL || undefined,
+            role: serverRole,
+            allowedApps: data.allowedApps || ['OWNER'],
+            applicationAccess: data.appAccess || { app_owner: true },
+            permissions: data.permissions || ['owner.all'],
+            branchId: data.branchId || 'main_branch',
+            branchIds: data.branchIds || ['main_branch'],
+            franchiseId: data.franchiseId || 'fra_rajnandgaon',
+          },
+          serverRole,
+          data.user
+        );
+
+        toast.success(`Welcome back, ${resolvedName}!`);
+        const target = getCleanRedirectTarget();
+        navigate(target, { replace: true });
+        return true;
+      }
+
+      // Unhandled status code fallback
+      const errData = await authRes.json().catch(() => ({}));
+      const reason = errData.reason || `Unexpected server response (HTTP ${authRes.status}).`;
+      await signOut(auth);
+      setError(reason);
+      toast.error(reason);
+      return false;
     } catch (err: any) {
       console.error('[Login] Authorization failed:', err);
       await signOut(auth);
@@ -140,21 +175,9 @@ export default function Login() {
     }
   };
 
-  const handleQuickOwnerBypass = async (selectedEmail: string, name: string) => {
+  const handleSelectPreset = (selectedEmail: string) => {
     setEmail(selectedEmail);
     setPassword('Olivepizz@rjn');
-    setError(null);
-    setLoading(true);
-    try {
-      const res = await signInWithEmailAndPassword(auth, selectedEmail, 'Olivepizz@rjn');
-      await validateAndAuthenticate(res.user);
-    } catch (err: any) {
-      console.warn('[Login] Quick owner sign in fallback:', err.message);
-      toast(`Selected ${name} (${selectedEmail}). Sign in with password or Google to establish your secure session.`, {
-        icon: '🔐',
-      });
-      setLoading(false);
-    }
   };
 
   const handleGoogleLogin = async () => {
@@ -233,28 +256,28 @@ export default function Login() {
           </div>
         )}
 
-        {/* 1-Click Authorized Sign In */}
+        {/* Quick Fill Preset Buttons */}
         <div className="space-y-2 mb-4 sm:mb-5">
           <button
             type="button"
-            onClick={() => handleQuickOwnerBypass('olivepizzarjn@gmail.com', 'Olive Pizza Master Owner')}
+            onClick={() => handleSelectPreset('olivepizzarjn@gmail.com')}
             className="w-full min-h-[44px] py-2.5 px-4 bg-orange-600/15 hover:bg-orange-600/25 border border-orange-500/30 text-orange-400 rounded-xl text-xs font-bold flex items-center justify-between transition-all cursor-pointer active:scale-[0.98]"
           >
             <span className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-orange-400 shrink-0" />
-              <span className="truncate">Sign In as olivepizzarjn@gmail.com</span>
+              <span className="truncate">Preset: olivepizzarjn@gmail.com</span>
             </span>
             <ArrowRight className="w-3.5 h-3.5 shrink-0 ml-1" />
           </button>
 
           <button
             type="button"
-            onClick={() => handleQuickOwnerBypass('webhub2811@gmail.com', 'Webhub 2811')}
+            onClick={() => handleSelectPreset('webhub2811@gmail.com')}
             className="w-full min-h-[44px] py-2.5 px-4 bg-slate-800/60 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded-xl text-xs font-bold flex items-center justify-between transition-all cursor-pointer active:scale-[0.98]"
           >
             <span className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-slate-400 shrink-0" />
-              <span className="truncate">Sign In as webhub2811@gmail.com</span>
+              <span className="truncate">Preset: webhub2811@gmail.com</span>
             </span>
             <ArrowRight className="w-3.5 h-3.5 shrink-0 ml-1" />
           </button>
@@ -263,7 +286,7 @@ export default function Login() {
         <div className="relative flex items-center justify-center mb-4 sm:mb-5">
           <div className="border-t border-slate-800 w-full" />
           <span className="bg-[#131B2B] px-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider absolute">
-            Or standard sign in
+            Standard sign in
           </span>
         </div>
 

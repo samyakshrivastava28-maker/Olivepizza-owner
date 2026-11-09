@@ -115,31 +115,53 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
     const phoneLast10 = phoneDigits.slice(-10);
 
     try {
-      const pgUserRes = await query(
+      // Deterministic Query Priority: 1. By Firebase UID
+      let pgUserRes = await query(
         `SELECT id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active, metadata
          FROM app_users 
-         WHERE (email IS NOT NULL AND LOWER(email) = LOWER($1)) 
-            OR id = $2 
-            OR ($3 <> '' AND phone IS NOT NULL AND (phone = $3 OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = $4))
+         WHERE id = $1
          LIMIT 1`,
-        [emailLower, uid, phoneRaw, phoneLast10]
+        [uid]
       );
+
+      // 2. By Email (if not found by UID)
+      if (pgUserRes.rows.length === 0 && emailLower) {
+        pgUserRes = await query(
+          `SELECT id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active, metadata
+           FROM app_users 
+           WHERE email IS NOT NULL AND LOWER(email) = LOWER($1)
+           LIMIT 1`,
+          [emailLower]
+        );
+      }
+
+      // 3. By Phone (if not found by UID or Email)
+      if (pgUserRes.rows.length === 0 && phoneRaw) {
+        pgUserRes = await query(
+          `SELECT id, email, phone, name, role, status, franchise_id, branch_id, allowed_apps, is_active, metadata
+           FROM app_users 
+           WHERE phone IS NOT NULL AND (phone = $1 OR RIGHT(REGEXP_REPLACE(phone, '\\D', '', 'g'), 10) = $2)
+           LIMIT 1`,
+          [phoneRaw, phoneLast10]
+        );
+      }
+
       if (pgUserRes.rows.length > 0) {
         const pgUser = pgUserRes.rows[0];
-        if (pgUser.is_active === false || pgUser.status === 'REVOKED' || pgUser.status === 'SUSPENDED' || pgUser.status === 'DISABLED') {
+        if (pgUser.is_active === false || pgUser.status === 'REVOKED' || pgUser.status === 'SUSPENDED' || pgUser.status === 'DISABLED' || pgUser.status === 'REJECTED') {
           res.status(403).json({ error: 'Forbidden: Account has been deactivated or revoked in system database', code: 'ACCOUNT_REVOKED' });
           return;
         }
-        if (Array.isArray(pgUser.allowed_apps) && pgUser.allowed_apps.length > 0) {
-          allowedApps = Array.from(new Set([...allowedApps, ...pgUser.allowed_apps]));
-        }
+
+        // AUTHORITATIVE: PostgreSQL allowed_apps strictly governs application access.
+        // DO NOT merge with unexpired JWT claims to ensure instantaneous revocation.
+        allowedApps = Array.isArray(pgUser.allowed_apps) ? [...pgUser.allowed_apps] : [];
+
         if (pgUser.role && pgUser.role !== 'customer') {
           role = pgUser.role;
-          dbResolved = true;
         }
-        if (role === 'owner' || role === 'platform_owner' || role === 'admin') {
-          allowedApps = Array.from(new Set(['OWNER', 'CUSTOMER', ...allowedApps]));
-        }
+        dbResolved = true;
+
         if (pgUser.franchise_id) franchiseId = pgUser.franchise_id;
         if (pgUser.branch_id) branchId = pgUser.branch_id;
         branchIds = branchId ? [branchId] : branchIds;
@@ -154,7 +176,7 @@ export const verifyToken = async (req: AuthRequest, res: Response, next: NextFun
       return;
     }
 
-    // Check delivery_partners in database if not already resolved as staff or owner
+        // Check delivery_partners in database if not already resolved as staff or owner
     if (!dbResolved || role === 'customer') {
       try {
         const dpRes = await query(

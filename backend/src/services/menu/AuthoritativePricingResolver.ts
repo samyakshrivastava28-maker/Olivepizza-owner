@@ -203,10 +203,26 @@ export class AuthoritativePricingResolver {
         }
       }
       if (!matchedSize && Array.isArray(masterItem.variants)) {
-        const v = masterItem.variants.find((vr: any) => (vr.name || vr.size || '').toLowerCase() === selectedSize);
-        if (v && v.price != null) {
-          sizePrice = Number(v.price);
-          matchedSize = true;
+        const v = masterItem.variants.find((vr: any) => {
+          if (typeof vr === 'string') {
+            return vr.toLowerCase().includes(selectedSize);
+          }
+          return (vr.name || vr.size || '').toLowerCase() === selectedSize;
+        });
+        if (v) {
+          if (typeof v === 'string') {
+            if (v.toLowerCase().includes('medium')) {
+              sizePrice = masterBasePrice > 0 ? masterBasePrice + 100 : basePrice + 100;
+            } else if (v.toLowerCase().includes('large')) {
+              sizePrice = masterBasePrice > 0 ? masterBasePrice + 200 : basePrice + 200;
+            } else {
+              sizePrice = masterBasePrice || basePrice;
+            }
+            matchedSize = true;
+          } else if (v.price != null) {
+            sizePrice = Number(v.price);
+            matchedSize = true;
+          }
         }
       }
       if (!matchedSize) {
@@ -236,14 +252,28 @@ export class AuthoritativePricingResolver {
       if (!Array.isArray(masterItem.crusts) || masterItem.crusts.length === 0) {
         throw new Error(`Invalid crust "${req.crust}" requested: product "${productName}" does not offer custom crusts.`);
       }
-      const c = masterItem.crusts.find((cr: any) => (cr.name || cr.id || '').toLowerCase() === selectedCrust);
+      const c = masterItem.crusts.find((cr: any) => {
+        if (typeof cr === 'string') {
+          return cr.toLowerCase().includes(selectedCrust);
+        }
+        return (cr.name || cr.id || '').toLowerCase() === selectedCrust;
+      });
       if (!c) {
         throw new Error(`Invalid crust "${req.crust}" requested for product "${productName}".`);
       }
-      crustPrice = Math.max(0, Number(c.price || 0));
+      if (typeof c === 'string') {
+        crustPrice = c.toLowerCase().includes('cheese burst') ? 60 : 0;
+      } else {
+        crustPrice = Math.max(0, Number(c.price || 0));
+      }
     } else if (isDefaultCrust && Array.isArray(masterItem.crusts)) {
-      const c = masterItem.crusts.find((cr: any) => (cr.name || cr.id || '').toLowerCase() === selectedCrust);
-      if (c) {
+      const c = masterItem.crusts.find((cr: any) => {
+        if (typeof cr === 'string') {
+          return cr.toLowerCase().includes(selectedCrust);
+        }
+        return (cr.name || cr.id || '').toLowerCase() === selectedCrust;
+      });
+      if (c && typeof c === 'object') {
         crustPrice = Math.max(0, Number(c.price || 0));
       }
     }

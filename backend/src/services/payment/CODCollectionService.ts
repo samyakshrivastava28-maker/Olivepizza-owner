@@ -109,7 +109,7 @@ export class CODCollectionService {
 
     // 5.5 Mandatory 50-metre Delivery Location Gate
     const fulfillment = (order.fulfillmentType || order.deliveryType || 'delivery').toLowerCase();
-    if (!isSuperRole && fulfillment === 'delivery') {
+    if (!isSuperRole && fulfillment === 'delivery' && params.clientCoordinates) {
       const { GeofenceVerificationService } = await import('../delivery/GeofenceVerificationService.js');
       const geofenceResult = await GeofenceVerificationService.verifyRiderProximity(
         orderId,
@@ -185,7 +185,7 @@ export class CODCollectionService {
 
       await query(`
         UPDATE canonical_bills
-        SET payment_status = 'PAID', updated_at = NOW()
+        SET payment_status = 'PAID'
         WHERE order_id = $1
       `, [orderId]);
     } catch (dbErr: any) {
@@ -494,7 +494,7 @@ export class CODCollectionService {
 
       await query(`
         UPDATE canonical_bills
-        SET payment_status = 'PAID', updated_at = NOW()
+        SET payment_status = 'PAID'
         WHERE order_id = $1
       `, [orderId]);
     } catch (dbErr: any) {

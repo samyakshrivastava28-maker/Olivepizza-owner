@@ -112,7 +112,7 @@ export class POSService {
     try {
       // 0. Primary: PostgreSQL menu_products & menu_combos
       try {
-        const pgProd = await query('SELECT * FROM menu_products WHERE id =  LIMIT 1', [itemId]);
+        const pgProd = await query('SELECT * FROM menu_products WHERE id = $1 LIMIT 1', [itemId]);
         if (pgProd.rows.length > 0) {
           const r = pgProd.rows[0];
           const item = {

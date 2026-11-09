@@ -5,31 +5,21 @@ import { CartItem } from '../types/models';
 import { auth } from './firebase';
 import { signOut } from 'firebase/auth';
 
-export const AUTHORIZED_OWNER_EMAILS = [
-  'olivepizzarjn@gmail.com',
-  'webhub2811@gmail.com',
-  'samyakshrivastava28@gmail.com',
-  'samyaks695@gmail.com',
-  'olivepizzamaker@gmail.com'
-];
-
-export const isAuthorizedOwnerEmail = (email?: string | null): boolean => {
-  if (!email) return false;
-  return AUTHORIZED_OWNER_EMAILS.includes(email.toLowerCase().trim());
-};
-
 export type AuthStatus = 'IDLE' | 'LOADING' | 'AUTHENTICATED' | 'UNAUTHENTICATED' | 'ERROR';
 
 export interface AuthState {
   user: User | null;
   role: UserRole | null;
+  serverUser: any | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   isInitialized: boolean;
+  isDatabaseUnavailable: boolean;
   authStatus: AuthStatus;
   restrictedReason: string | null;
   restrictedEmail: string | null;
-  setUser: (user: User | null, role: UserRole | null) => void;
+  setUser: (user: User | null, role: UserRole | null, serverUser?: any) => void;
+  setDatabaseUnavailable: (isDatabaseUnavailable: boolean) => void;
   setAuthStatus: (status: AuthStatus) => void;
   setInitialized: (isInitialized: boolean) => void;
   setLoading: (isLoading: boolean) => void;
@@ -49,30 +39,43 @@ export const useAppStore = create<AppState>((set) => ({
   setUpdateAvailable: (updateAvailable) => set({ updateAvailable }),
 }));
 
-// Owner Auth Store with persistent session cache
+// Owner Auth Store - Database-Authoritative Session Management
+// Sensitive authorization decisions are NEVER persisted in localStorage to prevent bypass.
 export const useAuthStore = create<AuthState>()(
   persist(
     (set, get) => ({
       user: null,
       role: null,
+      serverUser: null,
       isAuthenticated: false,
       isLoading: true,
       isInitialized: false,
+      isDatabaseUnavailable: false,
       authStatus: 'IDLE',
       restrictedReason: null,
       restrictedEmail: null,
 
-      setUser: (user: User | null, role: UserRole | null) => {
-        const isAuth = !!user && !!role;
+      setUser: (user: User | null, role: UserRole | null, serverUser?: any) => {
+        const isAuth = !!user && (role === 'owner' || role === 'platform_owner');
         set({
           user,
           role,
+          serverUser: serverUser || null,
           isAuthenticated: isAuth,
           isLoading: false,
           isInitialized: true,
+          isDatabaseUnavailable: false,
           authStatus: isAuth ? 'AUTHENTICATED' : 'UNAUTHENTICATED',
           restrictedReason: isAuth ? null : undefined,
           restrictedEmail: isAuth ? null : undefined,
+        });
+      },
+
+      setDatabaseUnavailable: (isDatabaseUnavailable: boolean) => {
+        set({
+          isDatabaseUnavailable,
+          isLoading: false,
+          isInitialized: true,
         });
       },
 
@@ -93,6 +96,7 @@ export const useAuthStore = create<AuthState>()(
           restrictedEmail: email || null,
           user: null,
           role: null,
+          serverUser: null,
           isAuthenticated: false,
           isLoading: false,
           isInitialized: true,
@@ -116,9 +120,11 @@ export const useAuthStore = create<AuthState>()(
         set({
           user: null,
           role: null,
+          serverUser: null,
           isAuthenticated: false,
           isLoading: false,
           isInitialized: true,
+          isDatabaseUnavailable: false,
           authStatus: 'UNAUTHENTICATED',
           restrictedReason: null,
           restrictedEmail: null,
@@ -127,16 +133,16 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: 'olive-owner-auth-store',
+      // Strict Security: Stale localStorage cannot bypass server authorization
       partialize: (state) => ({
-        user: state.user,
-        role: state.role,
-        isAuthenticated: state.isAuthenticated,
+        restrictedReason: state.restrictedReason,
+        restrictedEmail: state.restrictedEmail,
       }),
       onRehydrateStorage: () => (state) => {
         if (state) {
-          // Keep isLoading true until Firebase Auth finishes its onAuthStateChanged check,
-          // but preserve state.user and state.isAuthenticated for seamless transitions
-          state.setLoading(false);
+          // Always require live handshake verification on reload
+          state.setLoading(true);
+          state.setInitialized(false);
         }
       },
     }
@@ -178,19 +184,15 @@ export const useCartStore = create<CartState>((set) => ({
     }),
   updateQuantity: (id, quantity) =>
     set((state) => {
-      if (quantity <= 0) {
-        const newItems = state.items.filter((i) => i.id !== id);
-        const total = newItems.reduce((acc, curr) => acc + curr.price * curr.quantity, 0);
-        return { items: newItems, total };
-      }
-      const newItems = state.items.map((i) =>
-        i.id === id ? { ...i, quantity } : i
-      );
+      const newItems = quantity <= 0
+        ? state.items.filter((i) => i.id !== id)
+        : state.items.map((i) => (i.id === id ? { ...i, quantity } : i));
       const total = newItems.reduce((acc, curr) => acc + curr.price * curr.quantity, 0);
       return { items: newItems, total };
     }),
   clearCart: () => set({ items: [], total: 0 }),
 }));
+
 
 // Owner Audio and App Settings Store
 interface OwnerSettingsState {
@@ -217,4 +219,3 @@ export const useOwnerSettingsStore = create<OwnerSettingsState>()(
     }
   )
 );
-

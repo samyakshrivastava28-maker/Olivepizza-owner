@@ -176,6 +176,20 @@ export class DeliveryCapacityService {
         estimatedWaitMins = 15 + (Math.round(onDeliveryCount / Math.max(1, onlineCount)) * 10);
       }
 
+      const baseDeliveryFee = Number(
+        branchSettings.deliverySettings?.deliveryFee ??
+        branchSettings.deliveryFee ??
+        settings.deliveryFee ??
+        30
+      );
+      const freeDeliveryThreshold = Number(
+        branchSettings.deliverySettings?.freeDeliveryThreshold ??
+        branchSettings.deliverySettings?.freeDeliveryAbove ??
+        branchSettings.freeDeliveryThreshold ??
+        settings.freeDeliveryAbove ??
+        500
+      );
+
       return {
         isRestaurantOpen,
         isDeliveryEnabled,
@@ -187,7 +201,9 @@ export class DeliveryCapacityService {
         availabilityStatus,
         availabilityMessage,
         canAcceptDeliveries,
-        estimatedWaitMins
+        estimatedWaitMins,
+        deliveryFee: baseDeliveryFee,
+        freeDeliveryThreshold
       };
 
     } catch (e) {

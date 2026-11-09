@@ -60,7 +60,11 @@ if (getApps().length === 0) {
 
 try {
   adminDbInstance = getFirestore();
-  adminDbInstance.settings({ ignoreUndefinedProperties: true });
+  try {
+    adminDbInstance.settings({ ignoreUndefinedProperties: true });
+  } catch (settingsErr) {
+    // Settings already applied or Firestore already initialized — safe to ignore
+  }
   adminAuthInstance = getAuth();
   adminMessagingInstance = getMessaging();
   adminStorageInstance = getStorage();

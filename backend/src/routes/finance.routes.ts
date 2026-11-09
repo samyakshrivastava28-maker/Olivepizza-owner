@@ -32,7 +32,7 @@ router.get('/beneficiaries', verifyToken, async (req: AuthRequest, res: Response
       return;
     }
 
-    const isOwner = user.role === 'owner' || user.role === 'admin' || user.email === 'webhub2811@gmail.com' || user.email === 'olivepizzarjn@gmail.com';
+    const isOwner = user.allowedApps?.includes('OWNER') || user.role === 'owner' || user.role === 'platform_owner';
     const franchiseId = req.query.franchiseId as string || user.franchiseId;
 
     let sql = `
@@ -105,7 +105,7 @@ router.post('/beneficiaries', verifyToken, async (req: AuthRequest, res: Respons
       return;
     }
 
-    const isOwner = user.role === 'owner' || user.role === 'admin' || user.email === 'webhub2811@gmail.com' || user.email === 'olivepizzarjn@gmail.com';
+    const isOwner = user.allowedApps?.includes('OWNER') || user.role === 'owner' || user.role === 'platform_owner';
     if (!isOwner && user.franchiseId !== entityId) {
       res.status(403).json({ error: 'Forbidden: You can only register bank details for your assigned franchise.' });
       return;
@@ -273,7 +273,7 @@ router.get('/settlements', verifyToken, async (req: AuthRequest, res: Response):
       return;
     }
 
-    const isOwner = user.role === 'owner' || user.role === 'admin' || user.email === 'webhub2811@gmail.com' || user.email === 'olivepizzarjn@gmail.com';
+    const isOwner = user.allowedApps?.includes('OWNER') || user.role === 'owner' || user.role === 'platform_owner';
     const franchiseId = req.query.franchiseId as string || user.franchiseId;
 
     let sql = `

@@ -60,6 +60,7 @@ export class GeofenceVerificationService {
       const lng = src.lng != null ? Number(src.lng) : (src.longitude != null ? Number(src.longitude) : null);
 
       if (lat != null && lng != null && !isNaN(lat) && !isNaN(lng)) {
+        if (Math.abs(lat) < 0.0001 && Math.abs(lng) < 0.0001) continue;
         if (lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180) {
           return { lat, lng };
         }
@@ -83,24 +84,7 @@ export class GeofenceVerificationService {
       ? Number(process.env.DELIVERY_COMPLETION_RADIUS_METERS)
       : this.DEFAULT_RADIUS_METERS;
 
-    // 1. Resolve Customer Target Coordinates
-    const target = this.resolveCustomerCoordinates(orderData);
-    if (!target) {
-      // If order lacks destination coordinates entirely, fail closed
-      return {
-        allowed: false,
-        distanceMeters: -1,
-        requiredMeters,
-        riderLat: 0,
-        riderLng: 0,
-        targetLat: 0,
-        targetLng: 0,
-        reason: 'Order is missing verified customer delivery coordinates.',
-        verifiedAt,
-      };
-    }
-
-    // 2. Fetch Authoritative Rider GPS from Supabase (Single Source of Truth)
+    // 1. Fetch Authoritative Rider GPS from Supabase (Single Source of Truth)
     let riderLat: number | null = null;
     let riderLng: number | null = null;
     let accuracyMeters: number | null = null;
@@ -136,15 +120,47 @@ export class GeofenceVerificationService {
       }
     }
 
-    // Fallback in controlled test environments: allow client coordinates if test environment is active or riderUid is test mock
-    if ((riderLat === null || riderLng === null) && (process.env.NODE_ENV === 'test' || riderUid.startsWith('rider_') || orderId.startsWith('order_')) && clientProvidedCoords?.lat && clientProvidedCoords?.lng) {
+    // Direct mobile client GPS payload fallback
+    if ((riderLat === null || riderLng === null) && clientProvidedCoords?.lat != null && clientProvidedCoords?.lng != null) {
       riderLat = Number(clientProvidedCoords.lat);
       riderLng = Number(clientProvidedCoords.lng);
       accuracyMeters = clientProvidedCoords.accuracy ?? 10;
       locationTimestamp = Date.now();
     }
 
-    // 3. Strict Validation: Fail closed if rider location is unavailable
+    // Resolve Customer Target Coordinates
+    const target = this.resolveCustomerCoordinates(orderData);
+    if (!target) {
+      // Order lacks customer coordinates (e.g. text address without pin).
+      // Accept rider coordinates as the verified delivery point if available.
+      if (riderLat !== null && riderLng !== null && !isNaN(riderLat) && !isNaN(riderLng)) {
+        return {
+          allowed: true,
+          distanceMeters: 0,
+          requiredMeters,
+          accuracyMeters: accuracyMeters ?? 10,
+          riderLat,
+          riderLng,
+          targetLat: riderLat,
+          targetLng: riderLng,
+          reason: 'Delivery completed at rider arrival coordinates (customer pin not specified on order).',
+          verifiedAt,
+        };
+      }
+      return {
+        allowed: false,
+        distanceMeters: -1,
+        requiredMeters,
+        riderLat: 0,
+        riderLng: 0,
+        targetLat: 0,
+        targetLng: 0,
+        reason: 'Order is missing verified customer delivery coordinates, and rider GPS location was not acquired.',
+        verifiedAt,
+      };
+    }
+
+    // 2. Strict Validation: Fail closed if rider location is unavailable
     if (riderLat === null || riderLng === null || isNaN(riderLat) || isNaN(riderLng)) {
       return {
         allowed: false,

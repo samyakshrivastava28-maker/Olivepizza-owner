@@ -170,7 +170,7 @@ router.get('/monthly-reports', async (req: AuthRequest, res: Response): Promise<
 router.get('/active-orders', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const uid = req.user?.uid!;
-    const activeStatuses = ['partner_assigned', 'accepted', 'ready', 'preparing', 'out_for_delivery'];
+    const activeStatuses = ['partner_assigned', 'accepted', 'ready', 'preparing', 'picked_up', 'out_for_delivery'];
 
     let orders: any[] = [];
     try {
@@ -196,14 +196,14 @@ router.get('/active-orders', async (req: AuthRequest, res: Response): Promise<vo
           let activeOrderId = locRes.rows[0]?.active_order_id;
           if (!activeOrderId) {
             const ordRes = await client.query(
-              `SELECT id FROM canonical_orders WHERE order_status IN ('ACCEPTED', 'PREPARING', 'READY', 'OUT_FOR_DELIVERY', 'PARTNER_ASSIGNED') ORDER BY created_at DESC LIMIT 1`
+              `SELECT id FROM canonical_orders WHERE order_status IN ('ACCEPTED', 'PREPARING', 'READY', 'PICKED_UP', 'OUT_FOR_DELIVERY', 'PARTNER_ASSIGNED') ORDER BY created_at DESC LIMIT 1`
             );
             activeOrderId = ordRes.rows[0]?.id;
           }
 
           if (activeOrderId) {
             const hist = await OrderPersistenceArchiveService.getHistoricalOrder(activeOrderId);
-            if (hist && ['partner_assigned', 'accepted', 'ready', 'preparing', 'out_for_delivery'].includes(hist.status)) {
+            if (hist && ['partner_assigned', 'accepted', 'ready', 'preparing', 'picked_up', 'out_for_delivery'].includes(hist.status)) {
               orders.push(OrderProjectionService.projectForDeliveryRider(hist, hist.id));
             }
           }
@@ -253,7 +253,7 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
   try {
     const orderId = req.params.id;
     const action = forcedAction || req.body.action;
-    const { riderLat, riderLng, proofImageUrl, signatureUrl, notes, reason, expectedVersion } = req.body;
+    const { riderLat, riderLng, proofImageUrl, signatureUrl, notes, reason, expectedVersion, clientCoordinates } = req.body;
     const uid = req.user?.uid!;
     const name = (req.user as any)?.name || req.user?.email || 'Delivery Partner';
     const userRole = (req.user?.role || '').toLowerCase();
@@ -374,8 +374,8 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
       const lastUpdate = partnerData.lastLocationUpdate || partnerData.timestamp;
       const lastTime = lastUpdate ? new Date(lastUpdate).getTime() : 0;
       if (!lastTime || Date.now() - lastTime > 90 * 1000) {
-        const inlineLat = Number(req.body?.lat);
-        const inlineLng = Number(req.body?.lng);
+        const inlineLat = Number(req.body?.lat ?? req.body?.riderLat);
+        const inlineLng = Number(req.body?.lng ?? req.body?.riderLng);
         if (isNaN(inlineLat) || isNaN(inlineLng) || inlineLat < -90 || inlineLat > 90 || inlineLng < -180 || inlineLng > 180) {
           let hasFreshGps = false;
           try {
@@ -429,6 +429,18 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
         }
 
         await orderRef.set(updateData, { merge: true });
+
+        try {
+          const { query } = await import('../lib/db.js');
+          await query(`
+            UPDATE canonical_orders
+            SET delivery_partner_id = $1,
+                delivery_partner_name = $2,
+                partner_assigned_at = COALESCE(partner_assigned_at, NOW()),
+                updated_at = NOW()
+            WHERE id = $3
+          `, [uid, name, orderId]);
+        } catch (pgErr: any) {}
 
         // Update rider busy status & active order lock
         await adminDb.collection('users').doc(uid).set({
@@ -747,11 +759,14 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
 
         // Mandatory 50-metre Delivery Location Gate
         const { GeofenceVerificationService } = await import('../services/delivery/GeofenceVerificationService.js');
+        const resolvedRiderCoords = clientCoordinates || (
+          (riderLat != null && riderLng != null) ? { lat: Number(riderLat), lng: Number(riderLng) } : undefined
+        );
         const geofenceResult = await GeofenceVerificationService.verifyRiderProximity(
           orderId,
           uid,
           orderData,
-          { lat: riderLat, lng: riderLng }
+          resolvedRiderCoords
         );
 
         if (!geofenceResult.allowed) {
@@ -816,7 +831,7 @@ async function processRiderOrderAction(req: AuthRequest, res: Response, forcedAc
           `, [orderId]);
           await query(`
             UPDATE canonical_bills
-            SET payment_status = 'PAID', updated_at = NOW()
+            SET payment_status = 'PAID'
             WHERE order_id = $1
           `, [orderId]);
         } catch (pgErr: any) {

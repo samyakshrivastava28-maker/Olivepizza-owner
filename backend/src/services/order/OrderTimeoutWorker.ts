@@ -1,4 +1,5 @@
 import { adminDb } from '../../config/firebase.js';
+import { query } from '../../lib/db.js';
 import { OrderStateMachine } from './OrderStateMachine.js';
 
 export class OrderTimeoutWorker {
@@ -52,39 +53,77 @@ export class OrderTimeoutWorker {
     const cancelledOrderIds: string[] = [];
 
     try {
-      // Query pending orders
-      const pendingSnap = await adminDb.collection('orders')
-        .where('status', 'in', ['pending', 'pending_acceptance'])
-        .get();
+      let candidateOrders: Array<{ id: string; createdAt: any; deadline?: string }> = [];
 
-      if (pendingSnap.empty) {
+      // 1. Primary: PostgreSQL canonical_orders
+      try {
+        const pgRes = await query(
+          `SELECT id, created_at, order_status 
+           FROM canonical_orders 
+           WHERE order_status IN ('PENDING', 'pending', 'pending_acceptance') 
+             AND order_date >= CURRENT_DATE - INTERVAL '1 day'
+           ORDER BY created_at ASC
+           LIMIT 50`
+        );
+        if (pgRes.rows.length > 0) {
+          candidateOrders = pgRes.rows.map(r => ({
+            id: r.id,
+            createdAt: r.created_at,
+            deadline: undefined
+          }));
+        }
+      } catch (pgErr: any) {
+        // Fall back to Firestore if PostgreSQL table is not populated yet
+      }
+
+      // 2. Fallback to Firestore only if PostgreSQL returned 0 and not under quota backoff
+      if (candidateOrders.length === 0 && Date.now() >= this.quotaBackoffUntil) {
+        try {
+          const pendingSnap = await adminDb.collection('orders')
+            .where('status', 'in', ['pending', 'pending_acceptance'])
+            .limit(50)
+            .get();
+
+          for (const doc of pendingSnap.docs) {
+            candidateOrders.push({
+              id: doc.id,
+              createdAt: doc.data().createdAt,
+              deadline: doc.data().acceptanceDeadline
+            });
+          }
+        } catch (fsErr: any) {
+          if (fsErr?.message?.includes('RESOURCE_EXHAUSTED')) {
+            this.quotaBackoffUntil = Date.now() + 15 * 60 * 1000;
+          }
+          console.warn('[OrderTimeoutWorker] Timed-out orders Firestore notice:', fsErr?.message);
+        }
+      }
+
+      if (candidateOrders.length === 0) {
         this.isProcessing = false;
         return { processedCount: 0, cancelledOrderIds: [] };
       }
 
-      for (const doc of pendingSnap.docs) {
-        const data = doc.data();
-        const orderId = doc.id;
-
-        // Determine acceptance deadline
-        let deadline = data.acceptanceDeadline;
+      for (const item of candidateOrders) {
+        const orderId = item.id;
+        let deadline = item.deadline;
         if (!deadline) {
-          // If legacy order without explicit deadline, compute from createdAt
           let createdAtMs = Date.now();
-          if (data.createdAt) {
-            if (typeof data.createdAt?.toDate === 'function') {
-              createdAtMs = data.createdAt.toDate().getTime();
-            } else if (typeof data.createdAt === 'string' || typeof data.createdAt === 'number') {
-              createdAtMs = new Date(data.createdAt).getTime();
-            } else if (data.createdAt?._seconds) {
-              createdAtMs = data.createdAt._seconds * 1000;
+          if (item.createdAt) {
+            if (typeof item.createdAt?.toDate === 'function') {
+              createdAtMs = item.createdAt.toDate().getTime();
+            } else if (typeof item.createdAt === 'string' || typeof item.createdAt === 'number') {
+              createdAtMs = new Date(item.createdAt).getTime();
+            } else if (item.createdAt?._seconds) {
+              createdAtMs = item.createdAt._seconds * 1000;
+            } else if (item.createdAt instanceof Date) {
+              createdAtMs = item.createdAt.getTime();
             }
           }
           const timeoutMinutes = Number(process.env.ORDER_ACCEPT_TIMEOUT_MINUTES || OrderTimeoutWorker.DEFAULT_TIMEOUT_MINUTES);
           deadline = new Date(createdAtMs + timeoutMinutes * 60 * 1000).toISOString();
         }
 
-        // Compare server timestamps
         if (new Date(deadline).getTime() <= Date.now()) {
           console.log(`[OrderTimeoutWorker] Order ${orderId} reached 10-min acceptance deadline (${deadline}). Triggering auto-cancellation...`);
 
@@ -109,14 +148,13 @@ export class OrderTimeoutWorker {
             cancelledOrderIds.push(orderId);
             console.log(`[OrderTimeoutWorker] ✅ Order ${orderId} successfully auto-cancelled by system timeout.`);
           } else {
-            // If another actor transitioned the order (e.g. restaurant accepted concurrently), this is expected and safe
             console.log(`[OrderTimeoutWorker] ℹ️ Order ${orderId} transition result: ${result.error || 'Already progressed'}`);
           }
         }
       }
     } catch (err: any) {
       if (err?.message?.includes('RESOURCE_EXHAUSTED')) {
-        this.quotaBackoffUntil = Date.now() + 2 * 60 * 1000;
+        this.quotaBackoffUntil = Date.now() + 15 * 60 * 1000;
       }
       console.warn('[OrderTimeoutWorker] Timed-out orders notice:', err?.message);
     } finally {
@@ -136,52 +174,86 @@ export class OrderTimeoutWorker {
     }
     let assignedCount = 0;
     try {
-      const activeDeliverySnap = await adminDb.collection('orders')
-        .where('status', 'in', ['accepted', 'preparing', 'ready'])
-        .get();
+      let activeOrders: Array<{ id: string; status: string; expectedReadyAt?: any; prepAt?: any }> = [];
 
-      if (activeDeliverySnap.empty) {
+      // 1. Primary: PostgreSQL canonical_orders
+      try {
+        const pgActive = await query(
+          `SELECT id, order_status, created_at, accepted_at, preparation_started_at, ready_at
+           FROM canonical_orders
+           WHERE order_type = 'delivery'
+             AND order_status IN ('ACCEPTED', 'accepted', 'PREPARING', 'preparing', 'READY', 'ready')
+             AND (delivery_partner_id IS NULL OR delivery_partner_id = '')
+             AND order_date >= CURRENT_DATE - INTERVAL '1 day'
+           ORDER BY created_at ASC
+           LIMIT 25`
+        );
+        if (pgActive.rows.length > 0) {
+          activeOrders = pgActive.rows.map(r => ({
+            id: r.id,
+            status: (r.order_status || '').toLowerCase(),
+            expectedReadyAt: r.ready_at,
+            prepAt: r.preparation_started_at || r.accepted_at || r.created_at
+          }));
+        }
+      } catch (pgErr: any) {
+        // Fall back to Firestore
+      }
+
+      // 2. Fallback to Firestore only if PostgreSQL returned 0 and not under quota backoff
+      if (activeOrders.length === 0 && Date.now() >= this.quotaBackoffUntil) {
+        try {
+          const activeDeliverySnap = await adminDb.collection('orders')
+            .where('status', 'in', ['accepted', 'preparing', 'ready'])
+            .limit(25)
+            .get();
+
+          for (const orderDoc of activeDeliverySnap.docs) {
+            const orderData = orderDoc.data();
+            const fulfillment = (orderData.fulfillmentType || orderData.deliveryType || 'delivery').toLowerCase();
+            if (fulfillment === 'delivery' && !orderData.deliveryPartnerId && !orderData.riderId) {
+              activeOrders.push({
+                id: orderDoc.id,
+                status: orderData.status,
+                expectedReadyAt: orderData.expectedReadyAt || orderData.estimatedReadyAt,
+                prepAt: orderData.preparingAt || orderData.acceptedAt || orderData.createdAt
+              });
+            }
+          }
+        } catch (fsErr: any) {
+          if (fsErr?.message?.includes('RESOURCE_EXHAUSTED')) {
+            this.quotaBackoffUntil = Date.now() + 15 * 60 * 1000;
+          }
+          console.warn('[OrderTimeoutWorker] Auto rider assignment Firestore notice:', fsErr?.message);
+        }
+      }
+
+      if (activeOrders.length === 0) {
         return { assignedCount: 0 };
       }
 
       const { RiderDispatchEngine } = await import('../delivery/RiderDispatchEngine.js');
       const nowMs = Date.now();
 
-      for (const orderDoc of activeDeliverySnap.docs) {
-        const orderData = orderDoc.data();
-        const orderId = orderDoc.id;
-
-        // Skip non-delivery orders (e.g. pickup, dine-in)
-        const fulfillment = (orderData.fulfillmentType || orderData.deliveryType || 'delivery').toLowerCase();
-        if (fulfillment !== 'delivery') {
-          continue;
-        }
-
-        // Skip if a delivery partner is already assigned
-        if (orderData.deliveryPartnerId || orderData.riderId) {
-          continue;
-        }
-
-        const status = orderData.status;
-        const expectedReadyAt = orderData.expectedReadyAt || orderData.estimatedReadyAt;
+      for (const order of activeOrders) {
+        const orderId = order.id;
+        const status = order.status;
+        const expectedReadyAt = order.expectedReadyAt;
 
         let shouldAssign = false;
 
         if (status === 'ready') {
-          // Food is already cooked and ready for dispatch -> assign immediately!
           shouldAssign = true;
         } else if (expectedReadyAt) {
           const readyMs = new Date(expectedReadyAt).getTime();
           const msRemaining = readyMs - nowMs;
           const minutesRemaining = msRemaining / (60 * 1000);
 
-          // Trigger automatic rider assignment when 5 minutes or less left before order is ready
           if (minutesRemaining <= 5) {
             shouldAssign = true;
           }
         } else {
-          // Fallback if no expectedReadyAt recorded: if preparing for > 7 mins, trigger assignment
-          const prepAt = orderData.preparingAt || orderData.acceptedAt || orderData.createdAt;
+          const prepAt = order.prepAt;
           if (prepAt) {
             const prepMs = new Date(prepAt).getTime();
             if (nowMs - prepMs >= 7 * 60 * 1000) {
@@ -207,7 +279,7 @@ export class OrderTimeoutWorker {
       }
     } catch (err: any) {
       if (err?.message?.includes('RESOURCE_EXHAUSTED')) {
-        this.quotaBackoffUntil = Date.now() + 2 * 60 * 1000;
+        this.quotaBackoffUntil = Date.now() + 15 * 60 * 1000;
       }
       console.warn('[OrderTimeoutWorker] Error in processAutoRiderAssignments:', err?.message);
     }

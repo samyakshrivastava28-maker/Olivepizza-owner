@@ -32,15 +32,7 @@ export const OwnerLayout: React.FC = () => {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   // Determine user capabilities across unified platform
-  const isMasterOwner = !user?.email ? false : (
-    user.email.toLowerCase() === 'olivepizzarjn@gmail.com' ||
-    user.email.toLowerCase() === 'webhub2811@gmail.com' ||
-    user.email.toLowerCase() === 'olivepizzamaker@gmail.com' ||
-    user.role === 'owner' || 
-    user.role === 'admin' || 
-    user.role === 'developer' || 
-    user.role === 'platform_owner'
-  );
+  const isMasterOwner = user?.role === 'owner' || user?.role === 'platform_owner';
 
   const appAccess = user?.applicationAccess || {};
   const allowedApps = user?.allowedApps || [];

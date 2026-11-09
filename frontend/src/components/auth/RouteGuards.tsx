@@ -98,14 +98,12 @@ export function DeliveryGuard() {
   return <Outlet />;
 }
 
-// 4. Owner Guard (Must be owner, admin, or developer)
+// 4. Owner Guard (Must be confirmed owner or platform_owner)
 export function OwnerGuard() {
   const { isAuthenticated, user, role, isLoading } = useAuthStore();
   const location = useLocation();
 
-  const AUTHORIZED_INTERNAL_EMAILS = ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'];
-  const emailOk = user?.email && AUTHORIZED_INTERNAL_EMAILS.includes(user.email.toLowerCase());
-  const isAllowed = role === 'owner' || role === 'admin' || (role as string) === 'developer' || emailOk;
+  const isAllowed = isAuthenticated && (role === 'owner' || role === 'platform_owner');
   const isUnauthorized = !isAuthenticated || !isAllowed;
 
   React.useEffect(() => {
@@ -129,14 +127,12 @@ export function OwnerGuard() {
   return <Outlet />;
 }
 
-// 5. Admin Guard (Optional: Admins / Owners / Developers)
+// 5. Admin Guard (Platform Owner or Admin)
 export function AdminGuard() {
   const { isAuthenticated, user, role, isLoading } = useAuthStore();
   const location = useLocation();
 
-  const AUTHORIZED_INTERNAL_EMAILS = ['olivepizzarjn@gmail.com', 'webhub2811@gmail.com'];
-  const emailOk = user?.email && AUTHORIZED_INTERNAL_EMAILS.includes(user.email.toLowerCase());
-  const isAllowed = role === 'admin' || role === 'owner' || (role as string) === 'developer' || emailOk;
+  const isAllowed = isAuthenticated && (role === 'admin' || role === 'owner' || role === 'platform_owner');
   const isUnauthorized = !isAuthenticated || !isAllowed;
 
   React.useEffect(() => {
@@ -160,7 +156,7 @@ export function AdminGuard() {
   return <Outlet />;
 }
 
-// 6. Developer Guard (strictly developer role or webhub2811@gmail.com Ã¢â‚¬” owners cannot access)
+// 6. Developer Guard (strictly developer or platform_owner role confirmed by database)
 export function DeveloperGuard() {
   const { isAuthenticated, user, role, isLoading } = useAuthStore();
   const location = useLocation();
@@ -169,7 +165,7 @@ export function DeveloperGuard() {
     return <div className="h-screen flex items-center justify-center text-slate-400 text-sm font-bold bg-dark-950">Verifying developer access...</div>;
   }
 
-  const isDevUser = user?.email?.toLowerCase() === 'webhub2811@gmail.com' || role === 'developer';
+  const isDevUser = isAuthenticated && (role === 'developer' || role === 'platform_owner');
 
   if (!isAuthenticated || !isDevUser) {
     if (isAuthenticated && user) {
@@ -182,7 +178,7 @@ export function DeveloperGuard() {
       });
       toast.error('Developer dashboard is restricted. Access denied.');
     }
-    return <Navigate to="/owner/dashboard" replace />;
+    return <Navigate to="/home" replace />;
   }
 
   return <Outlet />;

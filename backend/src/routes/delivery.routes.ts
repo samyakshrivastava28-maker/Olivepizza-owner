@@ -12,9 +12,12 @@ import { DeliveryCapacityService } from '../services/delivery/DeliveryCapacitySe
 import { webSocketServer } from '../services/websocket/WebSocketServer.js';
 import { OrderStateMachine } from '../services/order/OrderStateMachine.js';
 import { StoreBoundDeliveryFleetService, RiderOperationalState } from '../services/delivery/StoreBoundDeliveryFleetService.js';
+import { RiderReplacementSagaService } from '../services/delivery/RiderReplacementSagaService.js';
+import { RiderOnboardingService } from '../services/delivery/RiderOnboardingService.js';
 import { ApiSecurityMiddleware, ResponseSanitizationService } from '../security/index.js';
 import { SupabaseGpsService } from '../services/gps/SupabaseGpsService.js';
 import { PostgresGpsService } from '../services/gps/PostgresGpsService.js';
+import { RedisGpsService } from '../services/gps/RedisGpsService.js';
 
 const router = Router();
 
@@ -713,8 +716,9 @@ router.get('/rider/me', requireRole(['delivery', 'delivery_partner', 'owner', 'a
 router.post('/rider/status', requireRole(['delivery', 'delivery_partner', 'owner', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const uid = req.user!.uid;
-    const { isOnline, lat, lng, latitude, longitude, accuracy, speed, heading } = req.body;
+    const { isOnline, lat, lng, latitude, longitude, accuracy, speed, heading, backgroundService } = req.body;
     const isOnlineBool = Boolean(isOnline);
+    const isBackgroundTelemetry = Boolean(backgroundService);
 
     const updatePayload: any = {
       isOnline: isOnlineBool,
@@ -732,19 +736,45 @@ router.post('/rider/status', requireRole(['delivery', 'delivery_partner', 'owner
       updatePayload.lng = Number(finalLng);
     }
 
-    await adminDb.collection('users').doc(uid).set(updatePayload, { merge: true });
-    await adminDb.collection('delivery_partners').doc(uid).set(updatePayload, { merge: true }).catch(() => {});
+    // Avoid continuous Firestore quota exhaustion during 5s background telemetry
+    if (!isBackgroundTelemetry) {
+      await adminDb.collection('users').doc(uid).set(updatePayload, { merge: true });
+      await adminDb.collection('delivery_partners').doc(uid).set(updatePayload, { merge: true }).catch(() => {});
+    }
 
     if (finalLat != null && finalLng != null) {
-      await PostgresGpsService.upsertLatestLocation({
+      // ⚡ INSTANT WEBSOCKET BROADCAST to all active order listeners and fleet maps
+      webSocketServer.handleDriverLocationUpdate({
         deliveryPartnerId: uid,
+        orderId: req.body.activeOrderId || req.body.orderId || null,
+        lat: Number(finalLat),
+        lng: Number(finalLng),
+        accuracy: accuracy != null ? Number(accuracy) : 5,
+        speed: speed != null ? Number(speed) : 0,
+        heading: heading != null ? Number(heading) : 0,
+        battery: req.body.battery ? Number(req.body.battery) : 100,
+        isMoving: speed ? Number(speed) > 1 : false,
+        timestamp: req.body.timestamp || new Date().toISOString(),
+        status: isOnlineBool ? 'ONLINE' : 'OFFLINE'
+      });
+
+      // 🛰️ Authoritative Ephemeral Layerbase Redis 7.2.15 GPS Engine
+      await RedisGpsService.updateLocation({
+        deliveryPartnerId: uid,
+        franchiseId: req.user?.franchiseId || 'fra_primary',
+        branchId: req.user?.branchId || 'main_branch',
+        activeOrderId: req.body.activeOrderId || req.body.orderId || null,
         latitude: Number(finalLat),
         longitude: Number(finalLng),
         accuracy: accuracy != null ? Number(accuracy) : null,
         speed: speed != null ? Number(speed) : null,
         heading: heading != null ? Number(heading) : null,
-        onlineStatus: isOnlineBool
-      }).catch(() => {});
+        battery: req.body.battery ? Number(req.body.battery) : null,
+        onlineStatus: isOnlineBool,
+        timestamp: req.body.timestamp
+      }).catch((redisErr) => {
+        console.warn('[Delivery Routes] Redis GPS update warning:', redisErr.message);
+      });
     }
 
     res.json({ success: true, isOnline: isOnlineBool });
@@ -867,6 +897,158 @@ router.get('/rider/reports', requireRole(['delivery', 'delivery_partner', 'owner
   } catch (err: any) {
     console.error('[Delivery Routes] /rider/reports error:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch rider reports' });
+  }
+});
+
+// ─── GATE 1: RIDER ONBOARDING & REPLACEMENT SAGA WORKFLOWS ────────────────
+
+/**
+ * POST /riders/onboard-request
+ * Submit a rider onboarding request by Restaurant Manager or Franchise Manager (Rule BR-01).
+ */
+router.post('/riders/onboard-request', requireRole(['restaurant_manager', 'franchise_manager', 'franchise_owner', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { branchId, franchiseId, riderName, phone, email, vehicleType, vehicleNumber } = req.body;
+    const callerBranch = branchId || req.user!.branchId || 'main_branch';
+    const callerFranchise = franchiseId || req.user!.franchiseId || 'fra_primary';
+
+    const result = await RiderOnboardingService.submitRequest({
+      requestedByUid: req.user!.uid,
+      requestedByRole: req.user!.role || 'restaurant_manager',
+      branchId: callerBranch,
+      franchiseId: callerFranchise,
+      riderName,
+      phone,
+      email,
+      vehicleType,
+      vehicleNumber
+    });
+
+    res.status(201).json(result);
+  } catch (err: any) {
+    console.error('[Delivery Routes] /riders/onboard-request error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+/**
+ * GET /riders/onboard-requests
+ * Query rider onboarding requests scoped by role.
+ */
+router.get('/riders/onboard-requests', requireRole(['restaurant_manager', 'franchise_manager', 'franchise_owner', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { branchId, franchiseId, status } = req.query;
+    const requests = await RiderOnboardingService.listRequests({
+      branchId: (branchId as string) || req.user!.branchId,
+      franchiseId: (franchiseId as string) || req.user!.franchiseId,
+      status: status as string,
+      userRole: req.user!.role || 'restaurant_manager'
+    });
+
+    res.json({ success: true, count: requests.length, requests });
+  } catch (err: any) {
+    console.error('[Delivery Routes] /riders/onboard-requests error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /riders/onboard-requests/:id/review
+ * Owner/Admin approves and activates or rejects rider onboarding request (Rule BR-01).
+ */
+router.post('/riders/onboard-requests/:id/review', requireRole(['owner', 'developer', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { action, notes } = req.body;
+
+    if (!['APPROVE', 'REJECT'].includes((action || '').toUpperCase())) {
+      res.status(400).json({ error: "Invalid action. Must be 'APPROVE' or 'REJECT'." });
+      return;
+    }
+
+    const result = await RiderOnboardingService.reviewRequest({
+      requestId: id,
+      reviewerUid: req.user!.uid,
+      reviewerRole: req.user!.role || 'owner',
+      action: action.toUpperCase() as 'APPROVE' | 'REJECT',
+      notes
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Delivery Routes] /riders/onboard-requests/:id/review error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+/**
+ * POST /riders/replace OR POST /orders/:id/replace-rider
+ * Executes the multi-order replacement saga & physical handover protocol (Rules BR-02, BR-03, BR-10).
+ */
+async function handleRiderReplacement(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const targetOrderId = req.params.id || req.body.targetOrderId;
+    const { oldRiderId, replacementRiderId, reason, idempotencyKey } = req.body;
+
+    if (!targetOrderId) {
+      res.status(400).json({ error: 'targetOrderId is required' });
+      return;
+    }
+    if (!oldRiderId) {
+      res.status(400).json({ error: 'oldRiderId is required' });
+      return;
+    }
+    if (!replacementRiderId) {
+      res.status(400).json({ error: 'replacementRiderId is required' });
+      return;
+    }
+    if (!reason || reason.trim().length < 3) {
+      res.status(400).json({ error: 'A valid reason is required for rider replacement' });
+      return;
+    }
+
+    const result = await RiderReplacementSagaService.executeReplacementSaga({
+      targetOrderId,
+      oldRiderId,
+      replacementRiderId,
+      reason,
+      initiatedByUid: req.user!.uid,
+      initiatedByRole: req.user!.role || 'restaurant_manager',
+      idempotencyKey
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Delivery Routes] replace-rider error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message, code: err.code });
+  }
+}
+
+router.post('/riders/replace', requireRole(['restaurant_manager', 'franchise_manager', 'franchise_owner', 'owner', 'admin', 'developer']), handleRiderReplacement);
+router.post('/orders/:id/replace-rider', requireRole(['restaurant_manager', 'franchise_manager', 'franchise_owner', 'owner', 'admin', 'developer']), handleRiderReplacement);
+
+/**
+ * POST /orders/:id/handover-confirm
+ * Receiving rider confirms physical custody transfer of an active delivery (Rule BR-10).
+ */
+router.post('/orders/:id/handover-confirm', requireRole(['delivery', 'delivery_partner', 'owner', 'restaurant_manager', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { handoverId, receivingRiderId, latitude, longitude, notes } = req.body;
+
+    const result = await RiderReplacementSagaService.confirmPhysicalHandover({
+      orderId: id,
+      handoverId,
+      receivingRiderId: receivingRiderId || req.user!.uid,
+      latitude,
+      longitude,
+      notes
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Delivery Routes] /orders/:id/handover-confirm error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message, code: err.code });
   }
 });
 

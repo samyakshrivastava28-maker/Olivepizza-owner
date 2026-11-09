@@ -1,14 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
-import { doc, getDoc } from 'firebase/firestore';
-import { useAuthStore, isAuthorizedOwnerEmail } from '../../lib/store';
+import { auth } from '../../lib/firebase';
+import { useAuthStore } from '../../lib/store';
 import { UserRole } from '../../types/auth';
 import { initFCMNotifications } from '../../lib/fcm';
 import { getApiUrl } from '../../lib/config';
 
 export default function AuthProvider({ children }: { children: React.ReactNode }) {
-  const { setUser, setInitialized, setLoading, setRestricted } = useAuthStore();
+  const { setUser, setInitialized, setLoading, setRestricted, setDatabaseUnavailable, clearRestricted } = useAuthStore();
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -22,15 +21,13 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
 
           if (firebaseUser) {
             try {
-              const isOwnerEmail = isAuthorizedOwnerEmail(firebaseUser.email);
+              setLoading(true);
               const token = await firebaseUser.getIdToken();
 
-              let isAuthorized = false;
-              let serverUser: any = null;
-              let denialReason = 'This Google account is not authorized to access the Olive Pizza Owner & Executive Console.';
-
+              // Database-Authoritative Handshake
+              let authRes: Response | null = null;
               try {
-                const authRes = await fetch(getApiUrl('/api/auth/authorize-app'), {
+                authRes = await fetch(getApiUrl('/api/auth/authorize-app'), {
                   method: 'POST',
                   headers: {
                     'Content-Type': 'application/json',
@@ -38,37 +35,108 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
                   },
                   body: JSON.stringify({ targetApp: 'OWNER' })
                 });
-
-                if (authRes.ok) {
-                  const data = await authRes.json();
-                  if (data.authorized) {
-                    isAuthorized = true;
-                    serverUser = data.user;
-                  } else {
-                    denialReason = data.reason || denialReason;
-                  }
-                } else {
-                  const data = await authRes.json().catch(() => ({}));
-                  denialReason = data.reason || denialReason;
-                  if (authRes.status !== 403 && isOwnerEmail) {
-                    isAuthorized = true;
-                  }
-                }
               } catch (networkErr: any) {
-                console.warn('[AuthProvider] Network error checking authorization:', networkErr);
-                if (isOwnerEmail) {
-                  isAuthorized = true;
+                console.warn('[AuthProvider] Backend network error during handshake:', networkErr?.message);
+                if (mounted) {
+                  // Retain session, do NOT sign out, mark database/network unavailable
+                  setDatabaseUnavailable(true);
+                  setLoading(false);
+                  setInitialized(true);
                 }
+                return;
               }
 
-              if (!isAuthorized) {
-                if (isOwnerEmail) {
-                  isAuthorized = true;
+              // Handle Database Outage (HTTP 503)
+              if (authRes.status === 503) {
+                console.warn('[AuthProvider] Database unavailable (503). Retaining Firebase session.');
+                if (mounted) {
+                  setDatabaseUnavailable(true);
+                  setLoading(false);
+                  setInitialized(true);
+                }
+                return;
+              }
+
+              // Handle Unauthorized / Access Denied (HTTP 403 or non-OK)
+              if (authRes.status === 403) {
+                const data = await authRes.json().catch(() => ({}));
+                const denialReason = data.reason || 'This account is not authorized to access the Olive Pizza Owner & Executive Console.';
+                console.warn(`[AuthProvider] Access denied (403): ${denialReason}`);
+                await signOut(auth);
+                if (mounted) {
+                  setRestricted(denialReason, firebaseUser.email);
+                  setUser(null, null);
+                  setDatabaseUnavailable(false);
+                  setLoading(false);
+                  setInitialized(true);
+                }
+                return;
+              }
+
+              // Handle Expired / Invalid Token (HTTP 401)
+              if (authRes.status === 401) {
+                console.warn('[AuthProvider] Authentication token expired or invalid (401).');
+                await signOut(auth);
+                if (mounted) {
+                  setUser(null, null);
+                  setDatabaseUnavailable(false);
+                  setLoading(false);
+                  setInitialized(true);
+                }
+                return;
+              }
+
+              // Handle OK response (HTTP 200)
+              if (authRes.ok) {
+                const data = await authRes.json();
+                if (data.authorized && data.user) {
+                  const serverRole: UserRole = data.user.role;
+                  // Strictly verify owner or platform_owner role
+                  if (serverRole !== 'owner' && serverRole !== 'platform_owner') {
+                    console.warn(`[AuthProvider] Account role "${serverRole}" is not authorized for the Owner Portal.`);
+                    await signOut(auth);
+                    if (mounted) {
+                      setRestricted(`Access denied: Your assigned role is "${serverRole}". The Owner Portal requires the Platform Owner role.`, firebaseUser.email);
+                      setUser(null, null);
+                      setLoading(false);
+                      setInitialized(true);
+                    }
+                    return;
+                  }
+
+                  if (mounted) {
+                    clearRestricted();
+                    setDatabaseUnavailable(false);
+                    setUser(
+                      {
+                        uid: data.user.uid || firebaseUser.uid,
+                        email: data.user.email || firebaseUser.email,
+                        name: data.user.name || firebaseUser.displayName || 'Platform Owner',
+                        phone: data.user.phone || firebaseUser.phoneNumber || undefined,
+                        role: serverRole,
+                        allowedApps: data.allowedApps || ['OWNER'],
+                        applicationAccess: data.appAccess || { app_owner: true },
+                        permissions: data.permissions || ['owner.all'],
+                        branchId: data.branchId || 'main_branch',
+                        branchIds: data.branchIds || ['main_branch'],
+                        franchiseId: data.franchiseId || 'fra_rajnandgaon',
+                      },
+                      serverRole,
+                      data.user
+                    );
+                    setLoading(false);
+                    setInitialized(true);
+
+                    initFCMNotifications(firebaseUser.uid).catch(() => {});
+                  }
+                  return;
                 } else {
-                  console.warn(`[AuthProvider] Access restricted for ${firebaseUser.email}: ${denialReason}`);
+                  // Not authorized according to response body
+                  const denialReason = data.reason || 'Account not authorized for OWNER application.';
                   await signOut(auth);
                   if (mounted) {
                     setRestricted(denialReason, firebaseUser.email);
+                    setUser(null, null);
                     setLoading(false);
                     setInitialized(true);
                   }
@@ -76,81 +144,32 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
                 }
               }
 
-              // Authorized Owner/Executive
-              let resolvedRole: UserRole = (serverUser?.role as UserRole) || (isOwnerEmail ? 'owner' : 'customer');
-              let name = serverUser?.name || firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Owner';
-              let phone = firebaseUser.phoneNumber;
-
-              // Check Firestore user doc for extra fields if needed
-              let userDocData: any = null;
-              try {
-                const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-                if (userDoc.exists()) {
-                  userDocData = userDoc.data();
-                  if (userDocData.role && !serverUser?.role) {
-                    resolvedRole = userDocData.role as UserRole;
-                  }
-                  if (userDocData.name) name = userDocData.name;
-                  if (userDocData.phone) phone = userDocData.phone;
-                }
-              } catch (fsErr: any) {
-                console.warn('[AuthProvider] Firestore user doc read notice:', fsErr?.message);
-              }
-
+              // Unhandled status code fallback
+              const errData = await authRes.json().catch(() => ({}));
+              await signOut(auth);
               if (mounted) {
-                setUser(
-                  {
-                    uid: firebaseUser.uid,
-                    email: firebaseUser.email,
-                    name,
-                    phone: phone || undefined,
-                    role: resolvedRole,
-                    allowedApps: serverUser?.allowedApps || userDocData?.allowedApps || (isOwnerEmail ? ['OWNER', 'FRANCHISE_MANAGER', 'RESTAURANT_MANAGER', 'POS', 'DELIVERY'] : []),
-                    applicationAccess: serverUser?.applicationAccess || userDocData?.applicationAccess || {
-                      app_franchise_management: isOwnerEmail || resolvedRole === 'franchise_manager' || resolvedRole === 'franchise_owner',
-                      app_restaurant_management: isOwnerEmail || resolvedRole === 'restaurant_manager',
-                      app_pos: isOwnerEmail || resolvedRole === 'cashier',
-                      app_delivery: isOwnerEmail || resolvedRole === 'delivery_partner',
-                    },
-                    permissions: serverUser?.permissions || userDocData?.permissions || [],
-                    branchId: serverUser?.branchId || userDocData?.branchId || 'main_branch',
-                    branchIds: serverUser?.branchIds || userDocData?.branchIds || ['main_branch'],
-                    franchiseId: serverUser?.franchiseId || userDocData?.franchiseId || 'fra_rajnandgaon',
-                  },
-                  resolvedRole
-                );
-
-                initFCMNotifications(firebaseUser.uid).catch(() => {});
+                setRestricted(errData.reason || 'Failed to verify account authorization with the server.', firebaseUser.email);
+                setUser(null, null);
+                setLoading(false);
+                setInitialized(true);
               }
             } catch (error: any) {
-              console.warn('[AuthProvider] Auth user resolution warning:', error?.message);
+              console.warn('[AuthProvider] Auth user resolution error:', error?.message);
+              await signOut(auth);
               if (mounted) {
-                if (isAuthorizedOwnerEmail(firebaseUser.email)) {
-                  const fallbackRole = 'owner';
-                  setUser(
-                    {
-                      uid: firebaseUser.uid,
-                      email: firebaseUser.email,
-                      name: firebaseUser.displayName || 'Owner',
-                      role: fallbackRole,
-                    },
-                    fallbackRole
-                  );
-                } else {
-                  await signOut(auth);
-                  setRestricted('Unable to verify account permissions. Please sign in again.', firebaseUser.email);
-                }
+                setRestricted('Unable to verify account permissions. Please sign in again.', firebaseUser.email);
+                setUser(null, null);
+                setLoading(false);
+                setInitialized(true);
               }
             }
           } else {
             if (mounted) {
               setUser(null, null);
+              setDatabaseUnavailable(false);
+              setLoading(false);
+              setInitialized(true);
             }
-          }
-
-          if (mounted) {
-            setInitialized(true);
-            setLoading(false);
           }
         }, (error: any) => {
           console.warn('[AuthProvider] onAuthStateChanged error:', error?.message);
@@ -176,7 +195,7 @@ export default function AuthProvider({ children }: { children: React.ReactNode }
       if (unsubscribe) unsubscribe();
       if (retryTimer.current) clearTimeout(retryTimer.current);
     };
-  }, [setUser, setInitialized, setLoading, setRestricted]);
+  }, [setUser, setInitialized, setLoading, setRestricted, setDatabaseUnavailable, clearRestricted]);
 
   return <>{children}</>;
 }

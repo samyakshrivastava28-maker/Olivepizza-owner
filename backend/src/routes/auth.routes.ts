@@ -150,7 +150,8 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
         metadata: { reason: resolution.reason, code: resolution.code }
       }).catch(() => {});
 
-      res.status(403).json({
+      const statusCode = resolution.code === 'DATABASE_UNAVAILABLE' ? 503 : 403;
+      res.status(statusCode).json({
         authorized: false,
         app: targetApp,
         email: user.email,
@@ -183,6 +184,7 @@ router.post('/authorize-app', verifyToken, async (req: AuthRequest, res: Respons
     res.status(500).json({ authorized: false, reason: error.message || 'Authorization check failed' });
   }
 });
+
 
 // POST /api/auth/context-session - Owner Authorized Context Switching for Standalone Apps
 router.post('/context-session', verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {

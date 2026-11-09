@@ -17,6 +17,8 @@ export type CanonicalOrderStatus =
   | 'picked_up'
   | 'out_for_delivery'
   | 'delivered'
+  | 'delivery_failed'
+  | 'returned_to_branch'
   | 'cancelled';
 
 export type StateMachineActorRole =
@@ -53,11 +55,13 @@ export interface TransitionResult {
 const ALLOWED_TRANSITIONS: Record<CanonicalOrderStatus, CanonicalOrderStatus[]> = {
   pending:          ['accepted', 'preparing', 'cancelled'],
   accepted:         ['preparing', 'cancelled'],
-  preparing:        ['partner_assigned', 'ready', 'delivered', 'cancelled'],
+  preparing:        ['partner_assigned', 'ready', 'picked_up', 'delivered', 'cancelled'],
   partner_assigned: ['ready', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled'],
   ready:            ['partner_assigned', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled'],
-  picked_up:        ['out_for_delivery', 'delivered', 'cancelled'],
-  out_for_delivery: ['delivered', 'cancelled'],
+  picked_up:        ['out_for_delivery', 'delivered', 'delivery_failed'],
+  out_for_delivery: ['delivered', 'delivery_failed'], // Ordinary cancellation strictly prohibited by BR-04
+  delivery_failed:  ['returned_to_branch'],
+  returned_to_branch: ['cancelled'],
   delivered:        [],
   cancelled:        [],
 };
@@ -71,6 +75,7 @@ const ROLE_AUTHORITY: Record<string, StateMachineActorRole[]> = {
   'accepted->cancelled':        ['restaurant_manager', 'cashier', 'system'],
   'preparing->partner_assigned': ['restaurant_manager', 'cashier', 'system'],
   'preparing->ready':           ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
+  'preparing->picked_up':       ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
   'preparing->delivered':       ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
   'preparing->cancelled':       ['restaurant_manager', 'cashier', 'system'],
   'partner_assigned->ready':    ['restaurant_manager', 'kitchen_staff', 'cashier', 'system'],
@@ -83,11 +88,13 @@ const ROLE_AUTHORITY: Record<string, StateMachineActorRole[]> = {
   'ready->out_for_delivery':    ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
   'ready->delivered':           ['restaurant_manager', 'cashier', 'kitchen_staff', 'system'],
   'ready->cancelled':           ['restaurant_manager', 'cashier', 'system'],
-  'picked_up->out_for_delivery': ['delivery_partner', 'system'],
+  'picked_up->out_for_delivery': ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
   'picked_up->delivered':       ['delivery_partner', 'system'],
-  'picked_up->cancelled':       ['restaurant_manager', 'system'],
+  'picked_up->delivery_failed': ['delivery_partner', 'restaurant_manager', 'system'],
   'out_for_delivery->delivered': ['delivery_partner', 'restaurant_manager', 'cashier', 'system'],
-  'out_for_delivery->cancelled': ['restaurant_manager', 'system'],
+  'out_for_delivery->delivery_failed': ['delivery_partner', 'restaurant_manager', 'system'],
+  'delivery_failed->returned_to_branch': ['restaurant_manager', 'cashier', 'system'],
+  'returned_to_branch->cancelled': ['restaurant_manager', 'owner', 'system'],
 };
 
 export function normalizeStateMachineRole(role?: string): StateMachineActorRole {
@@ -108,7 +115,7 @@ export class OrderStateMachine {
   public static reconcileStatus(status: string): CanonicalOrderStatus {
     const s = (status || '').toLowerCase().trim();
     if (s === 'pending_acceptance') return 'pending';
-    if (['pending', 'accepted', 'preparing', 'partner_assigned', 'ready', 'picked_up', 'out_for_delivery', 'delivered', 'cancelled'].includes(s)) {
+    if (['pending', 'accepted', 'preparing', 'partner_assigned', 'ready', 'picked_up', 'out_for_delivery', 'delivered', 'delivery_failed', 'returned_to_branch', 'cancelled'].includes(s)) {
       return s as CanonicalOrderStatus;
     }
     return 'pending';
@@ -140,24 +147,26 @@ export class OrderStateMachine {
         ).catch(() => {});
       }
 
-      const orderRef = adminDb.collection('orders').doc(orderId);
+      // Rule BR-05: PostgreSQL is the sole authoritative source of truth for order statuses
       let orderData: any = null;
+      try {
+        const { OrderPersistenceArchiveService } = await import('./OrderPersistenceArchiveService.js');
+        orderData = await OrderPersistenceArchiveService.getHistoricalOrder(orderId);
+      } catch (pgErr: any) {
+        console.warn(`[OrderStateMachine] PostgreSQL canonical read notice for ${orderId}:`, pgErr.message);
+      }
+
+      const orderRef = adminDb.collection('orders').doc(orderId);
       try {
         const docSnap = await orderRef.get();
         if (docSnap.exists) {
-          orderData = docSnap.data()!;
+          const fsData = docSnap.data()!;
+          orderData = orderData 
+            ? { ...fsData, ...orderData, status: orderData.status || fsData.status }
+            : fsData;
         }
       } catch (fsErr: any) {
         console.warn(`[OrderStateMachine] Firestore read notice for ${orderId}:`, fsErr.message);
-      }
-
-      if (!orderData) {
-        try {
-          const { OrderPersistenceArchiveService } = await import('./OrderPersistenceArchiveService.js');
-          orderData = await OrderPersistenceArchiveService.getHistoricalOrder(orderId);
-        } catch (pgErr: any) {
-          console.warn(`[OrderStateMachine] PostgreSQL fallback read notice for ${orderId}:`, pgErr.message);
-        }
       }
 
       if (!orderData) {
@@ -206,10 +215,60 @@ export class OrderStateMachine {
         };
       }
 
+      const normalizedActorRole = normalizeStateMachineRole(actor.role);
+
+      // Rule BR-04: Ordinary cancellation strictly prohibited after pickup
+      if (toState === 'cancelled' && (fromState === 'out_for_delivery' || fromState === 'picked_up')) {
+        if (client) await client.query('ROLLBACK').catch(() => {});
+        return {
+          success: false,
+          orderId,
+          previousStatus: fromState,
+          currentStatus: fromState,
+          version: orderData.notification_version || 1,
+          error: 'Ordinary cancellation is strictly prohibited after pickup. Use the delivery-failure and return workflow.',
+        };
+      }
+
+      // Rule BR-08: Pickup Authority Guard (Only Assigned Delivery Partner can confirm pickup)
+      if (toState === 'out_for_delivery' || toState === 'picked_up') {
+        const assignedPartnerId = orderData.deliveryPartnerId || orderData.riderId;
+        if (!assignedPartnerId) {
+          if (client) await client.query('ROLLBACK').catch(() => {});
+          return {
+            success: false,
+            orderId,
+            previousStatus: fromState,
+            currentStatus: fromState,
+            version: orderData.notification_version || 1,
+            error: 'Cannot confirm pickup: No delivery partner has been assigned to this order.'
+          };
+        }
+
+        if (normalizedActorRole === 'delivery_partner' && actor.uid !== assignedPartnerId) {
+          const dpCheck = await client.query(
+            'SELECT id, user_id FROM delivery_partners WHERE (id = $1 AND (user_id = $2 OR id = $2))',
+            [assignedPartnerId, actor.uid]
+          ).catch(() => ({ rows: [] }));
+
+          if (dpCheck.rows.length === 0) {
+            if (client) await client.query('ROLLBACK').catch(() => {});
+            return {
+              success: false,
+              orderId,
+              previousStatus: fromState,
+              currentStatus: fromState,
+              version: orderData.notification_version || 1,
+              error: `Pickup Forbidden: Only the currently assigned delivery partner (${assignedPartnerId}) can confirm pickup.`
+            };
+          }
+        }
+      }
+
       // Validate actor authority — strictly operational roles
       const transitionKey = `${fromState}->${toState}`;
       const authorizedRoles = ROLE_AUTHORITY[transitionKey] || ['system'];
-      const normalizedActorRole = normalizeStateMachineRole(actor.role);
+      // normalizedActorRole already declared above
 
       // Owners and Admins possess administrative operational authority across stages
       const isAuthorized =
@@ -555,7 +614,7 @@ export class OrderStateMachine {
 
       if (client) {
         // Authoritative canonical PostgreSQL order status update
-        await client.query(`
+        const updateRes: any = await client.query(`
           UPDATE canonical_orders
           SET order_status = $1,
               updated_at = NOW()
@@ -563,7 +622,22 @@ export class OrderStateMachine {
           WHERE id = $2;
         `, toState === 'cancelled' ? [toState.toUpperCase(), orderId, metadata.cancellationReason || 'CANCELLED'] : [toState.toUpperCase(), orderId]).catch((err: any) => {
           console.warn('[OrderStateMachine] PostgreSQL status sync notice:', err?.message);
+          return { rowCount: 0 };
         });
+
+        // Self-healing: If row was not present in canonical_orders, insert it immediately
+        if (updateRes && updateRes.rowCount === 0 && orderData) {
+          try {
+            const { OrderPersistenceArchiveService } = await import('./OrderPersistenceArchiveService.js');
+            await OrderPersistenceArchiveService.syncLiveOrderToPostgres(orderId, {
+              ...orderData,
+              status: toState,
+              ...updates
+            });
+          } catch (syncErr: any) {
+            console.warn('[OrderStateMachine] Fallback sync to PostgreSQL notice:', syncErr.message);
+          }
+        }
 
         // Authoritative financial bill reversal if order is cancelled
         if (toState === 'cancelled') {
@@ -577,6 +651,31 @@ export class OrderStateMachine {
           `, [orderId, metadata.cancellationReason || 'CANCELLED']).catch((err: any) => {
             console.warn('[OrderStateMachine] PostgreSQL bill cancellation notice:', err?.message);
           });
+        }
+
+        // Transactional Outbox Event Publication (Atomic with order state mutation)
+        try {
+          const { OutboxPublisherService } = await import('../outbox/OutboxPublisherService.js');
+          await OutboxPublisherService.recordEvent(
+            client,
+            'order',
+            orderId,
+            `ORDER_${toState.toUpperCase()}`,
+            {
+              orderId,
+              previousStatus: fromState,
+              currentStatus: toState,
+              branchId: orderData.branchId,
+              franchiseId: orderData.franchiseId,
+              deliveryPartnerId: orderData.deliveryPartnerId || metadata.deliveryPartnerId,
+              actorUid: actor.uid,
+              actorRole: actor.role,
+              timestamp: nowIso,
+              metadata
+            }
+          );
+        } catch (outboxErr: any) {
+          console.warn('[OrderStateMachine] Outbox event record notice:', outboxErr.message);
         }
 
         await client.query('COMMIT').catch(() => {});

@@ -85,6 +85,7 @@ function isSlotActive(slot: RiderWorkSlot, day: number, minute: number): boolean
 }
 
 export class RiderWorkScheduleService {
+  private static quotaBackoffUntil = 0;
   private static initialized = false;
 
   static normalizeSchedule(uid: string, value: any): RiderWorkSchedule {
@@ -243,11 +244,19 @@ export class RiderWorkScheduleService {
   }
 
   static async reconcileDueShifts(): Promise<void> {
+    if (Date.now() < this.quotaBackoffUntil) {
+      return;
+    }
     let docs;
     try {
       const snap = await adminDb.collection(SCHEDULES).get();
       docs = snap.docs;
     } catch (error: any) {
+      if (error?.message?.includes('RESOURCE_EXHAUSTED')) {
+        this.quotaBackoffUntil = Date.now() + 15 * 60 * 1000;
+        console.warn('[RiderWorkScheduleService] Firestore quota exceeded. Backing off for 15 minutes.');
+        return;
+      }
       console.error('[RiderWorkScheduleService] Could not load work schedules:', error?.message || error);
       return;
     }

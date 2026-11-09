@@ -1,4 +1,5 @@
 import { query } from '../../lib/db.js';
+import { AuthoritativePricingResolver } from '../menu/AuthoritativePricingResolver.js';
 import { adminDb } from '../../config/firebase.js';
 import { getPaymentConfig } from '../../config/payment.config.js';
 import { PaymentProviderFactory } from './PaymentProviderFactory.js';
@@ -46,11 +47,13 @@ export class PaymentService {
     subtotal: number;
     taxes: number;
     deliveryFee: number;
+    packagingCharge: number;
     discountAmount: number;
     totalAmount: number;
   }> {
     let subtotal = 0;
     const validatedItems: any[] = [];
+    const resolvedBranchId = options?.branchId || 'main_branch';
 
     for (const item of items) {
       const itemId = item.menuItemId || item.id;
@@ -58,84 +61,105 @@ export class PaymentService {
         throw new Error('Invalid or missing menu item identifier.');
       }
 
-      let menuData: any = null;
+      let itemPrice = 0;
+      let itemName = item.name || 'Menu Item';
+      let itemImage = item.image || '';
+      const validatedAddons: any[] = [];
+      let isAuthoritativelyResolved = false;
 
-      if (!itemId.startsWith('item-')) {
-        let snap = await adminDb.collection('products').doc(itemId).get();
-        if (snap.exists) {
-          menuData = snap.data();
-        } else {
-          snap = await adminDb.collection('menu_items').doc(itemId).get();
+      // 1. Authoritative Pricing Resolution (PostgreSQL franchise_prices + size + crust + addons)
+      try {
+        const authPrice = await AuthoritativePricingResolver.resolveItemPrice({
+          branchId: resolvedBranchId,
+          productId: itemId,
+          size: item.size || item.variant,
+          crust: item.crust,
+          addons: item.addons
+        });
+        itemPrice = authPrice.unitPrice; // includes basePrice + sizePrice + crustPrice + addonsPrice
+        itemName = authPrice.productName || itemName;
+        for (const a of authPrice.addons) {
+          validatedAddons.push({
+            id: a.name,
+            name: a.name,
+            price: a.price
+          });
+        }
+        isAuthoritativelyResolved = true;
+      } catch (authErr: any) {
+        // Fall back to catalog check if not configured in branch overrides
+      }
+
+      if (!isAuthoritativelyResolved) {
+        let menuData: any = null;
+        if (!itemId.startsWith('item-')) {
+          let snap = await adminDb.collection('products').doc(itemId).get();
           if (snap.exists) {
             menuData = snap.data();
           } else {
-            snap = await adminDb.collection('combos').doc(itemId).get();
+            snap = await adminDb.collection('menu_items').doc(itemId).get();
             if (snap.exists) {
               menuData = snap.data();
+            } else {
+              snap = await adminDb.collection('combos').doc(itemId).get();
+              if (snap.exists) {
+                menuData = snap.data();
+              }
+            }
+          }
+        }
+
+        if (!menuData) {
+          throw new Error(`Item "${item.name || itemId}" was not found in our authoritative menu catalog.`);
+        }
+
+        if (menuData.isAvailable === false || menuData.isActive === false) {
+          throw new Error(`Item "${menuData.name || menuData.productName || item.name}" is currently unavailable.`);
+        }
+
+        const selectedSize = (item.size || item.variant || '').toLowerCase();
+        if (selectedSize && menuData.sizes && menuData.sizes[selectedSize]?.price) {
+          itemPrice = Number(menuData.sizes[selectedSize].price);
+        } else if (selectedSize && Array.isArray(menuData.variants)) {
+          const variant = menuData.variants.find((v: any) => (v.name || v.size || '').toLowerCase() === selectedSize);
+          if (variant && variant.price) {
+            itemPrice = Number(variant.price);
+          }
+        }
+
+        if (!itemPrice || itemPrice <= 0) {
+          itemPrice = Number(menuData.offerPrice ?? menuData.basePrice ?? menuData.price ?? menuData.base_price ?? 0);
+        }
+
+        if (itemPrice <= 0) {
+          throw new Error(`Unable to verify authoritative price for item "${menuData.name || item.name}".`);
+        }
+
+        itemName = menuData.productName || menuData.name || item.name || 'Artisan Pizza Item';
+        itemImage = menuData.imageUrl || menuData.image || item.image || '';
+
+        if (Array.isArray(item.addons) && item.addons.length > 0 && Array.isArray(menuData.addons)) {
+          for (const addon of item.addons) {
+            if (!addon) continue;
+            const authoritativeAddon = menuData.addons.find((a: any) => (
+              (addon.id && a.id === addon.id) ||
+              (addon.name && a.name && a.name.toLowerCase().trim() === String(addon.name).toLowerCase().trim())
+            ));
+            if (authoritativeAddon) {
+              const addonPrice = Number(authoritativeAddon.price || 0);
+              itemPrice += addonPrice;
+              validatedAddons.push({
+                id: authoritativeAddon.id || addon.id || addon.name,
+                name: authoritativeAddon.name || addon.name,
+                price: addonPrice
+              });
             }
           }
         }
       }
 
-      // Security check: Must exist in authoritative catalog
-      if (!menuData) {
-        throw new Error(`Item "${item.name || itemId}" was not found in our authoritative menu catalog.`);
-      }
-
-      if (menuData.isAvailable === false || menuData.isActive === false) {
-        throw new Error(`Item "${menuData.name || menuData.productName || item.name}" is currently unavailable.`);
-      }
-
-      // Authoritative Price Determination
-      let itemPrice = 0;
-      const selectedSize = (item.size || item.variant || '').toLowerCase();
-      if (selectedSize && menuData.sizes && menuData.sizes[selectedSize]?.price) {
-        itemPrice = Number(menuData.sizes[selectedSize].price);
-      } else if (selectedSize && Array.isArray(menuData.variants)) {
-        const variant = menuData.variants.find((v: any) => (v.name || v.size || '').toLowerCase() === selectedSize);
-        if (variant && variant.price) {
-          itemPrice = Number(variant.price);
-        }
-      }
-
-      if (!itemPrice || itemPrice <= 0) {
-        itemPrice = Number(menuData.offerPrice ?? menuData.basePrice ?? menuData.price ?? menuData.base_price ?? 0);
-      }
-
-      if (itemPrice <= 0) {
-        throw new Error(`Unable to verify authoritative price for item "${menuData.name || item.name}".`);
-      }
-
-      const itemName = menuData.productName || menuData.name || item.name || 'Artisan Pizza Item';
-      const itemImage = menuData.imageUrl || menuData.image || item.image || '';
-
       const qty = Math.max(1, Math.min(50, Math.floor(Number(item.quantity || 1))));
-      let addonsCost = 0;
-      const validatedAddons: any[] = [];
-      if (Array.isArray(item.addons) && item.addons.length > 0) {
-        if (!Array.isArray(menuData.addons) || menuData.addons.length === 0) {
-          throw new Error(`Addons are not supported for item "${itemName}".`);
-        }
-        for (const addon of item.addons) {
-          if (!addon) continue;
-          const authoritativeAddon = menuData.addons.find((a: any) => (
-            (addon.id && a.id === addon.id) ||
-            (addon.name && a.name && a.name.toLowerCase().trim() === String(addon.name).toLowerCase().trim())
-          ));
-          if (!authoritativeAddon) {
-            throw new Error(`Addon "${addon.name || addon.id}" is not valid or available for item "${itemName}".`);
-          }
-          const addonPrice = Number(authoritativeAddon.price || 0);
-          addonsCost += addonPrice;
-          validatedAddons.push({
-            id: authoritativeAddon.id || addon.id || addon.name,
-            name: authoritativeAddon.name || addon.name,
-            price: addonPrice
-          });
-        }
-      }
-
-      subtotal += (itemPrice + addonsCost) * qty;
+      subtotal += itemPrice * qty;
 
       validatedItems.push({
         id: itemId,
@@ -156,9 +180,9 @@ export class PaymentService {
     if (deliveryType === 'delivery') {
       if (options?.customDeliveryFee != null) {
         deliveryFee = Math.max(0, Number(options.customDeliveryFee));
-      } else if (options?.branchId) {
+      } else if (resolvedBranchId) {
         try {
-          const bDoc = await adminDb.collection('franchises').doc(options.branchId).get();
+          const bDoc = await adminDb.collection('franchises').doc(resolvedBranchId).get();
           const bData = bDoc.data();
           const dSettings = bData?.deliverySettings;
           const baseFee = Number(dSettings?.deliveryFee ?? 30);
@@ -175,14 +199,33 @@ export class PaymentService {
     // 5% GST
     const taxes = Math.round(subtotal * 0.05);
 
+    // Authoritative packaging charge from PostgreSQL branch settings
+    let packagingCharge = 0;
+    try {
+      const branchRes = await query('SELECT tax_settings FROM restaurant_branches WHERE id = $1 LIMIT 1', [resolvedBranchId]);
+      if (branchRes.rows.length > 0 && branchRes.rows[0].tax_settings?.packagingCharge != null) {
+        packagingCharge = Number(branchRes.rows[0].tax_settings.packagingCharge);
+      } else {
+        packagingCharge = 20;
+      }
+    } catch {
+      packagingCharge = 20;
+    }
+
     // Optional Coupon Discount re-evaluation
     let discountAmount = 0;
     if (options?.couponCode) {
       try {
         const cCode = options.couponCode.toUpperCase().trim();
-        const cSnap = await adminDb.collection('coupons').doc(cCode).get();
-        if (cSnap.exists) {
-          const cData = cSnap.data()!;
+        let cSnap = await adminDb.collection('coupons').doc(cCode).get();
+        let cData = cSnap.exists ? cSnap.data() : null;
+        if (!cData) {
+          const qSnap = await adminDb.collection('coupons').where('code', '==', cCode).limit(1).get();
+          if (!qSnap.empty) {
+            cData = qSnap.docs[0].data();
+          }
+        }
+        if (cData) {
           const now = new Date();
           const startsAt = cData.startsAt ? new Date(cData.startsAt) : null;
           const expiresAt = cData.expiresAt ? new Date(cData.expiresAt) : null;
@@ -206,13 +249,14 @@ export class PaymentService {
       }
     }
 
-    const totalAmount = Math.max(0, subtotal - discountAmount) + deliveryFee + taxes;
+    const totalAmount = Math.max(0, subtotal - discountAmount) + deliveryFee + taxes + packagingCharge;
 
     return {
       validatedItems,
       subtotal,
       taxes,
       deliveryFee,
+      packagingCharge,
       discountAmount,
       totalAmount,
     };

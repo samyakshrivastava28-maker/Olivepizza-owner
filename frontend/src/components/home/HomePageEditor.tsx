@@ -44,6 +44,7 @@ import toast from 'react-hot-toast';
 import PropertyPanel from './editor/PropertyPanel';
 import InteractiveGuideModal from './editor/InteractiveGuideModal';
 import PerformanceDashboardModal from './editor/PerformanceDashboardModal';
+import StitchGeneratorModal from './StitchGeneratorModal';
 import { PREDEFINED_TEMPLATES } from '../../utils/HomePageTemplates';
 
 interface HomePageEditorProps {
@@ -197,6 +198,7 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
   // New Modals
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showPerfModal, setShowPerfModal] = useState(false);
+  const [showStitchModal, setShowStitchModal] = useState(false);
 
   // Apply sensible Olive Pizza visual style presets
   const applyPreset = (preset: ThemePreset) => {
@@ -523,6 +525,17 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
 
         {/* Device Mode Switcher & Primary Actions */}
         <div className="flex items-center gap-2 sm:gap-3">
+          {/* Generate with Google Stitch AI */}
+          <button
+            type="button"
+            onClick={() => setShowStitchModal(true)}
+            className="p-2 sm:px-3 sm:py-2 bg-gradient-to-r from-orange-500/20 via-amber-500/20 to-emerald-500/20 hover:from-orange-500/30 hover:to-emerald-500/30 border border-orange-500/40 text-orange-400 hover:text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+            title="Generate custom visual layout with Google Stitch"
+          >
+            <Sparkles className="w-4 h-4 text-orange-400" />
+            <span className="hidden md:inline">Generate with Stitch</span>
+          </button>
+
           {/* Quick Guide */}
           <button
             type="button"
@@ -1748,6 +1761,20 @@ export default function HomePageEditor({ initialSchema, onSave, onClose, isOffic
 
       {/* Speed, Health & Media Performance Dashboard Modal */}
       <PerformanceDashboardModal isOpen={showPerfModal} onClose={() => setShowPerfModal(false)} />
+
+      {/* Google Stitch Visual Design Modal */}
+      <StitchGeneratorModal
+        isOpen={showStitchModal}
+        onClose={() => setShowStitchModal(false)}
+        onApplyToEditor={(newSchema) => {
+          setSchema(newSchema);
+          setHasUnsavedChanges(true);
+          toast.success('Applied Google Stitch layout to editor!');
+        }}
+        onPublishDirectly={async (newSchema) => {
+          await onSave(newSchema, true);
+        }}
+      />
     </div>
   );
 }

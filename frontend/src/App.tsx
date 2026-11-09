@@ -45,32 +45,27 @@ const FranchiseWorkspace = lazyWithRetry(() => import('./pages/FranchiseWorkspac
 const RestaurantControlPage = lazyWithRetry(() => import('./pages/RestaurantControlPage'));
 const PrivacyGovernance = lazyWithRetry(() => import('./pages/PrivacyGovernance'));
 
-import { useAuthStore, isAuthorizedOwnerEmail } from './lib/store';
+import { useAuthStore } from './lib/store';
 import { AppRestrictedScreen } from './components/common/AppRestrictedScreen';
 
 function WorkspaceRedirect() {
   const { user, role } = useAuthStore();
-  const isMasterOwner = !user?.email ? false : (
-    isAuthorizedOwnerEmail(user.email) ||
-    role === 'owner' ||
-    role === 'admin' ||
-    role === 'developer' ||
-    role === 'platform_owner'
-  );
+  const isMasterOwner = role === 'owner' || role === 'platform_owner';
 
   if (isMasterOwner) {
     return <Navigate to="/home" replace />;
   }
 
-  if (role === 'restaurant_manager' || user?.applicationAccess?.app_restaurant_management) {
+  const allowedApps = user?.allowedApps || [];
+  if (allowedApps.includes('RESTAURANT_MANAGER') || role === 'restaurant_manager') {
     return <Navigate to="/restaurant" replace />;
   }
 
-  if (role === 'franchise_manager' || role === 'franchise_owner' || user?.applicationAccess?.app_franchise_management) {
+  if (allowedApps.includes('FRANCHISE_MANAGER') || role === 'franchise_manager' || role === 'franchise_owner') {
     return <Navigate to="/franchises" replace />;
   }
 
-  if (role === 'delivery_partner' || user?.applicationAccess?.app_delivery) {
+  if (allowedApps.includes('DELIVERY') || role === 'delivery_partner') {
     return <Navigate to="/delivery" replace />;
   }
 

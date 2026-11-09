@@ -54,6 +54,7 @@ export interface ArchiveResult {
 }
 
 export class OrderPersistenceArchiveService {
+  private static quotaBackoffUntil = 0;
   /**
    * Synchronizes a live order into PostgreSQL canonical tables idempotently.
    * If PostgreSQL persistence fails, records the pending status in Firestore without breaking live flow.
@@ -632,6 +633,10 @@ export class OrderPersistenceArchiveService {
           o.cashier_name,
           o.terminal_id,
           o.cancellation_reason,
+          o.delivery_partner_id,
+          o.delivery_partner_name,
+          o.delivery_partner_phone,
+          o.partner_assigned_at,
           o.delivered_at,
           o.created_at,
           COALESCE(
@@ -698,6 +703,11 @@ export class OrderPersistenceArchiveService {
         cashierName: r.cashier_name,
         terminalId: r.terminal_id,
         cancellationReason: r.cancellation_reason,
+        deliveryPartnerId: r.delivery_partner_id || null,
+        riderId: r.delivery_partner_id || null,
+        deliveryPartnerName: r.delivery_partner_name || null,
+        deliveryPartnerPhone: r.delivery_partner_phone || null,
+        partnerAssignedAt: r.partner_assigned_at || null,
         deliveredAt: r.delivered_at,
         createdAt: r.created_at,
         isArchived: true,
@@ -987,7 +997,12 @@ export class OrderPersistenceArchiveService {
         }
       }
     } catch (workerErr: any) {
-      console.warn('[OrderPersistence] Reconciliation worker sweep notice:', workerErr.message);
+      if (workerErr?.message?.includes('RESOURCE_EXHAUSTED')) {
+        this.quotaBackoffUntil = Date.now() + 15 * 60 * 1000;
+        console.warn('[OrderPersistence] Firestore quota exceeded. Reconciliation backoff for 15 minutes.');
+      } else {
+        console.warn('[OrderPersistence] Reconciliation worker sweep notice:', workerErr.message);
+      }
     }
 
     return { synced, archived, errors };

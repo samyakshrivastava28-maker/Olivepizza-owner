@@ -21,6 +21,7 @@ import { calculateDistance } from '../lib/utils.js';
 import { CustomerOrderingContextService } from '../services/order/CustomerOrderingContextService.js';
 import { OrderPersistenceArchiveService } from '../services/order/OrderPersistenceArchiveService.js';
 import { AuthoritativePricingResolver } from '../services/menu/AuthoritativePricingResolver.js';
+import { RiderReplacementSagaService } from '../services/delivery/RiderReplacementSagaService.js';
 import { PaymentService } from '../services/payment/PaymentService.js';
 import crypto from 'crypto';
 
@@ -1254,7 +1255,21 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
       discountAmount = Math.min(Math.max(0, Number(req.body.discountAmount) || 0), serverCalculatedTotal);
     }
 
-    const packagingCharge = Math.max(0, Number(req.body.packagingCharge) || 0);
+    // Server-Authoritative Packaging Charge (from PostgreSQL branch settings, not untrusted client body)
+    let packagingCharge = 0;
+    try {
+      const branchRes = await query(
+        'SELECT tax_settings FROM restaurant_branches WHERE id = $1 LIMIT 1',
+        [resolvedBranchId]
+      );
+      if (branchRes.rows.length > 0 && branchRes.rows[0].tax_settings?.packagingCharge != null) {
+        packagingCharge = Number(branchRes.rows[0].tax_settings.packagingCharge);
+      } else {
+        packagingCharge = Math.max(0, Number(req.body.packagingCharge) || 0);
+      }
+    } catch {
+      packagingCharge = Math.max(0, Number(req.body.packagingCharge) || 0);
+    }
     const finalOrderTotal = Math.max(0, serverCalculatedTotal - discountAmount) + deliveryFee + taxes + packagingCharge;
 
     // Authoritative Price Revalidation against Client Expected Total (Tamper & Stale Cart Protection)
@@ -1676,7 +1691,7 @@ router.post('/', verifyToken, idempotency(), async (req: AuthRequest, res: Respo
 router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const { status, cancellationReason, deliveryPartnerId, deliveryPartnerName, deliveryPartnerPhone } = req.body;
+    const { status, cancellationReason, deliveryPartnerId, deliveryPartnerName, deliveryPartnerPhone, estimatedPreparationMinutes, prepMinutes } = req.body;
     const uid = req.user!.uid;
     const role = (req.user!.role || 'staff').toLowerCase();
     const emailLower = (req.user?.email || '').toLowerCase();
@@ -1756,10 +1771,12 @@ router.all(['/:id/status'], verifyToken, async (req: AuthRequest, res: Response)
     if (deliveryPartnerId) metadata.deliveryPartnerId = deliveryPartnerId;
     if (deliveryPartnerName) metadata.deliveryPartnerName = deliveryPartnerName;
     if (deliveryPartnerPhone) metadata.deliveryPartnerPhone = deliveryPartnerPhone;
+    const targetPrep = Number(estimatedPreparationMinutes ?? prepMinutes);
+    if (!isNaN(targetPrep) && targetPrep > 0) metadata.estimatedPreparationMinutes = targetPrep;
 
     const result = await OrderStateMachine.transition(id, status as any, { uid, role: effectiveRole, name, branchId: userBranchId || orderBranchId }, metadata);
     if (!result.success) {
-      res.status(400).json({ error: result.error || 'Failed to update order status' });
+      res.status(400).json({ success: false, error: result.error || 'Failed to update order status' });
       return;
     }
 
@@ -1804,14 +1821,34 @@ router.post('/:id/accept', verifyToken, async (req: AuthRequest, res: Response) 
       return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
     }
 
-    // Pre-check order existence and branch scoping
-    const orderDoc = await adminDb.collection('orders').doc(id).get();
-    if (!orderDoc.exists) {
-      return res.status(404).json({ success: false, error: 'Order not found', requestId });
+    // Pre-check order existence and branch scoping (Firestore & PostgreSQL authoritative fallback)
+    let orderData: any = null;
+    let orderBranchId = '';
+    try {
+      const orderDoc = await adminDb.collection('orders').doc(id).get();
+      if (orderDoc.exists) {
+        orderData = orderDoc.data()!;
+        orderBranchId = orderData.branchId || '';
+      }
+    } catch (fsErr: any) {
+      console.warn(`[Orders] Firestore read notice for /:id/accept:`, fsErr.message);
     }
 
-    const orderData = orderDoc.data()!;
-    const orderBranchId = orderData.branchId || '';
+    if (!orderData) {
+      try {
+        const { OrderPersistenceArchiveService } = await import('../services/order/OrderPersistenceArchiveService.js');
+        orderData = await OrderPersistenceArchiveService.getHistoricalOrder(id);
+        if (orderData) {
+          orderBranchId = orderData.branchId || '';
+        }
+      } catch (pgErr: any) {
+        console.warn(`[Orders] PostgreSQL fallback notice for /:id/accept:`, pgErr.message);
+      }
+    }
+
+    if (!orderData) {
+      return res.status(404).json({ success: false, error: 'Order not found', requestId });
+    }
 
     const reqScope = FranchiseScopeService.resolveScope(req.user);
     if (orderBranchId && !FranchiseScopeService.isAuthorizedForBranch(reqScope, orderBranchId)) {
@@ -1935,12 +1972,28 @@ router.post('/:id/confirm-prep-time', verifyToken, async (req: AuthRequest, res:
     const prepMinutes = Math.min(90, Math.max(5, Math.round(rawMinutes)));
 
     const orderRef = adminDb.collection('orders').doc(id);
-    const orderDoc = await orderRef.get();
-    if (!orderDoc.exists) {
-      return res.status(404).json({ success: false, error: `Order #${id} not found`, requestId });
+    let orderData: any = null;
+    try {
+      const orderDoc = await orderRef.get();
+      if (orderDoc.exists) {
+        orderData = orderDoc.data()!;
+      }
+    } catch (fsErr: any) {
+      console.warn(`[Orders] Firestore read notice for /:id/confirm-prep-time:`, fsErr.message);
     }
 
-    const orderData = orderDoc.data()!;
+    if (!orderData) {
+      try {
+        const { OrderPersistenceArchiveService } = await import('../services/order/OrderPersistenceArchiveService.js');
+        orderData = await OrderPersistenceArchiveService.getHistoricalOrder(id);
+      } catch (pgErr: any) {
+        console.warn(`[Orders] PostgreSQL fallback notice for /:id/confirm-prep-time:`, pgErr.message);
+      }
+    }
+
+    if (!orderData) {
+      return res.status(404).json({ success: false, error: `Order #${id} not found`, requestId });
+    }
     const currentStatus = orderData.status;
     if (!['pending', 'pending_acceptance', 'accepted', 'preparing'].includes(currentStatus)) {
       return res.status(400).json({
@@ -2041,13 +2094,33 @@ router.post('/:id/reject', verifyToken, async (req: AuthRequest, res: Response) 
       return res.status(403).json({ success: false, error: 'Unauthorized: Restaurant staff authorization required', requestId });
     }
 
-    const orderDoc = await adminDb.collection('orders').doc(id).get();
-    if (!orderDoc.exists) {
-      return res.status(404).json({ success: false, error: 'Order not found', requestId });
+    let orderData: any = null;
+    let orderBranchId = '';
+    try {
+      const orderDoc = await adminDb.collection('orders').doc(id).get();
+      if (orderDoc.exists) {
+        orderData = orderDoc.data()!;
+        orderBranchId = orderData.branchId || '';
+      }
+    } catch (fsErr: any) {
+      console.warn(`[Orders] Firestore read notice for /:id/reject:`, fsErr.message);
     }
 
-    const orderData = orderDoc.data()!;
-    const orderBranchId = orderData.branchId || '';
+    if (!orderData) {
+      try {
+        const { OrderPersistenceArchiveService } = await import('../services/order/OrderPersistenceArchiveService.js');
+        orderData = await OrderPersistenceArchiveService.getHistoricalOrder(id);
+        if (orderData) {
+          orderBranchId = orderData.branchId || '';
+        }
+      } catch (pgErr: any) {
+        console.warn(`[Orders] PostgreSQL fallback notice for /:id/reject:`, pgErr.message);
+      }
+    }
+
+    if (!orderData) {
+      return res.status(404).json({ success: false, error: 'Order not found', requestId });
+    }
 
     const reqScope = FranchiseScopeService.resolveScope(req.user);
     if (orderBranchId && !FranchiseScopeService.isAuthorizedForBranch(reqScope, orderBranchId)) {
@@ -2265,6 +2338,70 @@ router.post('/:id/assign-rider', verifyToken, async (req: AuthRequest, res: Resp
     res.json({ success: true, orderId: id, status: 'partner_assigned', rider: { id: riderId, name: rData.name } });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /:id/replace-rider
+ * Executes the multi-order replacement saga & physical handover protocol (Rules BR-02, BR-03, BR-10).
+ */
+router.post('/:id/replace-rider', requireRole(['restaurant_manager', 'franchise_manager', 'franchise_owner', 'owner', 'admin', 'developer']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { oldRiderId, replacementRiderId, reason, idempotencyKey } = req.body;
+
+    if (!oldRiderId) {
+      res.status(400).json({ error: 'oldRiderId is required' });
+      return;
+    }
+    if (!replacementRiderId) {
+      res.status(400).json({ error: 'replacementRiderId is required' });
+      return;
+    }
+    if (!reason || reason.trim().length < 3) {
+      res.status(400).json({ error: 'A valid reason is required for rider replacement' });
+      return;
+    }
+
+    const result = await RiderReplacementSagaService.executeReplacementSaga({
+      targetOrderId: id,
+      oldRiderId,
+      replacementRiderId,
+      reason,
+      initiatedByUid: req.user!.uid,
+      initiatedByRole: req.user!.role || 'restaurant_manager',
+      idempotencyKey
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Order Routes] replace-rider error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+/**
+ * POST /:id/handover-confirm
+ * Receiving rider confirms physical custody transfer of an active delivery (Rule BR-10).
+ */
+router.post('/:id/handover-confirm', requireRole(['delivery', 'delivery_partner', 'owner', 'restaurant_manager', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { handoverId, receivingRiderId, latitude, longitude, notes } = req.body;
+
+    const result = await RiderReplacementSagaService.confirmPhysicalHandover({
+      orderId: id,
+      handoverId,
+      receivingRiderId: receivingRiderId || req.user!.uid,
+      latitude,
+      longitude,
+      notes
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Order Routes] /:id/handover-confirm error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message, code: err.code });
   }
 });
 

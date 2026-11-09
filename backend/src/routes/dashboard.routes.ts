@@ -24,11 +24,10 @@ router.get('/summary', async (req: AuthRequest, res: Response) => {
       WITH tz_orders AS (
         SELECT 
           id,
-          order_number,
           order_status,
           total_amount,
           created_at,
-          (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') as local_created_at
+          (created_at AT TIME ZONE 'Asia/Kolkata') as local_created_at
         FROM canonical_orders
         WHERE ($1::text IS NULL OR branch_id = $1::text)
       )
@@ -40,7 +39,7 @@ router.get('/summary', async (req: AuthRequest, res: Response) => {
         
         COALESCE(SUM(total_amount) FILTER (
           WHERE DATE(local_created_at) = DATE(NOW() AT TIME ZONE 'Asia/Kolkata')
-            AND order_status NOT IN ('CANCELLED', 'REJECTED')
+            AND UPPER(order_status) NOT IN ('CANCELLED', 'REJECTED')
         ), 0)::float AS today_revenue,
 
         -- Month stats
@@ -50,19 +49,19 @@ router.get('/summary', async (req: AuthRequest, res: Response) => {
         
         COALESCE(SUM(total_amount) FILTER (
           WHERE date_trunc('month', local_created_at) = date_trunc('month', NOW() AT TIME ZONE 'Asia/Kolkata')
-            AND order_status NOT IN ('CANCELLED', 'REJECTED')
+            AND UPPER(order_status) NOT IN ('CANCELLED', 'REJECTED')
         ), 0)::float AS month_revenue,
 
         -- Lifetime stats
         COALESCE(COUNT(id), 0)::int AS lifetime_orders_count,
-        COALESCE(SUM(total_amount) FILTER (WHERE order_status NOT IN ('CANCELLED', 'REJECTED')), 0)::float AS lifetime_revenue,
+        COALESCE(SUM(total_amount) FILTER (WHERE UPPER(order_status) NOT IN ('CANCELLED', 'REJECTED')), 0)::float AS lifetime_revenue,
 
         -- Active Pipeline counts
-        COALESCE(COUNT(id) FILTER (WHERE order_status IN ('PENDING', 'PLACED', 'CREATED', 'NEW_ORDER', 'NEW')), 0)::int AS pending_count,
-        COALESCE(COUNT(id) FILTER (WHERE order_status IN ('CONFIRMED', 'PREPARING', 'KITCHEN', 'READY', 'ACCEPTED')), 0)::int AS preparing_count,
-        COALESCE(COUNT(id) FILTER (WHERE order_status IN ('OUT_FOR_DELIVERY', 'OUT_FOR_DELIVERY', 'PICKED_UP', 'PARTNER_ASSIGNED')), 0)::int AS out_for_delivery_count,
-        COALESCE(COUNT(id) FILTER (WHERE order_status IN ('DELIVERED', 'COMPLETED')), 0)::int AS delivered_count,
-        COALESCE(COUNT(id) FILTER (WHERE order_status IN ('CANCELLED', 'REJECTED', 'FAILED')), 0)::int AS cancelled_count
+        COALESCE(COUNT(id) FILTER (WHERE UPPER(order_status) IN ('PENDING', 'PLACED', 'CREATED', 'NEW_ORDER', 'NEW', 'PAYMENT_PENDING', 'PENDING_ACCEPTANCE')), 0)::int AS pending_count,
+        COALESCE(COUNT(id) FILTER (WHERE UPPER(order_status) IN ('CONFIRMED', 'PREPARING', 'KITCHEN', 'READY', 'ACCEPTED', 'BAKING', 'READY_FOR_PICKUP')), 0)::int AS preparing_count,
+        COALESCE(COUNT(id) FILTER (WHERE UPPER(order_status) IN ('OUT_FOR_DELIVERY', 'PICKED_UP', 'PARTNER_ASSIGNED')), 0)::int AS out_for_delivery_count,
+        COALESCE(COUNT(id) FILTER (WHERE UPPER(order_status) IN ('DELIVERED', 'COMPLETED')), 0)::int AS delivered_count,
+        COALESCE(COUNT(id) FILTER (WHERE UPPER(order_status) IN ('CANCELLED', 'REJECTED', 'FAILED')), 0)::int AS cancelled_count
       FROM tz_orders;
     `;
 
@@ -85,25 +84,36 @@ router.get('/summary', async (req: AuthRequest, res: Response) => {
     const ordersQuery = `
       SELECT 
         o.id,
-        o.order_number as "orderNumber",
-        o.order_status as "status",
-        o.customer_name as "customerName",
-        o.customer_phone as "customerPhone",
-        o.customer_email as "customerEmail",
+        COALESCE(o.daily_order_no::text, o.permanent_bill_no::text, o.id) as "orderNumber",
+        UPPER(o.order_status) as "status",
+        COALESCE(o.customer_name, 'Guest Customer') as "customerName",
+        COALESCE(o.customer_phone, '') as "customerPhone",
         o.total_amount as "totalAmount",
+        o.subtotal,
         o.payment_method as "paymentMethod",
-        o.delivery_type as "deliveryType",
+        UPPER(COALESCE(b.payment_status, o.payment_status, 'PENDING')) as "paymentStatus",
+        o.order_type as "deliveryType",
         o.branch_id as "branchId",
+        o.franchise_id as "franchiseId",
         o.delivery_partner_id as "deliveryPartnerId",
-        o.delivery_partner_name as "deliveryPartnerName",
+        dp.name as "deliveryPartnerName",
         o.delivery_address as "deliveryAddress",
-        o.items,
         o.created_at as "createdAt",
         o.updated_at as "updatedAt",
-        b.billing_number as "billingNumber",
-        b.payment_status as "paymentStatus"
+        b.permanent_bill_no as "billingNumber",
+        COALESCE(
+          (SELECT json_agg(json_build_object(
+            'id', oi.id,
+            'name', oi.item_name,
+            'quantity', oi.quantity,
+            'price', oi.unit_price,
+            'total', oi.line_total
+          )) FROM canonical_order_items oi WHERE oi.order_id = o.id),
+          '[]'::json
+        ) as items
       FROM canonical_orders o
-      LEFT JOIN canonical_bills b ON o.id = b.order_id
+      LEFT JOIN canonical_bills b ON b.order_id = o.id
+      LEFT JOIN delivery_partners dp ON dp.id = o.delivery_partner_id
       WHERE ($1::text IS NULL OR o.branch_id = $1::text)
       ORDER BY o.created_at DESC
       LIMIT 150;
@@ -147,7 +157,7 @@ router.get('/customers', async (req: AuthRequest, res: Response) => {
     
     let sql = `
       SELECT 
-        firebase_uid as id,
+        id,
         name,
         email,
         phone,

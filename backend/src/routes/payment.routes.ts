@@ -387,7 +387,7 @@ router.get('/history', verifyToken, async (req: AuthRequest, res: Response) => {
 // ─── 4A. COD Cash Collection (Rider / Manager Auth Required) ───────────────────
 router.post('/cod/cash-collect', verifyToken, async (req: AuthRequest, res: Response) => {
   try {
-    const { orderId, amount, notes } = req.body;
+    const { orderId, amount, notes, lat, lng, riderLat, riderLng, clientCoordinates } = req.body;
     const user = req.user!;
 
     if (!orderId) {
@@ -402,6 +402,11 @@ router.post('/cod/cash-collect', verifyToken, async (req: AuthRequest, res: Resp
       return;
     }
 
+    const resolvedCoords = clientCoordinates || (
+      (lat != null && lng != null) ? { lat: Number(lat), lng: Number(lng) } :
+      (riderLat != null && riderLng != null) ? { lat: Number(riderLat), lng: Number(riderLng) } : undefined
+    );
+
     const result = await CODCollectionService.collectCash({
       orderId,
       actorUid: user.uid,
@@ -409,6 +414,7 @@ router.post('/cod/cash-collect', verifyToken, async (req: AuthRequest, res: Resp
       actorName: (user as any).name || 'Delivery Partner',
       actorBranchId: (user as any).branchId,
       clientAmount: amount !== undefined ? Number(amount) : undefined,
+      clientCoordinates: resolvedCoords,
       notes,
       ipAddress: (req.headers['x-forwarded-for'] as string) || req.ip || '127.0.0.1',
     });

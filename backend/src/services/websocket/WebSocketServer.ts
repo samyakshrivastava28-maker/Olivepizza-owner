@@ -19,6 +19,7 @@ import { adminAuth, adminDb } from '../../config/firebase.js';
 import { sanitizeError } from '../../utils/logSanitizer.js';
 import { redisEventBusBridge } from '../eventBus/RedisEventBusBridge.js';
 import { query } from '../../lib/db.js';
+import { verifyTrackingToken } from '../../utils/trackingToken.js';
 
 export interface AuthoritativeUserInfo {
   role: string;
@@ -371,12 +372,15 @@ class OliveWebSocketServer {
 
           // 3. Subscribe to specific order updates
           if (msg.type === 'subscribe_order' && msg.orderId) {
-            if (!client.uid || client.uid === 'anonymous') {
-              this.safeSend(ws, { type: 'error', data: { message: 'Authentication required to subscribe to order updates' } });
+            const orderId = String(msg.orderId).trim();
+            const rawTrackingToken = msg.trackingToken ? String(msg.trackingToken).trim() : null;
+            const hasValidTrackingToken = rawTrackingToken ? verifyTrackingToken(rawTrackingToken) === orderId : false;
+
+            if ((!client.uid || client.uid === 'anonymous') && !hasValidTrackingToken) {
+              this.safeSend(ws, { type: 'error', data: { message: 'Authentication or valid tracking token required to subscribe to order updates' } });
               return;
             }
 
-            const orderId = String(msg.orderId).trim();
             try {
               const orderDoc = await adminDb.collection('orders').doc(orderId).get();
               if (!orderDoc.exists) {
@@ -389,10 +393,14 @@ class OliveWebSocketServer {
               const isStaff = ['restaurant_manager', 'branch_manager', 'cashier', 'kitchen_staff'].includes(userRole);
               const isAssignedDriver = ['delivery_partner', 'rider', 'delivery'].includes(userRole) &&
                 (orderData.deliveryPartnerId === client.uid || orderData.assignedDeliveryPartnerId === client.uid);
-              const isOrderOwner = (orderData.userId === client.uid || orderData.customerUid === client.uid);
-              const isBranchStaff = isStaff && (!client.branchId || client.branchId === orderData.branchId);
+              const isOrderOwner = (
+                orderData.userId === client.uid || 
+                orderData.customerUid === client.uid || 
+                orderData.customerId === client.uid
+              );
+              const isBranchStaff = isStaff && Boolean(client.branchId && client.branchId === orderData.branchId);
 
-              if (!isPrivileged && !isOrderOwner && !isBranchStaff && !isAssignedDriver) {
+              if (!isPrivileged && !isOrderOwner && !isBranchStaff && !isAssignedDriver && !hasValidTrackingToken) {
                 this.safeSend(ws, { type: 'error', data: { message: 'Forbidden: You do not have access to this order', orderId } });
                 return;
               }

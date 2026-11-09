@@ -1,4 +1,4 @@
-﻿import express from 'express';
+import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import orderRoutes from './routes/order.routes.js';
@@ -460,6 +460,7 @@ import homePageManagerRoutes from './routes/homePageManager.routes.js';
 app.use('/home-page-manager', homePageManagerRoutes);
 app.use('/api/home-page-manager', homePageManagerRoutes);
 app.use('/homepage', homePageManagerRoutes);
+app.use('/api/homepage', homePageManagerRoutes);
 
 import restaurantRoutes from './routes/restaurant.routes.js';
 import restaurantManagerRoutes from './routes/restaurantManager.routes.js';

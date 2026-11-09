@@ -162,14 +162,7 @@ export class DeliveryEtaService {
           new Promise((_, reject) => setTimeout(() => reject(new Error('Firestore timeout')), 3000))
         ]).catch(() => {});
 
-        await Promise.race([
-          query(`
-            UPDATE canonical_orders
-            SET delivery_eta = $1, updated_at = NOW()
-            WHERE id = $2
-          `, [etaTimestamp, orderId]),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Postgres timeout')), 3000))
-        ]).catch(() => {});
+
       } catch (persistErr: any) {
         console.warn(`[DeliveryEtaService] Persistence notice for ${orderId}:`, persistErr?.message);
       }

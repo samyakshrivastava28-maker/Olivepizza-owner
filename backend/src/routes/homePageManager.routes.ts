@@ -99,6 +99,52 @@ router.get('/templates/:id', (req, res) => {
   res.json({ success: true, template });
 });
 
+// ============================================================================
+// STITCH SDUI GENERATION ROUTE: Dispatches to Olive Pizza AI / Google Stitch Pipeline
+// ============================================================================
+router.post('/generate-stitch', async (req: AuthRequest, res) => {
+  try {
+    const { prompt, deviceType = 'MOBILE', existingScreenResource } = req.body;
+    if (!prompt && !existingScreenResource) {
+      return res.status(400).json({ success: false, error: 'A design prompt or existing screen resource is required.' });
+    }
+
+    const aiServiceUrl = process.env.OLIVE_PIZZA_AI_URL || 'http://localhost:3051';
+    console.log(`[HomePageManager] Requesting Stitch generation from Olive Pizza AI at ${aiServiceUrl}...`);
+
+    const response = await fetch(`${aiServiceUrl}/api/ai/sdui/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-service': 'olive-main-backend',
+        ...(req.headers.authorization ? { Authorization: req.headers.authorization } : {})
+      },
+      body: JSON.stringify({
+        prompt,
+        targetPage: 'homepage',
+        deviceType,
+        existingScreenResource
+      })
+    });
+
+    const data: any = await response.json();
+    if (!response.ok || !data.success) {
+      return res.status(response.status >= 400 ? response.status : 500).json({
+        success: false,
+        error: data.error || 'Google Stitch design generation failed.'
+      });
+    }
+
+    res.json(data);
+  } catch (error: any) {
+    console.error('[HomePageManager] Error in /generate-stitch:', error.message);
+    res.status(500).json({
+      success: false,
+      error: `Failed to connect to Google Stitch design service: ${error.message}`
+    });
+  }
+});
+
 // Save a draft without publishing it live
 router.post('/save', async (req: AuthRequest, res) => {
   try {
@@ -144,26 +190,33 @@ router.post('/save', async (req: AuthRequest, res) => {
   }
 });
 
-// Publish directly from Editor with concurrency lock and PostgreSQL persistence
-router.post('/publish', async (req: AuthRequest, res) => {
-  let lockAcquired = false;
-  const franchiseId = req.body.franchiseId || req.user?.franchiseId || 'fra_primary';
-  const branchId = req.body.branchId || req.user?.branchId || 'main_branch';
+// ============================================================================
+// CORE PUBLISH PIPELINE: PostgreSQL Transaction + Redis Snapshot + Firestore Sync
+// ============================================================================
+async function executePublishPipeline({
+  schema,
+  franchiseId,
+  branchId,
+  userId,
+}: {
+  schema: PageSchema;
+  franchiseId: string;
+  branchId: string;
+  userId: string;
+}) {
   const lockKey = `olive:lock:homepage_publish:${franchiseId}:${branchId}`;
+  let lockAcquired = false;
 
   try {
-    const schema: PageSchema = req.body.schema;
-    if (!schema) {
-      return res.status(400).json({ success: false, error: 'Schema is required' });
-    }
-
     // Backend Validation of Schema Actions
     if (schema.type === 'BUILT_IN' || schema.type === 'CUSTOM_SCHEMA') {
       for (const section of schema.sections || []) {
         if (section.config && section.config.buttonAction) {
           const isValid = ActionRegistry.validate(section.config.buttonAction);
           if (!isValid) {
-            return res.status(400).json({ success: false, error: `Invalid action in section ${section.id}: ${section.config.buttonAction}` });
+            const valErr: any = new Error(`Invalid action in section ${section.id}: ${section.config.buttonAction}`);
+            valErr.status = 400;
+            throw valErr;
           }
         }
       }
@@ -172,12 +225,14 @@ router.post('/publish', async (req: AuthRequest, res) => {
     // Concurrency Lock
     lockAcquired = await redisService.acquireLock(lockKey, 8);
     if (!lockAcquired && process.env.NODE_ENV !== 'test') {
-      return res.status(409).json({ success: false, error: 'Another publish is currently processing. Please wait a moment.' });
+      const lockErr: any = new Error('Another publish is currently processing. Please wait a moment.');
+      lockErr.status = 409;
+      throw lockErr;
     }
 
     schema.metadata = {
       ...schema.metadata,
-      publishedBy: req.user?.uid || 'owner',
+      publishedBy: userId,
       publishedAt: new Date().toISOString()
     };
     schema.versionId = `v${Date.now()}`;
@@ -212,7 +267,7 @@ router.post('/publish', async (req: AuthRequest, res) => {
         publishedVersion,
         JSON.stringify(schema),
         JSON.stringify(schema.metadata || {}),
-        req.user?.uid || 'owner'
+        userId
       ]);
 
       await client.query('COMMIT');
@@ -244,16 +299,136 @@ router.post('/publish', async (req: AuthRequest, res) => {
       franchiseId,
       branchId,
       updatedAt: new Date().toISOString(),
-      updatedBy: req.user?.uid || 'owner'
+      updatedBy: userId
     }, { merge: true }).catch(() => {});
 
-    res.json({ success: true, config: schema, version: publishedVersion, status: 'PUBLISHED' });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
+    return { config: schema, version: publishedVersion, status: 'PUBLISHED' };
   } finally {
     if (lockAcquired) {
       await redisService.releaseLock(lockKey).catch(() => {});
     }
+  }
+}
+
+// Publish directly from Editor with concurrency lock and PostgreSQL persistence
+router.post('/publish', async (req: AuthRequest, res) => {
+  try {
+    const schema: PageSchema = req.body.schema;
+    if (!schema) {
+      return res.status(400).json({ success: false, error: 'Schema is required' });
+    }
+
+    const franchiseId = req.body.franchiseId || req.user?.franchiseId || 'fra_primary';
+    const branchId = req.body.branchId || req.user?.branchId || 'main_branch';
+    const result = await executePublishPipeline({
+      schema,
+      franchiseId,
+      branchId,
+      userId: req.user?.uid || 'owner'
+    });
+
+    res.json({ success: true, ...result });
+  } catch (error: any) {
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+// 1-Click Switch / Publish Live from HomePageManager Card Actions
+router.post('/switch', async (req: AuthRequest, res) => {
+  try {
+    const { pageId, schema } = req.body;
+    let targetSchema: PageSchema | undefined = schema;
+
+    if (!targetSchema && pageId) {
+      targetSchema = getTemplateById(pageId);
+      if (!targetSchema) {
+        try {
+          const docSnap = await adminDb.collection('made_by_me_templates').doc(pageId).get();
+          if (docSnap.exists) {
+            targetSchema = docSnap.data() as PageSchema;
+          }
+        } catch (fsErr) {
+          console.warn('[HomePageManager] Error resolving template from Firestore:', fsErr);
+        }
+      }
+    }
+
+    if (!targetSchema) {
+      return res.status(404).json({ success: false, error: `Template or schema "${pageId}" not found` });
+    }
+
+    const franchiseId = req.body.franchiseId || req.user?.franchiseId || 'fra_primary';
+    const branchId = req.body.branchId || req.user?.branchId || 'main_branch';
+    const result = await executePublishPipeline({
+      schema: targetSchema,
+      franchiseId,
+      branchId,
+      userId: req.user?.uid || 'owner'
+    });
+
+    res.json({ success: true, ...result });
+  } catch (error: any) {
+    res.status(error.status || 500).json({ success: false, error: error.message });
+  }
+});
+
+// Get all "Made by Me" custom templates created/customized by owner
+router.get('/made-by-me', async (_req, res) => {
+  try {
+    const snap = await adminDb.collection('made_by_me_templates').get().catch(() => ({ docs: [] }));
+    const templates: any[] = [];
+    snap.docs.forEach((d: any) => {
+      templates.push({ id: d.id, ...d.data() });
+    });
+    res.json({ success: true, templates });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Save or Update a "Made by Me" template
+router.post('/made-by-me', async (req: AuthRequest, res) => {
+  try {
+    const { schema } = req.body;
+    if (!schema || !schema.pageId) {
+      return res.status(400).json({ success: false, error: 'Valid page schema with pageId is required' });
+    }
+
+    const isOfficial = PREDEFINED_TEMPLATES.some(t => t.pageId === schema.pageId && schema.isOwnerCustom !== true);
+    const finalPageId = isOfficial ? `${schema.pageId}_custom_${Date.now()}` : schema.pageId;
+
+    const templateData = {
+      ...schema,
+      pageId: finalPageId,
+      isMadeByMe: true,
+      updatedAt: new Date().toISOString(),
+      updatedBy: req.user?.uid || 'owner',
+      metadata: {
+        ...schema.metadata,
+        name: schema.metadata?.name || 'My Custom Home',
+        updatedAt: new Date().toISOString(),
+        publishedBy: req.user?.uid || 'owner'
+      }
+    };
+
+    await adminDb.collection('made_by_me_templates').doc(finalPageId).set(templateData, { merge: true });
+    res.json({ success: true, template: templateData, pageId: finalPageId });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Delete a "Made by Me" template
+router.delete('/made-by-me/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (PREDEFINED_TEMPLATES.some(t => t.pageId === id)) {
+      return res.status(403).json({ success: false, error: 'Cannot delete official prebuilt template' });
+    }
+    await adminDb.collection('made_by_me_templates').doc(id).delete();
+    res.json({ success: true, message: `Template ${id} deleted` });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

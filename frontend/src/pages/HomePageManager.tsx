@@ -29,6 +29,7 @@ import { PageSchema, BuiltInPageSchema } from '../types/PageSchema';
 import { PREDEFINED_TEMPLATES } from '../utils/HomePageTemplates';
 import HomePageEditor from '../components/home/HomePageEditor';
 import PageRenderer from '../components/home/PageRenderer';
+import StitchGeneratorModal from '../components/home/StitchGeneratorModal';
 import { db } from '../lib/firebase';
 import { collection, onSnapshot, doc } from 'firebase/firestore';
 import { fetchApi } from '../lib/api';
@@ -58,6 +59,9 @@ export default function HomePageManager() {
 
   // Rename modal state
   const [renameTarget, setRenameTarget] = useState<{ id: string; name: string } | null>(null);
+
+  // Google Stitch SDUI Modal state
+  const [showStitchModal, setShowStitchModal] = useState(false);
 
   // 1. Listen for Live Homepage Configuration in Firestore
   useEffect(() => {
@@ -504,12 +508,20 @@ export default function HomePageManager() {
           </p>
         </div>
 
-        {/* Create Blank Custom Page */}
+        {/* Actions: Generate with Stitch & Create Custom Page */}
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={() => setShowStitchModal(true)}
+            className="px-4 py-2.5 bg-gradient-to-r from-orange-500 via-amber-500 to-emerald-500 hover:from-orange-400 hover:to-emerald-400 text-white font-extrabold rounded-xl text-xs flex items-center gap-2 transition-all shadow-lg shadow-orange-500/25 cursor-pointer"
+          >
+            <Sparkles className="w-4 h-4" /> Generate with Stitch
+          </button>
+
+          <button
+            type="button"
             onClick={() => handleStartEdit(draftTemplate, true)}
-            className="px-4 py-2.5 bg-orange-600 hover:bg-orange-500 text-white font-bold rounded-xl text-xs flex items-center gap-2 transition-all shadow-lg shadow-orange-600/25 cursor-pointer"
+            className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold rounded-xl text-xs flex items-center gap-2 transition-all cursor-pointer"
           >
             <Plus className="w-4 h-4" /> Create Custom Page
           </button>
@@ -916,6 +928,17 @@ export default function HomePageManager() {
           </div>
         </div>
       )}
+      {/* GOOGLE STITCH SDUI GENERATOR MODAL */}
+      <StitchGeneratorModal
+        isOpen={showStitchModal}
+        onClose={() => setShowStitchModal(false)}
+        onApplyToEditor={(schema) => {
+          handleStartEdit(schema, false);
+        }}
+        onPublishDirectly={async (schema) => {
+          setPublishTarget(schema);
+        }}
+      />
     </div>
   );
 }
