@@ -1,155 +1,235 @@
-export interface OrderItem {
-  id: string;
-  name: string;
-  price: number;
-  quantity: number;
-  image?: string;
-  size?: string;
-  crust?: string;
-  addons?: { name: string; price: number }[];
-}
-
-export type OrderStatus =
-  | 'pending'
-  | 'placed'
-  | 'confirmed'
-  | 'preparing'
-  | 'out_for_delivery'
-  | 'delivered'
-  | 'cancelled'
-  | 'rejected';
-
-export interface Order {
-  id: string;
-  userId?: string;
-  customerName: string;
-  customerPhone: string;
-  customerEmail?: string;
-  items: OrderItem[];
-  totalAmount: number;
-  subtotal?: number;
-  deliveryFee?: number;
-  discount?: number;
-  couponCode?: string;
-  status: OrderStatus;
-  paymentMethod: 'cod' | 'online' | 'upi' | 'card';
-  paymentStatus?: 'pending' | 'paid' | 'failed' | 'refunded';
-  deliveryAddress: {
-    address: string;
-    landmark?: string;
-    city?: string;
-    pincode?: string;
-    lat?: number;
-    lng?: number;
-  };
-  deliveryPartnerId?: string;
-  deliveryPartnerName?: string;
-  deliveryPartnerPhone?: string;
-  cancelReason?: string;
-  dailyOrderNumber?: number;
-  createdAt: any;
-  updatedAt?: any;
-}
-
-export interface ProductVariant {
-  name: string;
-  price: number;
-}
-
-export interface ProductAddon {
-  name: string;
-  price: number;
-}
+export type OrderStatus = 'pending' | 'accepted' | 'preparing' | 'ready' | 'partner_assigned' | 'picked_up' | 'out_for_delivery' | 'delivered' | 'cancelled';
 
 export interface Product {
   id: string;
   name: string;
-  description: string;
+  productName?: string;
+  description?: string;
   price: number;
-  offerPrice?: number;
+  basePrice?: number;
   category: string;
-  imageUrl: string;
-  isVeg: boolean;
-  isAvailable: boolean;
-  isPopular?: boolean;
-  tags?: string[];
-  variants?: ProductVariant[];
-  crusts?: ProductVariant[];
-  addons?: ProductAddon[];
+  image?: string;
+  imageUrl?: string;
+  isAvailable?: boolean;
+  isVegetarian?: boolean;
   rating?: number;
-  prepTimeMinutes?: number;
+  tags?: string[];
   createdAt?: any;
+  updatedAt?: any;
 }
 
 export interface Category {
   id: string;
   name: string;
-  slug?: string;
-  icon?: string;
+  description?: string;
+  image?: string;
   imageUrl?: string;
-  displayOrder?: number;
+  order?: number;
   isActive?: boolean;
 }
 
 export interface Combo {
   id: string;
   name: string;
-  description: string;
+  description?: string;
   price: number;
   originalPrice?: number;
+  image?: string;
   imageUrl?: string;
-  items: string[];
-  isActive: boolean;
+  products?: string[];
+  isAvailable?: boolean;
 }
 
 export interface Coupon {
   id: string;
   code: string;
-  description?: string;
-  discountType: 'percentage' | 'flat';
+  discountType: 'percentage' | 'fixed';
   discountValue: number;
-  minOrderAmount: number;
+  minOrderAmount?: number;
   maxDiscount?: number;
-  expiryDate: string;
+  validFrom?: any;
+  validUntil?: any;
   usageLimit?: number;
   usedCount?: number;
-  isActive: boolean;
+  isActive?: boolean;
+  applicableCategories?: string[];
 }
 
 export interface Advertisement {
   id: string;
   title: string;
   description?: string;
-  imageUrl: string;
-  targetUrl?: string;
-  placement: 'home_hero' | 'home_banner' | 'popup';
+  image: string;
+  imageUrl?: string;
+  linkUrl?: string;
+  ctaText?: string;
+  target?: string;
+  startDate?: any;
+  endDate?: any;
   isActive: boolean;
-  startDate?: string;
-  endDate?: string;
-  clickCount?: number;
+  placement?: 'home_banner' | 'popup' | 'checkout' | 'category';
+}
+
+export interface MediaItem {
+  id: string;
+  name?: string;
+  url: string;
+  mediaUrl?: string;
+  secure_url?: string;
+  cloudinaryPublicId?: string;
+  public_id?: string;
+  format?: string;
+  bytes?: number;
+  resource_type?: string;
+  uploadedAt?: any;
+  createdAt?: any;
 }
 
 export interface DeliveryPartner {
   id: string;
   name: string;
+  email: string;
   phone: string;
-  email?: string;
+  status: 'online' | 'offline' | 'busy' | 'break';
+  approvalStatus: 'pending' | 'approved' | 'suspended';
   vehicleType?: string;
   vehicleNumber?: string;
-  isOnline: boolean;
-  activeOrderId?: string;
+  photoUrl?: string;
+  joinedAt?: string;
+  rating?: number;
+  totalDeliveries?: number;
+  lat?: number;
+  lng?: number;
+  latitude?: number;
+  longitude?: number;
   currentLat?: number;
   currentLng?: number;
-  rating?: number;
-  completedDeliveries?: number;
-  lastActiveAt?: any;
+  liveLocation?: {
+    lat: number;
+    lng: number;
+    speed?: number;
+    bearing?: number;
+    updatedAt?: string;
+    activeOrderId?: string;
+  };
 }
 
-export interface MediaItem {
-  publicId: string;
-  url: string;
-  format: string;
-  bytes: number;
-  createdAt: string;
-  resourceType: 'image' | 'video';
+export interface MenuItem {
+  id?: string;
+  name: string;
+  description: string;
+  category: 'pizza' | 'sides' | 'beverage' | 'dessert' | 'combo' | string;
+  pricingMode?: 'fixed' | 'offer';
+  basePrice: number;
+  offerPrice?: number;
+  discountPercentage?: number;
+  image: string;
+  isVegetarian: boolean;
+  isAvailable: boolean;
+  productIds?: string[];
+  variants?: { name: string; price: number; }[];
+  crusts?: { name: string; price: number; }[];
+  addons?: { name: string; price: number; }[];
+}
+
+export interface CartItem {
+  id: string;
+  menuItemId?: string;
+  name: string;
+  price: number;
+  quantity: number;
+  size?: string;
+  variant?: string;
+  crust?: string;
+  addons?: string[];
+  image: string;
+  isVegetarian?: boolean;
+}
+
+export type UserRole = 'customer' | 'owner' | 'delivery_partner' | 'admin' | 'developer' | 'franchise_owner' | 'restaurant_manager' | 'cashier';
+
+export interface User {
+  id: string;
+  email: string;
+  name?: string;
+  phone?: string;
+  role: UserRole;
+  fullAddress?: string;
+  city?: string;
+  state?: string;
+  pincode?: string;
+  lat?: number;
+  lng?: number;
+  photoUrl?: string;
+  photoURL?: string;
+  onboardingComplete?: boolean;
+  phoneSetupCompleted?: boolean;
+  locationSetupCompleted?: boolean;
+  approvalStatus?: 'pending' | 'approved' | 'suspended';
+  status?: 'online' | 'offline' | 'busy' | 'break';
+  isOnline?: boolean;
+  isActive?: boolean;
+  vehicleType?: string;
+  vehicleNumber?: string;
+  joinedAt?: string;
+  liveLocation?: {
+    lat: number;
+    lng: number;
+    speed?: number;
+    bearing?: number;
+    updatedAt?: string;
+    activeOrderId?: string;
+  };
+  fcmTokens?: string[];
+  notificationEnabled?: boolean;
+  lastTokenUpdate?: string;
+  deviceName?: string;
+  platform?: string;
+  browser?: string;
+  getIdToken?: () => Promise<string>;
+}
+
+export interface Order {
+  id?: string;
+  dailyOrderNumber?: string;
+  permanentOrderId?: string;
+  userId: string;
+  customerName?: string;
+  customerPhone?: string;
+  customerInfo?: { name: string; phone: string; email?: string; };
+  items: CartItem[];
+  totalAmount: number;
+  subtotal?: number;
+  paymentMethod?: string;
+  status: OrderStatus;
+  deliveryAddress?: {
+    addressLine: string;
+    address?: string;
+    landmark?: string;
+    pincode: string;
+    lat?: number;
+    lng?: number;
+  };
+  address?: string;
+  contactPhone: string;
+  createdAt: any;
+  updatedAt: any;
+  deliveryPartnerId?: string;
+  orderTiming?: 'now' | 'scheduled';
+  scheduledDate?: string | null;
+  scheduledTime?: string | null;
+  noContactDelivery?: boolean;
+  cancellationReason?: string;
+  cancelledAt?: string;
+  declinedPartnerIds?: string[];
+  orderDateLocal?: string;
+  deliveryProof?: { photoUrl?: string; note?: string; signatureUrl?: string; };
+  deliveryRating?: { score: number; review?: string; createdAt: string; };
+  pickedUpAt?: string;
+  deliveredAt?: string;
+  deliveryFee?: number;
+  alertSent?: boolean;
+  firstAlertAt?: string | null;
+  secondAlertAt?: string | null;
+  urgentAlertAt?: string | null;
 }

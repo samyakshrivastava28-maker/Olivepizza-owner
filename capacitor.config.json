@@ -1,7 +1,7 @@
 {
   "appId": "in.olivepizza.owner",
   "appName": "Olive Pizza Owner",
-  "webDir": "frontend/dist",
+  "webDir": "dist",
   "server": {
     "androidScheme": "https",
     "cleartext": true

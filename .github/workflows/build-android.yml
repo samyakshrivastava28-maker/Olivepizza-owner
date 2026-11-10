@@ -33,18 +33,12 @@ jobs:
         with:
           node-version: '24'
           cache: 'npm'
-          cache-dependency-path: 'frontend/package.json'
 
       # 3. Install root dependencies and build frontend web bundle
       - name: Install dependencies and build web bundle
         run: |
-          npm install --legacy-peer-deps
-          cd frontend
-          npm install --legacy-peer-deps
+          npm ci --legacy-peer-deps
           npm run build
-          cd ..
-          mkdir -p dist
-          cp -r frontend/dist/* dist/ || true
         env:
           VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL || 'https://olivepizza-owner.onrender.com' }}
           VITE_BACKEND_URL: ${{ secrets.VITE_BACKEND_URL || 'https://olivepizza-owner.onrender.com' }}
@@ -74,8 +68,6 @@ jobs:
       # 6. Sync Capacitor Web Directory with Android native project
       - name: Sync Capacitor
         run: |
-          mkdir -p dist
-          cp -r frontend/dist/* dist/ || true
           npx --yes cap sync android
 
       # 7. Cache Gradle files for faster builds

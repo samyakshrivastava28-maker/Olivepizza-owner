@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
 export default defineConfig({
+  base: './',
   plugins: [
     react(),
     tailwindcss(),
@@ -14,9 +15,15 @@ export default defineConfig({
     },
   },
   server: {
+    host: true,
     port: 5174,
     proxy: {
       '/api': {
+        target: 'http://localhost:5000',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/graphql': {
         target: 'http://localhost:5000',
         changeOrigin: true,
         secure: false,
@@ -26,14 +33,28 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
-    chunkSizeWarningLimit: 1200,
+    minify: 'esbuild',
+    target: 'es2022',
+    cssCodeSplit: true,
+    chunkSizeWarningLimit: 600,
+    assetsInlineLimit: 4096,
     rollupOptions: {
       output: {
         manualChunks: {
-          'vendor-react': ['react', 'react-dom', 'react-router'],
+          'vendor-react': ['react', 'react-dom', 'react-router', 'zustand'],
           'vendor-firebase': ['firebase/app', 'firebase/firestore', 'firebase/auth'],
           'vendor-charts': ['chart.js', 'react-chartjs-2'],
           'vendor-ui': ['lucide-react', 'react-hot-toast', 'framer-motion'],
+          'vendor-map': ['leaflet', 'react-leaflet', 'maplibre-gl'],
+          'vendor-pdf': ['jspdf', 'jspdf-autotable', 'html2canvas'],
+          'vendor-data': ['papaparse', 'xlsx', 'idb-keyval'],
+          'vendor-capacitor': [
+            '@capacitor/core',
+            '@capacitor/app',
+            '@capacitor/push-notifications',
+            '@capacitor/geolocation',
+            '@capacitor/browser'
+          ]
         },
       },
     },

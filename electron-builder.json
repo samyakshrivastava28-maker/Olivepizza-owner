@@ -8,7 +8,6 @@
   },
   "files": [
     "electron/**/*",
-    "frontend/dist/**/*",
     "dist/**/*",
     "!node_modules/**/*"
   ],

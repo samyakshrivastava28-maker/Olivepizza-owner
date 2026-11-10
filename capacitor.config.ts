@@ -3,7 +3,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 const config: CapacitorConfig = {
   appId: 'in.olivepizza.owner',
   appName: 'Olive Pizza Owner',
-  webDir: 'frontend/dist',
+  webDir: 'dist',
   server: {
     androidScheme: 'https',
     iosScheme: 'https',

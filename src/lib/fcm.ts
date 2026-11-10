@@ -6,9 +6,9 @@ import { fetchApi } from './api';
 import toast from 'react-hot-toast';
 import { soundPlayer } from './audio';
 
-const VAPID_KEY = import.meta.env.VITE_FIREBASE_VAPID_KEY || '';
+const VAPID_KEY = import.meta.env.VITE_FIREBASE_VAPID_KEY || 'BDfxvZSqSw6Es3dvXz4VZMwjNFKMCCfRSgdCVty3rfqqBZ6AAWFlZ2EwWQR8ltp6DRMTUKOmH9Rlu0fjCziOKDk';
 
-export const initFCMNotifications = async (userId: string): Promise<string | null> => {
+export const initFCMNotifications = async (userId?: string): Promise<string | null> => {
   try {
     if (Capacitor.isNativePlatform()) {
       const permStatus = await PushNotifications.requestPermissions();
@@ -32,7 +32,7 @@ export const initFCMNotifications = async (userId: string): Promise<string | nul
       }
 
       const token = await getToken(messaging, { vapidKey: VAPID_KEY });
-      if (token) {
+      if (token && userId) {
         // Register token with backend
         await fetchApi('/api/notifications/register-token', {
           method: 'POST',
@@ -57,3 +57,6 @@ export const initFCMNotifications = async (userId: string): Promise<string | nul
   }
   return null;
 };
+
+export const verifyAndRefreshTokens = initFCMNotifications;
+export const requestNotificationPermission = initFCMNotifications;
