@@ -10,7 +10,7 @@
  * 4. EVENTUAL CONSISTENCY: Projections to Firestore and Socket.IO are guaranteed at-least-once.
  */
 
-import { query, pgPool } from '../../config/postgres.js';
+import { query, pgPool, getClient } from '../../config/postgres.js';
 import { adminDb } from '../../config/firebase.js';
 
 export interface OutboxPayload {
@@ -68,7 +68,7 @@ export class OutboxPublisherService {
     this.isProcessing = true;
 
     let processedCount = 0;
-    const client = await pgPool.connect();
+    const client = await getClient();
 
     try {
       await client.query('BEGIN');

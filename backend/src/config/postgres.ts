@@ -146,6 +146,12 @@ export function setTestTransactionOverride(fn: (<T>(callback: (client: any) => P
   testTransactionOverride = fn;
 }
 
+let testClientOverride: (() => Promise<PoolClient>) | null = null;
+
+export function setTestClientOverride(fn: (() => Promise<PoolClient>) | null): void {
+  testClientOverride = fn;
+}
+
 export async function query<T = any>(text: string, params: any[] = []): Promise<QueryResult<T>> {
   if (testQueryOverride) {
     return testQueryOverride(text, params);
@@ -174,6 +180,9 @@ export async function query<T = any>(text: string, params: any[] = []): Promise<
  * Every client query executed within the transaction is guarded against cloud mutation during tests.
  */
 export async function getClient(): Promise<PoolClient> {
+  if (testClientOverride) {
+    return await testClientOverride();
+  }
   return await pgPool.connect();
 }
 
@@ -181,7 +190,7 @@ export async function withTransaction<T>(callback: (client: PoolClient) => Promi
   if (testTransactionOverride) {
     return testTransactionOverride(callback as any);
   }
-  const client = await pgPool.connect();
+  const client = await getClient();
   const originalClientQuery = client.query.bind(client);
 
   (client as any).query = (queryTextOrConfig: any, values?: any) => {

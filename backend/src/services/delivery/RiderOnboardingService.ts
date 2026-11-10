@@ -8,7 +8,7 @@
  */
 
 import crypto from 'crypto';
-import { pgPool, query } from '../../config/postgres.js';
+import { pgPool, query, getClient } from '../../config/postgres.js';
 import { OutboxPublisherService } from '../outbox/OutboxPublisherService.js';
 
 export interface SubmitOnboardingParams {
@@ -198,7 +198,7 @@ export class RiderOnboardingService {
     }
 
     // APPROVAL WORKFLOW
-    const client = await pgPool.connect();
+    const client = await getClient();
     try {
       await client.query('BEGIN');
 

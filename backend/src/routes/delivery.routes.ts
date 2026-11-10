@@ -998,10 +998,6 @@ async function handleRiderReplacement(req: AuthRequest, res: Response): Promise<
       res.status(400).json({ error: 'oldRiderId is required' });
       return;
     }
-    if (!replacementRiderId) {
-      res.status(400).json({ error: 'replacementRiderId is required' });
-      return;
-    }
     if (!reason || reason.trim().length < 3) {
       res.status(400).json({ error: 'A valid reason is required for rider replacement' });
       return;
@@ -1010,7 +1006,7 @@ async function handleRiderReplacement(req: AuthRequest, res: Response): Promise<
     const result = await RiderReplacementSagaService.executeReplacementSaga({
       targetOrderId,
       oldRiderId,
-      replacementRiderId,
+      replacementRiderId: replacementRiderId || undefined,
       reason,
       initiatedByUid: req.user!.uid,
       initiatedByRole: req.user!.role || 'restaurant_manager',
@@ -1034,7 +1030,18 @@ router.post('/orders/:id/replace-rider', requireRole(['restaurant_manager', 'fra
 router.post('/orders/:id/handover-confirm', requireRole(['delivery', 'delivery_partner', 'owner', 'restaurant_manager', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { id } = req.params;
-    const { handoverId, receivingRiderId, latitude, longitude, notes } = req.body;
+    const { handoverId, receivingRiderId, latitude, longitude, notes, action } = req.body;
+
+    if (action === 'REFUSE') {
+      const result = await RiderReplacementSagaService.refusePhysicalHandover({
+        orderId: id,
+        handoverId,
+        refusingRiderId: receivingRiderId || req.user!.uid,
+        reason: notes || 'Receiving rider refused custody handover'
+      });
+      res.json(result);
+      return;
+    }
 
     const result = await RiderReplacementSagaService.confirmPhysicalHandover({
       orderId: id,
@@ -1048,6 +1055,29 @@ router.post('/orders/:id/handover-confirm', requireRole(['delivery', 'delivery_p
     res.json(result);
   } catch (err: any) {
     console.error('[Delivery Routes] /orders/:id/handover-confirm error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message, code: err.code });
+  }
+});
+
+/**
+ * POST /orders/:id/handover-refuse
+ * Receiving rider refuses physical custody transfer of an active delivery.
+ */
+router.post('/orders/:id/handover-refuse', requireRole(['delivery', 'delivery_partner', 'owner', 'restaurant_manager', 'admin']), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { id } = req.params;
+    const { handoverId, refusingRiderId, reason } = req.body;
+
+    const result = await RiderReplacementSagaService.refusePhysicalHandover({
+      orderId: id,
+      handoverId,
+      refusingRiderId: refusingRiderId || req.user!.uid,
+      reason: reason || 'Receiving rider refused custody handover'
+    });
+
+    res.json(result);
+  } catch (err: any) {
+    console.error('[Delivery Routes] /orders/:id/handover-refuse error:', err);
     res.status(err.statusCode || 500).json({ error: err.message, code: err.code });
   }
 });
