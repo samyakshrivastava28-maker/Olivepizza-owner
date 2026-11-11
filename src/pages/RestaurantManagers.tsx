@@ -166,7 +166,7 @@ export default function RestaurantManagers() {
           phone: formPhone.trim(),
           role: 'restaurant_manager',
           status: 'APPROVED',
-          allowedApps: ['RESTAURANT_MANAGER', 'POS'],
+          allowedApps: ['RESTAURANT_MANAGER'],
           applicationAccess: { app_restaurant_management: true, app_pos: true },
           branchId: formBranchId,
           branchName: branchObj?.name || 'Olive Pizza — Rajnandgaon',

@@ -226,6 +226,30 @@ export default function FranchiseWorkspace() {
       .catch(() => {});
   }, [selectedBranchFilter, franchise?.id]);
 
+  // 2b. Authoritative PostgreSQL Orders Poll (ensures live/completed orders work when Firestore quota is exhausted)
+  useEffect(() => {
+    if (!franchise) return;
+    let cancelled = false;
+    const syncOrdersFromPg = async () => {
+      try {
+        const res = await fetchApi(`/api/orders?franchiseId=${encodeURIComponent(franchise.id)}&branchId=${encodeURIComponent(selectedBranchFilter || 'all')}&limit=200`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const list = Array.isArray(data.orders) ? data.orders : [];
+        if (cancelled) return;
+        const liveStatuses = ['pending', 'accepted', 'preparing', 'ready', 'partner_assigned', 'picked_up', 'out_for_delivery'];
+        setLiveOrders(list.filter((o: any) => liveStatuses.includes(String(o.status || '').toLowerCase())));
+        setHistoricalOrders(list.filter((o: any) => !liveStatuses.includes(String(o.status || '').toLowerCase())).slice(0, 100));
+      } catch {}
+    };
+    syncOrdersFromPg();
+    const pollId = setInterval(syncOrdersFromPg, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(pollId);
+    };
+  }, [franchise?.id, selectedBranchFilter]);
+
   // 3. Real-Time Scoped Live Orders Listener
   useEffect(() => {
     if (!franchise) return;

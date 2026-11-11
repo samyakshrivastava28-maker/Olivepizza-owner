@@ -60,39 +60,77 @@ export default function OrderManagement() {
   const [fulfillmentFilter, setFulfillmentFilter] = useState<string>('all');
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
 
-  // Firestore real-time listener for orders
+  // Firestore real-time listener + canonical PostgreSQL polling sync
   useEffect(() => {
     setLoading(true);
+    let snapshotMap = new Map<string, Order>();
+    let apiMap = new Map<string, Order>();
+    let isDisposed = false;
+
+    const flushMergedOrders = () => {
+      if (isDisposed) return;
+      const merged = new Map<string, Order>();
+      for (const [id, o] of snapshotMap.entries()) {
+        merged.set(id, o);
+      }
+      for (const [id, o] of apiMap.entries()) {
+        const existing = merged.get(id);
+        merged.set(id, existing ? { ...existing, ...o } : o);
+      }
+      const list = Array.from(merged.values());
+      list.sort((a, b) => {
+        const timeA = parseOrderTime(a.createdAt).getTime();
+        const timeB = parseOrderTime(b.createdAt).getTime();
+        return timeB - timeA;
+      });
+      setOrders(list);
+      setLoading(false);
+    };
+
+    const syncOrdersFromApi = async () => {
+      try {
+        const res = await fetchApi('/api/orders?limit=300');
+        if (!res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        const rows: Order[] = Array.isArray(data) ? data : data.orders || [];
+        const nextApiMap = new Map<string, Order>();
+        for (const r of rows) {
+          if (r && r.id) nextApiMap.set(r.id, r);
+        }
+        apiMap = nextApiMap;
+        flushMergedOrders();
+      } catch (e) {
+        console.warn('[OrderManagement] API sync notice:', e);
+      }
+    };
+
+    syncOrdersFromApi();
+    const pollInterval = setInterval(syncOrdersFromApi, 10000);
+
     const unsubscribe = onSnapshot(
       collection(db, 'orders'),
       (snapshot) => {
-        const fetched: Order[] = [];
+        const nextSnapMap = new Map<string, Order>();
         snapshot.forEach((d) => {
           const data = d.data();
-          fetched.push({ id: d.id, ...data } as Order);
+          nextSnapMap.set(d.id, { id: d.id, ...data } as Order);
         });
-
-        // Safe client-side descending chronological sort
-        fetched.sort((a, b) => {
-          const timeA = parseOrderTime(a.createdAt).getTime();
-          const timeB = parseOrderTime(b.createdAt).getTime();
-          return timeB - timeA;
-        });
-
-        setOrders(fetched);
-        setLoading(false);
+        snapshotMap = nextSnapMap;
+        flushMergedOrders();
       },
       (err) => {
-        console.warn('[OrderManagement] Realtime stream error, trying fallback API:', err);
-        fetchApi('/api/orders?limit=300')
-          .then(async (res) => { if (!res.ok) return {}; return res.json().catch(() => ({})); })
-          .then((data) => setOrders(Array.isArray(data) ? data : data.orders || []))
-          .catch((e) => console.error('[OrderManagement] Fetch failed:', e))
-          .finally(() => setLoading(false));
+        console.warn('[OrderManagement] Realtime stream error, using backend API:', err);
+        syncOrdersFromApi().finally(() => {
+          if (!isDisposed) setLoading(false);
+        });
       }
     );
 
-    return () => unsubscribe();
+    return () => {
+      isDisposed = true;
+      clearInterval(pollInterval);
+      unsubscribe();
+    };
   }, []);
 
   // Live Orders: Active in-progress orders
