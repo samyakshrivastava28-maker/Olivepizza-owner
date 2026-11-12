@@ -1,366 +1,511 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router';
-import { auth, googleProvider } from '../lib/firebase';
-import { signInWithEmailAndPassword, signInWithPopup, signInWithCredential, signInWithCustomToken, GoogleAuthProvider, signOut } from 'firebase/auth';
+import { auth } from '../lib/firebase';
+import { signInWithCustomToken } from 'firebase/auth';
 import { useAuthStore } from '../lib/store';
-import { Lock, Mail, AlertCircle, ArrowRight, ShieldCheck } from 'lucide-react';
+import { 
+  Mail, 
+  Phone, 
+  ShieldCheck, 
+  ArrowRight, 
+  AlertCircle, 
+  RotateCcw, 
+  ArrowLeft, 
+  Lock, 
+  Crown
+} from 'lucide-react';
 import { AppLogo } from '../components/common/AppLogo';
-import { Capacitor } from '@capacitor/core';
 import { getApiUrl } from '../lib/config';
 import toast from 'react-hot-toast';
 
 export default function Login() {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
+  // Step 1: 'check' (Account Eligibility), Step 2: 'verify' (6-Digit Temporary Code)
+  const [step, setStep] = useState<'check' | 'verify'>('check');
+  const [authMethod, setAuthMethod] = useState<'email' | 'phone'>('email');
+  const [identifierInput, setIdentifierInput] = useState('');
+  
+  // Verification Code State
+  const [code, setCode] = useState(['', '', '', '', '', '']);
+  const [verifiedEmail, setVerifiedEmail] = useState('');
+  const [maskedEmail, setMaskedEmail] = useState('');
+  const [resolvedName, setResolvedName] = useState('');
+  
+  // Timers & Loading
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [isResending, setIsResending] = useState(false);
 
+  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, isAuthenticated, setUser, setDatabaseUnavailable, setRestricted } = useAuthStore();
+  const { user, isAuthenticated, setUser, clearRestricted } = useAuthStore();
 
   const getCleanRedirectTarget = (): string => {
     const raw = new URLSearchParams(location.search).get('redirect');
     if (!raw || raw === '/login' || raw.startsWith('/login') || raw === '/' || raw === '/dashboard') {
-      return '/analytics';
+      return '/home';
     }
     return raw;
   };
 
-  // Proactive redirection: If already authenticated with confirmed database authorization, navigate to target
-  React.useEffect(() => {
+  // Redirect if already authenticated as owner
+  useEffect(() => {
     if (isAuthenticated && user && (user.role === 'owner' || user.role === 'platform_owner')) {
       navigate(getCleanRedirectTarget(), { replace: true });
     }
-  }, [isAuthenticated, user, location.search, navigate]);
+  }, [isAuthenticated, user, navigate]);
 
-  const validateAndAuthenticate = async (firebaseUser: any): Promise<boolean> => {
-    try {
-      // 1. Obtain fresh Firebase ID Token
-      const token = await firebaseUser.getIdToken(true);
+  useEffect(() => {
+    clearRestricted();
+  }, [clearRestricted]);
 
-      // 2. Authoritative Database Handshake
-      let authRes: Response;
-      try {
-        authRes = await fetch(getApiUrl('/api/auth/authorize-app'), {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify({ targetApp: 'OWNER' })
-        });
-      } catch (networkErr: any) {
-        console.warn('[Login] Network error connecting to backend:', networkErr);
-        // Fail-closed with session retention
-        setDatabaseUnavailable(true);
-        const msg = 'Unable to reach the central authorization service. Please check your network connection.';
-        setError(msg);
-        toast.error(msg);
-        return false;
-      }
-
-      // 3. Handle Database Outage (HTTP 503)
-      if (authRes.status === 503) {
-        console.warn('[Login] Database temporarily unavailable (503). Retaining Firebase session.');
-        setDatabaseUnavailable(true);
-        const msg = 'Authoritative database is temporarily unavailable. Session retained; please retry shortly.';
-        setError(msg);
-        toast.error(msg);
-        return false;
-      }
-
-      // 4. Handle Access Denied (HTTP 403)
-      if (authRes.status === 403) {
-        const data = await authRes.json().catch(() => ({}));
-        const denialReason = data.reason || 'This account is not authorized to access the Olive Pizza Owner & Executive Console.';
-        console.warn(`[Login] Access denied for ${firebaseUser.email}: ${denialReason}`);
-        await signOut(auth);
-        setRestricted(denialReason, firebaseUser.email);
-        setError(denialReason);
-        toast.error(denialReason);
-        return false;
-      }
-
-      // 5. Handle Expired / Invalid Token (HTTP 401)
-      if (authRes.status === 401) {
-        await signOut(auth);
-        const msg = 'Authentication expired or invalid. Please sign in again.';
-        setError(msg);
-        toast.error(msg);
-        return false;
-      }
-
-      // 6. Handle Successful Handshake (HTTP 200)
-      if (authRes.ok) {
-        const data = await authRes.json();
-        if (!data.authorized || !data.user) {
-          const denialReason = data.reason || 'Access denied by server authorization policy.';
-          await signOut(auth);
-          setRestricted(denialReason, firebaseUser.email);
-          setError(denialReason);
-          toast.error(denialReason);
-          return false;
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResendCooldown(prev => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          return 0;
         }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldown]);
 
-        const serverRole = data.user.role;
-        if (serverRole !== 'owner' && serverRole !== 'platform_owner') {
-          const denialReason = `Access denied: Role "${serverRole}" is not authorized for the Owner Portal. Platform Owner role required.`;
-          await signOut(auth);
-          setRestricted(denialReason, firebaseUser.email);
-          setError(denialReason);
-          toast.error(denialReason);
-          return false;
-        }
-
-        const resolvedName = data.user.name || firebaseUser.displayName || 'Platform Owner';
-        setUser(
-          {
-            uid: data.user.uid || firebaseUser.uid,
-            email: data.user.email || firebaseUser.email,
-            name: resolvedName,
-            photoURL: firebaseUser.photoURL || undefined,
-            role: serverRole,
-            allowedApps: data.allowedApps || ['OWNER'],
-            applicationAccess: data.appAccess || { app_owner: true },
-            permissions: data.permissions || ['owner.all'],
-            branchId: data.branchId || 'main_branch',
-            branchIds: data.branchIds || ['main_branch'],
-            franchiseId: data.franchiseId || 'fra_rajnandgaon',
-          },
-          serverRole,
-          data.user
-        );
-
-        toast.success(`Welcome back, ${resolvedName}!`);
-        const target = getCleanRedirectTarget();
-        navigate(target, { replace: true });
-        return true;
-      }
-
-      // Unhandled status code fallback
-      const errData = await authRes.json().catch(() => ({}));
-      const reason = errData.reason || `Unexpected server response (HTTP ${authRes.status}).`;
-      await signOut(auth);
-      setError(reason);
-      toast.error(reason);
-      return false;
-    } catch (err: any) {
-      console.error('[Login] Authorization failed:', err);
-      await signOut(auth);
-      setError(err.message || 'Authorization check failed');
-      toast.error(err.message || 'Authorization check failed');
-      return false;
-    }
-  };
-
-  const handleEmailLogin = async (e: React.FormEvent) => {
+  // Handle Step 1: Check Eligibility
+  const handleCheckEligibility = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setLoading(true);
+
+    const cleanInput = identifierInput.trim();
+    if (!cleanInput) {
+      setError(authMethod === 'email' ? 'Please enter your registered owner email address.' : 'Please enter your 10-digit mobile number.');
+      return;
+    }
+
+    if (authMethod === 'email' && !cleanInput.includes('@')) {
+      setError('Please enter a valid email address.');
+      return;
+    }
+
+    if (authMethod === 'phone' && cleanInput.replace(/\D/g, '').length < 10) {
+      setError('Please enter a valid 10-digit mobile phone number.');
+      return;
+    }
+
+    setIsLoading(true);
+
     try {
-      const res = await signInWithEmailAndPassword(auth, email.trim(), password);
-      await validateAndAuthenticate(res.user);
-    } catch (err: any) {
-      let msg = err.message;
-      if (err.code === 'auth/invalid-credential') {
-        msg = 'Invalid email or password.';
-      } else if (err.code === 'auth/network-request-failed') {
-        msg = 'Network connection failed. Please check your internet or retry.';
+      const res = await fetch(getApiUrl('/api/auth/management/check-eligibility'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-App-Target': 'OWNER',
+          'X-App-Source': 'OWNER'
+        },
+        body: JSON.stringify({
+          identifier: cleanInput,
+          targetApp: 'OWNER'
+        })
+      });
+
+      const resp = await res.json();
+
+      if (!resp.success || !resp.eligible) {
+        setError(resp.message || 'This account is not verified or authorized as an Olive Pizza Owner. Access restricted.');
+        setIsLoading(false);
+        return;
       }
-      setError(msg);
-      toast.error(msg);
+
+      setVerifiedEmail(resp.email || cleanInput);
+      setMaskedEmail(resp.maskedEmail || resp.email || cleanInput);
+      setResolvedName(resp.name || 'Store Owner');
+      setResendCooldown(60);
+      setCode(['', '', '', '', '', '']);
+      setStep('verify');
+      toast.success(resp.message || 'Verification code sent to your email!');
+
+      setTimeout(() => {
+        inputRefs.current[0]?.focus();
+      }, 100);
+    } catch (err: any) {
+      setError(err?.message || 'Unable to connect to authorization gateway. Please retry.');
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   };
 
-  const handleSelectPreset = (selectedEmail: string) => {
-    setEmail(selectedEmail);
-    setPassword('Olivepizz@rjn');
+  // Handle Step 2: Code Digit Input
+  const handleDigitChange = (index: number, val: string) => {
+    const clean = val.replace(/\D/g, '');
+    if (!clean && val !== '') return;
+
+    const newCode = [...code];
+
+    if (clean.length > 1) {
+      const pastedDigits = clean.slice(0, 6).split('');
+      pastedDigits.forEach((d, i) => {
+        if (i < 6) newCode[i] = d;
+      });
+      setCode(newCode);
+      const nextFocus = Math.min(pastedDigits.length, 5);
+      inputRefs.current[nextFocus]?.focus();
+      return;
+    }
+
+    newCode[index] = clean;
+    setCode(newCode);
+
+    if (clean && index < 5) {
+      inputRefs.current[index + 1]?.focus();
+    }
   };
 
-  const handleGoogleLogin = async () => {
+  const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace' && !code[index] && index > 0) {
+      inputRefs.current[index - 1]?.focus();
+    }
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    e.preventDefault();
+    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+    if (pasted.length > 0) {
+      const newCode = ['', '', '', '', '', ''];
+      pasted.split('').forEach((d, i) => {
+        newCode[i] = d;
+      });
+      setCode(newCode);
+      const nextFocus = Math.min(pasted.length, 5);
+      inputRefs.current[nextFocus]?.focus();
+    }
+  };
+
+  // Handle Resend Verification Code
+  const handleResendCode = async () => {
+    if (resendCooldown > 0 || isResending || !verifiedEmail) return;
+
+    setIsResending(true);
     setError(null);
-    setLoading(true);
+
     try {
-      const isElectron = Boolean(
-        typeof window !== 'undefined' && 
-        ((window as any).electronAPI?.isElectron || (window as any).electronAuth?.isDesktop)
-      );
+      const res = await fetch(getApiUrl('/api/auth/management/resend-code'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: verifiedEmail })
+      });
 
-      if (Capacitor.isNativePlatform()) {
-        const { FirebaseAuthentication } = await import('@capacitor-firebase/authentication');
-        const nativeResult = await FirebaseAuthentication.signInWithGoogle();
-        if (nativeResult.credential?.idToken) {
-          const credential = GoogleAuthProvider.credential(nativeResult.credential.idToken);
-          const res = await signInWithCredential(auth, credential);
-          await validateAndAuthenticate(res.user);
-        } else {
-          throw new Error('Google Sign-In failed on device.');
-        }
-      } else if (isElectron && ((window as any).electronAuth?.startBrowserAuth || (window as any).electronAPI?.startBrowserAuth)) {
-        toast.loading('Opening system browser to authenticate...', { id: 'browser-auth' });
-        const authUrl = getApiUrl('/api/auth/desktop-login?app=OWNER');
-        const authFn = (window as any).electronAuth?.startBrowserAuth || (window as any).electronAPI?.startBrowserAuth;
-        const authResult = await authFn(authUrl);
-
-        if (!authResult || !authResult.success) {
-          toast.dismiss('browser-auth');
-          throw new Error(authResult?.error || 'Authentication via browser was cancelled or timed out.');
-        }
-
-        toast.loading('Finalizing owner session...', { id: 'browser-auth' });
-        let userCred: any = null;
-        if (authResult.customToken) {
-          userCred = await signInWithCustomToken(auth, authResult.customToken);
-        } else if (authResult.idToken) {
-          const credential = GoogleAuthProvider.credential(authResult.idToken);
-          userCred = await signInWithCredential(auth, credential);
-        } else {
-          toast.dismiss('browser-auth');
-          throw new Error('No authentication credential received from browser callback.');
-        }
-        toast.dismiss('browser-auth');
-        await validateAndAuthenticate(userCred.user);
-      } else {
-        const res = await signInWithPopup(auth, googleProvider);
-        await validateAndAuthenticate(res.user);
+      const resp = await res.json();
+      if (!resp.success) {
+        setError(resp.message || 'Failed to resend code. Please wait before retrying.');
+        return;
       }
+
+      setResendCooldown(60);
+      setCode(['', '', '', '', '', '']);
+      inputRefs.current[0]?.focus();
+      toast.success('Fresh verification code sent to your email.');
     } catch (err: any) {
-      if (err.code !== 'auth/popup-closed-by-user') {
-        let msg = err.message || 'Authentication error';
-        if (err.code === 'auth/network-request-failed') {
-          msg = 'Network connection failed. Please check internet connection.';
-        }
-        setError(msg);
-        toast.error(msg);
-      }
+      setError(err?.message || 'Network error while requesting new code.');
     } finally {
-      setLoading(false);
+      setIsResending(false);
+    }
+  };
+
+  // Handle Step 2: Verify Code and Sign In
+  const handleVerifyCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    const fullCode = code.join('').trim();
+    if (fullCode.length !== 6) {
+      setError('Please enter the complete 6-digit verification code.');
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const res = await fetch(getApiUrl('/api/auth/management/verify-code-signin'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-App-Target': 'OWNER',
+          'X-App-Source': 'OWNER'
+        },
+        body: JSON.stringify({
+          email: verifiedEmail,
+          code: fullCode,
+          targetApp: 'OWNER'
+        })
+      });
+
+      const resp = await res.json();
+      if (!resp.success || !resp.customToken) {
+        setError(resp.message || 'Invalid or expired verification code. Please check your email or request a new code.');
+        setIsLoading(false);
+        return;
+      }
+
+      // Sign in to Firebase Auth using verified Custom Token
+      const userCredential = await signInWithCustomToken(auth, resp.customToken);
+      const fbUser = userCredential.user;
+      const u = resp.user || {};
+
+      setUser({
+        uid: fbUser.uid,
+        email: fbUser.email || verifiedEmail,
+        name: u.name || fbUser.displayName || resolvedName || 'Store Owner',
+        role: 'owner',
+        allowedApps: ['OWNER', 'RESTAURANT_MANAGER', 'FRANCHISE_MANAGER', 'POS', 'DELIVERY']
+      }, 'owner', u);
+
+      toast.success(`Welcome to Owner Console, ${u.name || resolvedName || 'Owner'}!`);
+      navigate(getCleanRedirectTarget(), { replace: true });
+    } catch (err: any) {
+      console.error('[OwnerLogin] Sign in verification error:', err);
+      setError(err?.message || 'Verification failed. Please check your code or request a new one.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
   return (
-    <div className="min-h-[100dvh] w-full bg-[#0B0F17] flex items-center justify-center p-3.5 sm:p-6 select-none">
-      <div className="w-full max-w-md bg-[#131B2B] border border-slate-800 rounded-3xl p-5 sm:p-8 shadow-2xl relative overflow-hidden">
-        <div className="flex flex-col items-center text-center mb-5 sm:mb-6">
-          <AppLogo variant="full" size="xl" subtitle="Owner Control Operations" />
-          <p className="text-xs text-slate-400 mt-2 max-w-sm">Sign in to manage orders, catalog, fleet, and store operations.</p>
+    <div className="min-h-screen bg-[#070A12] text-slate-100 flex items-center justify-center p-4 font-sans relative overflow-hidden">
+      {/* Dynamic Background Glows */}
+      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[520px] h-[520px] bg-amber-500/10 rounded-full blur-[130px] pointer-events-none" />
+      <div className="absolute bottom-10 right-10 w-80 h-80 bg-emerald-500/5 rounded-full blur-[100px] pointer-events-none" />
+
+      <div className="w-full max-w-md bg-[#0D1322]/90 backdrop-blur-2xl border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl relative z-10 space-y-6">
+        {/* Brand Header */}
+        <div className="text-center space-y-3">
+          <div className="flex justify-center">
+            <AppLogo size="lg" />
+          </div>
+          <div>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[11px] font-semibold tracking-wide uppercase mb-2">
+              <Crown className="w-3.5 h-3.5" />
+              Owner Executive Console
+            </div>
+            <h1 className="text-2xl font-black text-white tracking-tight">
+              {step === 'check' ? 'Owner Authorization' : 'Verify Security Code'}
+            </h1>
+            <p className="text-xs text-slate-400 mt-1 max-w-xs mx-auto leading-relaxed">
+              {step === 'check'
+                ? 'Verify your registered Olive Pizza Owner credentials to receive an executive access code.'
+                : 'Enter the 6-digit one-time code sent to your registered owner email.'}
+            </p>
+          </div>
         </div>
 
+        {/* Global Error Notice */}
         {error && (
-          <div className="mb-4 sm:mb-5 p-3.5 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-            <span>{error}</span>
+          <div className="p-3.5 rounded-2xl bg-red-950/40 border border-red-500/30 flex items-start gap-3 text-red-200 text-xs animate-in fade-in slide-in-from-top-1 duration-200">
+            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+            <div className="flex-1 leading-relaxed">{error}</div>
           </div>
         )}
 
-        {/* Quick Fill Preset Buttons */}
-        <div className="space-y-2 mb-4 sm:mb-5">
-          <button
-            type="button"
-            onClick={() => handleSelectPreset('olivepizzarjn@gmail.com')}
-            className="w-full min-h-[44px] py-2.5 px-4 bg-orange-600/15 hover:bg-orange-600/25 border border-orange-500/30 text-orange-400 rounded-xl text-xs font-bold flex items-center justify-between transition-all cursor-pointer active:scale-[0.98]"
-          >
-            <span className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-orange-400 shrink-0" />
-              <span className="truncate">Preset: olivepizzarjn@gmail.com</span>
-            </span>
-            <ArrowRight className="w-3.5 h-3.5 shrink-0 ml-1" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleSelectPreset('webhub2811@gmail.com')}
-            className="w-full min-h-[44px] py-2.5 px-4 bg-slate-800/60 hover:bg-slate-800 border border-slate-700 text-slate-300 rounded-xl text-xs font-bold flex items-center justify-between transition-all cursor-pointer active:scale-[0.98]"
-          >
-            <span className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-slate-400 shrink-0" />
-              <span className="truncate">Preset: webhub2811@gmail.com</span>
-            </span>
-            <ArrowRight className="w-3.5 h-3.5 shrink-0 ml-1" />
-          </button>
-        </div>
-
-        <div className="relative flex items-center justify-center mb-4 sm:mb-5">
-          <div className="border-t border-slate-800 w-full" />
-          <span className="bg-[#131B2B] px-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider absolute">
-            Standard sign in
-          </span>
-        </div>
-
-        <button
-          type="button"
-          onClick={handleGoogleLogin}
-          disabled={loading}
-          className="w-full min-h-[48px] py-3 px-4 bg-[#1E293B] hover:bg-slate-800 border border-slate-700 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-3 transition-colors mb-4 sm:mb-5 disabled:opacity-50 cursor-pointer active:scale-[0.98]"
-        >
-          <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
-            <path
-              fill="#4285F4"
-              d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
-            />
-            <path
-              fill="#34A853"
-              d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
-            />
-            <path
-              fill="#FBBC05"
-              d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.98 0 12s.45 3.82 1.25 5.42l4.03-3.15z"
-            />
-            <path
-              fill="#EA4335"
-              d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-            />
-          </svg>
-          <span>Continue with Google</span>
-        </button>
-
-        <form onSubmit={handleEmailLogin} className="space-y-4">
-          <div>
-            <label className="text-xs font-bold text-slate-300 uppercase block mb-1.5">Email Address</label>
-            <div className="relative">
-              <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="olivepizzarjn@gmail.com"
-                className="w-full pl-10 pr-4 py-3 sm:py-2.5 bg-[#0E1524] border border-slate-800 rounded-xl text-base sm:text-xs text-white placeholder-slate-500 focus:border-orange-500 focus:outline-none min-h-[44px]"
-              />
+        {/* STEP 1: ELIGIBILITY PRE-CHECK */}
+        {step === 'check' && (
+          <form onSubmit={handleCheckEligibility} className="space-y-5">
+            {/* Method Tabs */}
+            <div className="grid grid-cols-2 p-1 bg-slate-950/80 border border-slate-800 rounded-2xl">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMethod('email');
+                  setError(null);
+                }}
+                className={`flex items-center justify-center gap-2 py-2.5 text-xs font-semibold rounded-xl transition-all ${
+                  authMethod === 'email'
+                    ? 'bg-slate-800 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Mail className="w-3.5 h-3.5" />
+                Email Address
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMethod('phone');
+                  setError(null);
+                }}
+                className={`flex items-center justify-center gap-2 py-2.5 text-xs font-semibold rounded-xl transition-all ${
+                  authMethod === 'phone'
+                    ? 'bg-slate-800 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Phone className="w-3.5 h-3.5" />
+                Phone Number
+              </button>
             </div>
-          </div>
 
-          <div>
-            <label className="text-xs font-bold text-slate-300 uppercase block mb-1.5">Password</label>
-            <div className="relative">
-              <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••••••"
-                className="w-full pl-10 pr-4 py-3 sm:py-2.5 bg-[#0E1524] border border-slate-800 rounded-xl text-base sm:text-xs text-white placeholder-slate-500 focus:border-orange-500 focus:outline-none min-h-[44px]"
-              />
+            {/* Input Field */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider block">
+                {authMethod === 'email' ? 'Registered Owner Email' : 'Registered Mobile Number'}
+              </label>
+              <div className="relative">
+                {authMethod === 'email' ? (
+                  <>
+                    <input
+                      type="email"
+                      value={identifierInput}
+                      onChange={e => setIdentifierInput(e.target.value)}
+                      placeholder="e.g. webhub2811@gmail.com or olivepizzarjn@gmail.com"
+                      autoFocus
+                      required
+                      className="w-full pl-10 pr-4 py-3 bg-slate-950/80 border border-slate-800 rounded-2xl text-white text-sm placeholder-slate-500 focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 transition-all font-mono"
+                    />
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  </>
+                ) : (
+                  <>
+                    <div className="absolute left-3.5 top-1/2 -translate-y-1/2 flex items-center gap-1 text-xs text-slate-400 font-semibold border-r border-slate-800 pr-2.5">
+                      <span>🇮🇳</span>
+                      <span>+91</span>
+                    </div>
+                    <input
+                      type="tel"
+                      value={identifierInput}
+                      onChange={e => setIdentifierInput(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                      placeholder="10-digit registered number"
+                      autoFocus
+                      required
+                      className="w-full pl-20 pr-4 py-3 bg-slate-950/80 border border-slate-800 rounded-2xl text-white text-sm placeholder-slate-500 focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 transition-all font-mono"
+                    />
+                  </>
+                )}
+              </div>
             </div>
-          </div>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full min-h-[48px] py-3 bg-orange-600 hover:bg-orange-500 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg shadow-orange-600/20 disabled:opacity-50 mt-2 cursor-pointer active:scale-[0.98]"
-          >
-            {loading ? 'Authenticating...' : 'Sign In as Owner'}
-            <ArrowRight className="w-4 h-4" />
-          </button>
-        </form>
+            {/* Security Notice */}
+            <div className="p-3 rounded-2xl bg-slate-950/60 border border-slate-800 flex items-center gap-2.5 text-[11px] text-slate-400">
+              <Lock className="w-4 h-4 text-amber-500 shrink-0" />
+              <span>Zero-Trust Verification. A 6-digit executive access code will be sent to your verified email.</span>
+            </div>
 
-        <div className="mt-5 sm:mt-6 pt-4 border-t border-slate-800/80 text-center">
-          <p className="text-[11px] text-slate-500 leading-relaxed">
-            Strictly restricted to authorized Olive Pizza personnel. Unauthorized access attempts are monitored and logged.
+            {/* Action Submit */}
+            <button
+              type="submit"
+              disabled={isLoading || !identifierInput.trim()}
+              className="w-full py-3.5 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold text-sm rounded-2xl transition-all shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 cursor-pointer"
+            >
+              {isLoading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                  <span>Verifying Credentials...</span>
+                </>
+              ) : (
+                <>
+                  <span>Verify Account & Continue</span>
+                  <ArrowRight className="w-4 h-4" />
+                </>
+              )}
+            </button>
+          </form>
+        )}
+
+        {/* STEP 2: TEMPORARY 6-DIGIT CODE VERIFICATION */}
+        {step === 'verify' && (
+          <form onSubmit={handleVerifyCode} className="space-y-6">
+            {/* Masked Email Info Pill */}
+            <div className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                  <Mail className="w-4 h-4" />
+                </div>
+                <div className="truncate">
+                  <p className="text-[10px] uppercase font-semibold text-slate-400 tracking-wider">Sent to verified email</p>
+                  <p className="text-xs font-mono font-bold text-white truncate">{maskedEmail}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setStep('check');
+                  setError(null);
+                }}
+                className="text-[11px] font-semibold text-amber-400 hover:text-amber-300 hover:underline shrink-0 flex items-center gap-1"
+              >
+                <ArrowLeft className="w-3 h-3" />
+                Change
+              </button>
+            </div>
+
+            {/* 6-Digit Code Inputs */}
+            <div className="space-y-2">
+              <label className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider block text-center">
+                Enter 6-Digit Security Code
+              </label>
+              <div className="flex justify-between gap-2 sm:gap-3" onPaste={handlePaste}>
+                {code.map((digit, idx) => (
+                  <input
+                    key={idx}
+                    ref={el => { inputRefs.current[idx] = el; }}
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={1}
+                    value={digit}
+                    onChange={e => handleDigitChange(idx, e.target.value)}
+                    onKeyDown={e => handleKeyDown(idx, e)}
+                    className="w-12 h-14 sm:w-14 sm:h-16 text-center text-xl sm:text-2xl font-black font-mono bg-slate-950 border-2 border-slate-800 focus:border-amber-500 focus:ring-4 focus:ring-amber-500/20 rounded-2xl text-white outline-none transition-all"
+                  />
+                ))}
+              </div>
+            </div>
+
+            {/* Resend Code Section */}
+            <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+              <span>Didn't receive the code?</span>
+              {resendCooldown > 0 ? (
+                <span className="font-mono text-amber-400 font-semibold">
+                  Resend in {resendCooldown}s
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleResendCode}
+                  disabled={isResending}
+                  className="font-bold text-amber-400 hover:text-amber-300 transition-colors flex items-center gap-1 cursor-pointer"
+                >
+                  <RotateCcw className={`w-3.5 h-3.5 ${isResending ? 'animate-spin' : ''}`} />
+                  Resend Code
+                </button>
+              )}
+            </div>
+
+            {/* Action Verify Submit */}
+            <button
+              type="submit"
+              disabled={isLoading || code.some(d => !d)}
+              className="w-full py-3.5 px-4 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold text-sm rounded-2xl transition-all shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 cursor-pointer"
+            >
+              {isLoading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                  <span>Verifying Code...</span>
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>Verify & Enter Owner Console</span>
+                </>
+              )}
+            </button>
+          </form>
+        )}
+
+        {/* Security Footer Notice */}
+        <div className="pt-2 text-center border-t border-slate-800">
+          <p className="text-[10px] text-slate-500 flex items-center justify-center gap-1.5">
+            <ShieldCheck className="w-3.5 h-3.5 text-amber-500" />
+            Olive Pizza Owner Security Architecture • Hardware Salted Tokens
           </p>
         </div>
       </div>
