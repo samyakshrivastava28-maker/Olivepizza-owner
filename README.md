@@ -1,4 +1,4 @@
-# 👑 Olive Pizza Owner Portal (v2.2.0)
+# 👑 Olive Pizza Owner Portal (v2.3.0)
 
 [![React](https://img.shields.io/badge/React-19.0-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![Vite](https://img.shields.io/badge/Vite-6.0-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
@@ -28,7 +28,7 @@ Administrative command center for the **Olive Pizza** franchise owner. Provides 
 
 ---
 
-## 📦 Latest Release Downloads (v2.2.0)
+## 📦 Latest Release Downloads (v2.3.0)
 
 Staged in `C:\Users\RYZEN\Downloads\OlivePizza_Release_Binaries`:
 - **Android APK**: `OlivePizza_Owner_v2.2.0_Release.apk` (26.56 MB)
