@@ -92,6 +92,10 @@ export const fetchApi = async (endpoint: string, init?: RequestInit): Promise<Re
     headers.set('X-Device-Id', ownerDeviceId);
   }
 
+  if (init?.body && typeof init.body === 'string' && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
   const isNativeOrProd =
     Capacitor.isNativePlatform() ||
     (typeof window !== 'undefined' && (
