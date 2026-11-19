@@ -2,13 +2,24 @@ import { useState, useEffect, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Circle } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
-import { db } from '../../lib/firebase';
+import { auth, db } from '../../lib/firebase';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { User } from '../../types/models';
-import { RESTAURANT_LOCATION } from '../../lib/config';
+import { RESTAURANT_LOCATION, fetchApi, getWebSocketUrl } from '../../lib/config';
 import { restaurantIcon } from '../../lib/mapIcons';
 import { useStoreStatus } from '../../lib/useStoreStatus';
-import { supabase, type DeliveryLocation } from '../../lib/supabase';
+
+export interface DeliveryLocation {
+  delivery_partner_id: string;
+  latitude: number;
+  longitude: number;
+  heading?: number;
+  speed?: number;
+  accuracy?: number;
+  updated_at?: string;
+  online_status?: boolean;
+  active_order_id?: string | null;
+}
 
 // Fix leaflet icon issue in React
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -68,42 +79,162 @@ export default function OwnerLiveMap() {
     return () => unsubscribe();
   }, []);
 
-  // 2. Subscribe to real-time delivery telemetry from Supabase Realtime (authoritative rider telemetry layer)
+  // 2. Subscribe to real-time delivery telemetry via backend WebSocket & Redis streaming
   useEffect(() => {
-    // A. Initial fetch of active fleet locations from Supabase
-    supabase
-      .from('delivery_locations')
-      .select('*')
-      .then(({ data, error }) => {
-        if (!error && Array.isArray(data)) {
-          const map: Record<string, any> = {};
-          data.forEach((loc: DeliveryLocation) => {
-            map[loc.delivery_partner_id] = loc;
-          });
-          setTelemetryMap(map);
-        }
-      });
+    let isUnmounted = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: any = null;
+    let pollingInterval: any = null;
 
-    // B. Realtime subscription to live coordinates streaming from rider apps
-    const channel = supabase
-      .channel('owner-live-fleet-map')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'delivery_locations' },
-        (payload) => {
-          const newRecord = payload.new as DeliveryLocation;
-          if (newRecord && newRecord.delivery_partner_id) {
-            setTelemetryMap((prev) => ({
-              ...prev,
-              [newRecord.delivery_partner_id]: newRecord,
-            }));
+    // A. Fetch active driver fleet coordinates from backend REST/Redis endpoint
+    const fetchFleetTelemetry = async () => {
+      try {
+        const res = await fetchApi('/api/tracking/active-drivers');
+        if (res.ok) {
+          const json = await res.json();
+          const list = Array.isArray(json) ? json : (json.data || []);
+          if (Array.isArray(list)) {
+            const map: Record<string, any> = {};
+            list.forEach((item: any) => {
+              const partnerId = item.deliveryPartnerId || item.delivery_partner_id || item.id;
+              if (partnerId) {
+                map[partnerId] = {
+                  delivery_partner_id: partnerId,
+                  latitude: item.lat ?? item.latitude,
+                  longitude: item.lng ?? item.longitude,
+                  speed: item.speed || 0,
+                  heading: item.heading ?? item.bearing ?? 0,
+                  accuracy: item.accuracy ?? 5,
+                  updated_at: item.timestamp || item.updated_at || item.last_updated || new Date().toISOString(),
+                  online_status: item.status === 'ONLINE' || item.online_status !== false,
+                  active_order_id: item.orderId || item.active_order_id || null
+                };
+              }
+            });
+            if (!isUnmounted) {
+              setTelemetryMap((prev) => ({ ...prev, ...map }));
+            }
+            return;
           }
         }
-      )
-      .subscribe();
+
+        // Secondary fallback to /api/tracking/locations/active or /api/tracking/riders
+        const fallbackRes = await fetchApi('/api/tracking/locations/active');
+        if (fallbackRes.ok) {
+          const raw = await fallbackRes.json();
+          const list = Array.isArray(raw) ? raw : (raw.data || []);
+          if (Array.isArray(list)) {
+            const map: Record<string, any> = {};
+            list.forEach((item: any) => {
+              const partnerId = item.delivery_partner_id || item.deliveryPartnerId || item.id;
+              if (partnerId) {
+                map[partnerId] = {
+                  delivery_partner_id: partnerId,
+                  latitude: item.latitude ?? item.lat,
+                  longitude: item.longitude ?? item.lng,
+                  speed: item.speed || 0,
+                  heading: item.bearing ?? item.heading ?? 0,
+                  accuracy: item.accuracy ?? 5,
+                  updated_at: item.updated_at || item.last_updated || new Date().toISOString(),
+                  online_status: item.online_status !== false,
+                  active_order_id: item.active_order_id || item.orderId || null
+                };
+              }
+            });
+            if (!isUnmounted) {
+              setTelemetryMap((prev) => ({ ...prev, ...map }));
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[OwnerLiveMap] Telemetry fetch notice:', err);
+      }
+    };
+
+    fetchFleetTelemetry();
+    // 15s heartbeat polling keeps map resilient if WebSocket reconnects
+    pollingInterval = setInterval(fetchFleetTelemetry, 15000);
+
+    // B. Realtime WebSocket subscription to backend live telemetry stream (<5ms latency)
+    const connectWs = () => {
+      try {
+        const wsUrl = getWebSocketUrl();
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = async () => {
+          try {
+            const token = await auth.currentUser?.getIdToken();
+            if (token && ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'auth', token }));
+            }
+            if (ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'register_branch', branchId: 'main_branch' }));
+            }
+          } catch (authErr) {
+            console.warn('[OwnerLiveMap] WS auth notice:', authErr);
+          }
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (
+              (payload.type === 'driver.location_update' ||
+               payload.type === 'fleet_location_update' ||
+               payload.type === 'driver_location') &&
+              payload.data
+            ) {
+              const loc = payload.data;
+              const partnerId = loc.deliveryPartnerId || loc.delivery_partner_id;
+              const lat = loc.lat ?? loc.latitude;
+              const lng = loc.lng ?? loc.longitude;
+              if (partnerId && lat !== undefined && lng !== undefined) {
+                setTelemetryMap((prev) => ({
+                  ...prev,
+                  [partnerId]: {
+                    delivery_partner_id: partnerId,
+                    latitude: Number(lat),
+                    longitude: Number(lng),
+                    speed: Number(loc.speed || 0),
+                    heading: Number(loc.heading ?? loc.bearing ?? 0),
+                    accuracy: Number(loc.accuracy || 5),
+                    updated_at: loc.timestamp ? String(loc.timestamp) : new Date().toISOString(),
+                    online_status: loc.status === 'ONLINE' || loc.online_status !== false,
+                    active_order_id: loc.orderId || loc.active_order_id || null,
+                  },
+                }));
+              }
+            }
+          } catch (err) {
+            // Non-JSON frame ignored
+          }
+        };
+
+        ws.onerror = (err) => {
+          console.warn('[OwnerLiveMap] WS telemetry connection notice:', err);
+        };
+
+        ws.onclose = () => {
+          if (!isUnmounted) {
+            reconnectTimer = setTimeout(connectWs, 5000);
+          }
+        };
+      } catch (wsErr) {
+        console.warn('[OwnerLiveMap] WS init exception:', wsErr);
+      }
+    };
+
+    connectWs();
 
     return () => {
-      supabase.removeChannel(channel);
+      isUnmounted = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pollingInterval) clearInterval(pollingInterval);
+      if (ws) {
+        try {
+          ws.close();
+        } catch {}
+      }
     };
   }, []);
 

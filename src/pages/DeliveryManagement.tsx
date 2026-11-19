@@ -597,7 +597,7 @@ export default function DeliveryManagement() {
                 <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Customer Destination
               </span>
             </div>
-            <span className="text-slate-500 text-[10px]">Real-time GPS coordinates stream via Firestore & Supabase</span>
+            <span className="text-slate-500 text-[10px]">Real-time GPS coordinates stream via Backend WebSocket & Redis</span>
           </div>
         </div>
 

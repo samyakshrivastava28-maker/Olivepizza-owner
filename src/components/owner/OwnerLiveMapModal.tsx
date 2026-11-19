@@ -2,16 +2,16 @@
  * OwnerLiveMapModal — Real-time 3D rider tracking for the Owner panel
  *
  * Opens as a full-screen modal when the "Track Live" button is clicked
- * on an active order in OwnerOrders. Subscribes to Supabase Realtime
- * delivery_locations and renders the rider + restaurant + customer on
+ * on an active order in OwnerOrders. Subscribes to the backend WebSocket
+ * and Redis live telemetry stream and renders the rider + restaurant + customer on
  * a MapLibre 3D map in real-time.
  */
 
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, MapPin, Navigation, Clock, Zap, RefreshCw } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
-import { RESTAURANT_LOCATION } from '../../lib/config';
+import { auth } from '../../lib/firebase';
+import { RESTAURANT_LOCATION, fetchApi, getWebSocketUrl } from '../../lib/config';
 import UniversalMap3D from '../map/UniversalMap3D';
 import type { MapMarker } from '../map/UniversalMap3D';
 
@@ -48,7 +48,7 @@ export default function OwnerLiveMapModal({ isOpen, onClose, order }: OwnerLiveM
   const [riderLocation, setRiderLocation] = useState<RiderLocation | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [isStale, setIsStale] = useState(false);
-  const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const staleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Build markers ──────────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ export default function OwnerLiveMapModal({ isOpen, onClose, order }: OwnerLiveM
     });
   }
 
-  // ── Subscribe to Supabase Realtime ─────────────────────────────────────────
+  // ── Subscribe to Backend WebSocket & Redis Telemetry ─────────────────────────
   const markStale = useCallback(() => {
     setIsStale(true);
   }, []);
@@ -92,54 +92,153 @@ export default function OwnerLiveMapModal({ isOpen, onClose, order }: OwnerLiveM
   useEffect(() => {
     if (!isOpen || !order.deliveryPartnerId) return;
 
-    // Initial fetch
+    let isUnmounted = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: any = null;
+    let pollingInterval: any = null;
+
+    // A. Initial fetch via backend REST API (Redis / Tracking service)
     const fetchInitial = async () => {
-      const { data } = await supabase
-        .from('delivery_locations')
-        .select('*')
-        .eq('delivery_partner_id', order.deliveryPartnerId)
-        .single();
-      if (data) {
-        setRiderLocation(data);
-        setLastUpdate(new Date());
-        setIsStale(false);
+      try {
+        // 1. Try order tracking endpoint
+        const orderRes = await fetchApi(`/api/tracking/order/${order.id}`);
+        if (orderRes.ok) {
+          const data = await orderRes.json();
+          if (data && data.partner_lat != null && data.partner_lng != null) {
+            if (!isUnmounted) {
+              setRiderLocation({
+                latitude: Number(data.partner_lat),
+                longitude: Number(data.partner_lng),
+                heading: data.heading != null ? Number(data.heading) : 0,
+                speed: data.speed != null ? Number(data.speed) : 0,
+                last_updated: data.last_updated || new Date().toISOString(),
+                online_status: true,
+              });
+              setLastUpdate(new Date());
+              setIsStale(false);
+            }
+            return;
+          }
+        }
+
+        // 2. Fallback to direct rider location endpoint
+        if (order.deliveryPartnerId) {
+          const partnerRes = await fetchApi(`/api/tracking/location/${order.deliveryPartnerId}`);
+          if (partnerRes.ok) {
+            const pData = await partnerRes.json();
+            const lat = pData.latitude ?? pData.lat;
+            const lng = pData.longitude ?? pData.lng;
+            if (lat != null && lng != null && !isUnmounted) {
+              setRiderLocation({
+                latitude: Number(lat),
+                longitude: Number(lng),
+                heading: pData.heading ?? pData.bearing ?? 0,
+                speed: pData.speed || 0,
+                last_updated: pData.updated_at || pData.last_updated || new Date().toISOString(),
+                online_status: pData.online_status !== false,
+              });
+              setLastUpdate(new Date());
+              setIsStale(false);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[OwnerLiveMapModal] Initial telemetry fetch notice:', err);
       }
     };
+
     fetchInitial();
+    // 10s resilient polling backup while modal is open
+    pollingInterval = setInterval(fetchInitial, 10000);
 
-    // Realtime subscription
-    const channel = supabase
-      .channel(`owner-track-${order.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'delivery_locations',
-          filter: `delivery_partner_id=eq.${order.deliveryPartnerId}`,
-        },
-        (payload) => {
-          const row = payload.new as RiderLocation;
-          setRiderLocation(row);
-          setLastUpdate(new Date());
-          setIsStale(false);
+    // B. Realtime WebSocket subscription to backend live tracking stream (<5ms latency)
+    const connectWs = () => {
+      try {
+        const wsUrl = getWebSocketUrl();
+        ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
 
-          // Reset stale timer — if no update in 30s, show stale indicator
-          if (staleTimerRef.current) clearTimeout(staleTimerRef.current);
-          staleTimerRef.current = setTimeout(markStale, 30_000);
-        }
-      )
-      .subscribe();
+        ws.onopen = async () => {
+          try {
+            const token = await auth.currentUser?.getIdToken();
+            if (token && ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'auth', token }));
+            }
+            if (ws?.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'subscribe_order', orderId: order.id }));
+            }
+          } catch (authErr) {
+            console.warn('[OwnerLiveMapModal] WS auth notice:', authErr);
+          }
+        };
 
-    channelRef.current = channel;
+        ws.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (
+              (payload.type === 'driver.location_update' ||
+               payload.type === 'fleet_location_update' ||
+               payload.type === 'driver_location') &&
+              payload.data
+            ) {
+              const row = payload.data;
+              const partnerId = row.deliveryPartnerId || row.delivery_partner_id;
+              const matchesOrder = row.orderId === order.id;
+              const matchesPartner = order.deliveryPartnerId && partnerId === order.deliveryPartnerId;
 
-    // Set initial stale timer
+              if (matchesOrder || matchesPartner) {
+                const lat = row.lat ?? row.latitude;
+                const lng = row.lng ?? row.longitude;
+                if (lat != null && lng != null && !isUnmounted) {
+                  setRiderLocation({
+                    latitude: Number(lat),
+                    longitude: Number(lng),
+                    heading: row.heading !== undefined ? Number(row.heading) : null,
+                    speed: row.speed !== undefined ? Number(row.speed) : null,
+                    last_updated: row.timestamp ? String(row.timestamp) : new Date().toISOString(),
+                    online_status: row.status !== 'OFFLINE' && row.online_status !== false,
+                  });
+                  setLastUpdate(new Date());
+                  setIsStale(false);
+
+                  // Reset stale timer — if no update in 30s, show stale indicator
+                  if (staleTimerRef.current) clearTimeout(staleTimerRef.current);
+                  staleTimerRef.current = setTimeout(markStale, 30_000);
+                }
+              }
+            }
+          } catch (err) {
+            // Ignore non-JSON frames
+          }
+        };
+
+        ws.onclose = () => {
+          if (!isUnmounted && isOpen) {
+            reconnectTimer = setTimeout(connectWs, 5000);
+          }
+        };
+      } catch (wsErr) {
+        console.warn('[OwnerLiveMapModal] WS connection notice:', wsErr);
+      }
+    };
+
+    connectWs();
     staleTimerRef.current = setTimeout(markStale, 30_000);
 
     return () => {
-      channel.unsubscribe();
+      isUnmounted = true;
       if (staleTimerRef.current) clearTimeout(staleTimerRef.current);
-      channelRef.current = null;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pollingInterval) clearInterval(pollingInterval);
+      if (ws) {
+        try {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'unsubscribe_order', orderId: order.id }));
+          }
+          ws.close();
+        } catch {}
+        wsRef.current = null;
+      }
     };
   }, [isOpen, order.deliveryPartnerId, order.id, markStale]);
 

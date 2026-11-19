@@ -11,8 +11,8 @@ export const MAX_DELIVERY_RADIUS_KM = 15;
 export const OPENING_HOUR = 12; // 12 PM (noon)
 export const CLOSING_HOUR = 24; // 12 AM (midnight)
 
-// In production, the client queries the dedicated Owner backend API on Render.
-export const PRODUCTION_BACKEND_URL = "https://olivepizza-owner.onrender.com";
+// In production, the client queries the dedicated standalone backend API on Render.
+export const PRODUCTION_BACKEND_URL = "https://olive-pizza-backend.onrender.com";
 
 // Development fallback
 const DEV_BACKEND_URL = "http://localhost:5000";
@@ -62,6 +62,17 @@ export function getApiUrl(endpoint: string = ''): string {
 }
 
 export const API_BASE_URL = getApiBaseUrl();
+
+export const getWebSocketUrl = (): string => {
+  const base = getApiBaseUrl();
+  if (base.startsWith('https://')) return base.replace('https://', 'wss://') + '/ws';
+  if (base.startsWith('http://')) return base.replace('http://', 'ws://') + '/ws';
+  if (typeof window !== 'undefined' && window.location.host) {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}/ws`;
+  }
+  return 'wss://olive-pizza-backend.onrender.com/ws';
+};
 
 /**
  * Authenticated fetch helper for the Owner platform.
